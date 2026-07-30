@@ -13,7 +13,8 @@
 ```
 push → build-daemon (rustup + cargo-ndk 交叉编译 aarch64, API 30)
      → package-module (注入二进制 → 修权限 → zip 打包)
-     → Artifact 下载 / 手动建 Release 时自动附加 zip
+     → Nightly 滚动 Release（单层 zip，主下载渠道）
+     → Artifact 留档（套娃 zip，仅 CI 调试用）/ 手动建 Release 时自动附加 zip
 ```
 
 **本机零工具链要求**：不需要 NDK、不需要 Rust，push 即编译。
@@ -57,8 +58,11 @@ git push -u origin main
 
 ### 发布版本
 
+日常构建无需任何操作：push main 后 CI 自动滚动更新 **Nightly 预发布**
+（`releases/tag/nightly`，asset 为单层模块 zip，KSU 直接刷入）。
+
 ```sh
-# 方式一（推荐）：网页上 Draft Release → 选 tag（如 v0.1.0-l0）→ 发布
+# 正式发版（方式一，推荐）：网页上 Draft Release → 选 tag（如 v0.1.0-l0）→ 发布
 #   workflow 的 release 事件触发，自动把模块 zip 附加到 Release
 # 方式二：命令行（需 gh）
 gh release create v0.1.0-l0 --title "Sundown v0.1.0-l0" --notes "L0 首个构建"
@@ -88,7 +92,7 @@ cp target/release/sundownd ../module/system/bin/sundownd
 | 改代码/文档 | 工作区 `Sundown/`（Operit 附着工作区直接编辑） |
 | 提交 | 工作区仓库（已 init，身份已配）或同步到 Termux 后提交 |
 | 编译验证 | push 到 GitHub → Actions（主力）；或 Termux cargo build（应急） |
-| 真机刷入 | 下载 sundown-module artifact → KSU 管理器本地安装 |
+| 真机刷入 | Nightly Release 下载单层模块 zip → KSU 管理器本地安装 |
 
 ### Artifact 产物形态（为什么"压缩包里还有压缩包"）
 
@@ -106,8 +110,9 @@ sundownd-aarch64.zip        ← artifact 容器
 边界：
 - 套娃由 artifact 机制决定，与 upload-artifact v4/v7 无关，无法关闭
 - **KSU 管理器本地安装时必须选内层的 `sundown-vX.Y.Z.zip`**
-- 正式发布走 Release（action-gh-release 把模块 zip 直接作为 asset 附加），
-  从 Release 页面下载得到的是**单层 zip，无套娃**——对外分发一律用 Release
+- **日常下载走 Nightly 滚动 Release**（每次 push main 自动更新，asset 为单层 zip）：
+  `https://github.com/SunsetRNE/Sundown/releases/tag/nightly`
+- 正式发版手动建 Release（tag 如 v0.1.0-l0），同样单层；Artifacts 仅作 CI 调试留档
 
 ## 边界
 

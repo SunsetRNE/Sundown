@@ -8,6 +8,9 @@ on:
   release:
     types: [created]
 
+permissions:
+  contents: write # rolling Nightly Release 需要（新仓库 GITHUB_TOKEN 默认只读）
+
 env:
   CARGO_TERM_COLOR: always
   API_LEVEL: "30" # 与 customize.sh 最低要求 API 30 对齐
@@ -82,6 +85,20 @@ jobs:
           name: sundown-module
           path: sundown-*.zip
           retention-days: 30
+
+      - name: 滚动 Nightly Release（单层 zip 下载渠道）
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: nightly
+          name: Sundown Nightly（CI 自动构建）
+          body: |
+            每次 push main 自动滚动更新，永远指向最新成功构建。
+            **sundown-vX.Y.Z.zip 即单层 KSU 模块包**，管理器本地安装直接选它。
+            （Actions Artifacts 渠道下载为双层套娃 zip；本渠道为单层，日常使用走这里。）
+          prerelease: true
+          overwrite_files: true
+          files: sundown-*.zip
 
       - name: 发布到 GitHub Release（手动创建 Release 时触发）
         if: github.event_name == 'release'

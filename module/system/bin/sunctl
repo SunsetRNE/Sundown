@@ -8,6 +8,7 @@ SUNDOWN_DIR="/data/adb/sundown"
 DAEMON_PATH="$MODBASE/system/bin/sundownd"
 INSTALLED_META="$SUNDOWN_DIR/update/installed.json"
 READY_MARKER="$SUNDOWN_DIR/update/daemon.ready"
+SOCK_PATH="$SUNDOWN_DIR/sundownd.sock"
 LOG_DIR="$SUNDOWN_DIR/logs"
 VERSION="0.1.0-l0"
 
@@ -15,6 +16,28 @@ VERSION="0.1.0-l0"
 
 json_string() {
     sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -n 1
+}
+
+# 从 stdin 的单行 JSON 提取字符串字段
+json_str_in() {
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1
+}
+
+# 从 stdin 的单行 JSON 提取数字字段
+json_int_in() {
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" | head -n 1
+}
+
+# 经 daemon 控制 socket 查询（行协议：发一行命令，收一行 JSON）
+# 用法: sock_query status  →  stdout 输出应答 JSON；失败返回非零
+sock_query() {
+    [ -S "$SOCK_PATH" ] || return 1
+    command -v nc >/dev/null 2>&1 || return 1
+    resp="$(printf '%s\n' "$1" | nc -U -w 2 "$SOCK_PATH" 2>/dev/null | head -n 1)"
+    case "$resp" in
+        \{*\}) printf '%s' "$resp"; return 0 ;;
+        *)     return 1 ;;
+    esac
 }
 
 daemon_pid() {
@@ -45,11 +68,39 @@ cmd_status() {
     json_out=0
     [ "$1" = "--json" ] && json_out=1
 
+    provider="$(zygisk_provider)"
+    boot_completed="$(getprop sys.boot_completed)"
+
+    # 数据源 A（优先）：daemon 控制 socket —— 真实运行态
+    sock_json="$(sock_query status)"
+    if [ -n "$sock_json" ]; then
+        # daemon 不掌握的字段由本地探测补全（--json 契约只增不改）
+        sock_json="$(printf '%s' "$sock_json" | sed "s/\"zygisk_provider\":null/\"zygisk_provider\":\"$provider\"/")"
+        sock_json="$(printf '%s' "$sock_json" | sed "s/}$/,\"boot_completed\":\"$boot_completed\"}/")"
+
+        if [ "$json_out" = "1" ]; then
+            printf '%s\n' "$sock_json"
+        else
+            ver="$(printf '%s' "$sock_json" | json_str_in version)"
+            pid="$(printf '%s' "$sock_json" | json_int_in daemon_pid)"
+            uptime="$(printf '%s' "$sock_json" | json_int_in uptime_s)"
+            reloads="$(printf '%s' "$sock_json" | json_int_in config_reloads)"
+            conns="$(printf '%s' "$sock_json" | json_int_in connections_served)"
+            echo "Sundown 状态（数据源: daemon socket）"
+            echo "  模块版本:      $ver"
+            echo "  守护进程:      ✅ 运行中 (PID: $pid, uptime: ${uptime}s)"
+            echo "  配置热加载:    ${reloads} 次 | 控制连接: ${conns} 次"
+            echo "  Zygisk 提供方: $provider"
+            echo "  L1 探针桩:     未实现（L1 阶段交付）"
+            echo "  L2 探针 dex:   未实现（L2 阶段交付）"
+        fi
+        return 0
+    fi
+
+    # 数据源 B（降级）：文件系统探测 —— daemon 未运行/未就绪时的视图
     pid="$(daemon_pid)"
     running=0; [ -n "$pid" ] && running=1
-    provider="$(zygisk_provider)"
     ready=0; [ -f "$READY_MARKER" ] && ready=1
-    boot_completed="$(getprop sys.boot_completed)"
 
     if [ "$json_out" = "1" ]; then
         cat <<EOF
@@ -66,7 +117,7 @@ cmd_status() {
 }
 EOF
     else
-        echo "Sundown 状态"
+        echo "Sundown 状态（数据源: 文件探测，daemon 未连接）"
         echo "  模块版本:      $(daemon_version)"
         if [ "$running" = "1" ]; then
             echo "  守护进程:      ✅ 运行中 (PID: $pid, ready=$ready)"

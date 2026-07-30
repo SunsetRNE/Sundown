@@ -57,8 +57,9 @@ Sundown/
 - [x] `sundownd` Rust 最小实现（daemon/：ready 标记 + socket 控制面 + inotify 热加载）
 - [x] Git 仓库初始化 + GitHub Actions CI（docs/git-and-ci.md：push 即编译出模块 zip）
 - [x] 推送远端仓库 github.com/SunsetRNE/Sundown + CI 首跑成功（模块 zip artifact 已产出）
-- [ ] daemon 真机冒烟（下载 sundown-module artifact 刷入 → sunctl status / socket 验证）
-- [ ] sunctl status 切换到 socket 数据源（当前为进程/文件探测）
+- [x] CI 升级 Node 24 actions + Nightly 滚动 Release（单层模块 zip 主下载渠道）
+- [x] sunctl status 切换 socket 数据源（nc -U 行协议，失败降级文件探测）
+- [ ] daemon 真机冒烟（Nightly Release 下载单层 zip 刷入 → sunctl status / socket 验证）
 - [ ] L1：`libsunprobe.so`（基于 zygisk-research/5ec1cff 模板）
 - [ ] L2：`probe.dex` + LSPlant 集成 + 热切换
 - [ ] L3：策略引擎与情景预设
