@@ -86,12 +86,18 @@ cmd_status() {
             uptime="$(printf '%s' "$sock_json" | json_int_in uptime_s)"
             reloads="$(printf '%s' "$sock_json" | json_int_in config_reloads)"
             conns="$(printf '%s' "$sock_json" | json_int_in connections_served)"
+            stub="$(printf '%s' "$sock_json" | json_int_in probe_stub_loaded)"
+            phash="$(printf '%s' "$sock_json" | json_str_in probe_stub_build_hash)"
             echo "Sundown 状态（数据源: daemon socket）"
             echo "  模块版本:      $ver"
             echo "  守护进程:      ✅ 运行中 (PID: $pid, uptime: ${uptime}s)"
             echo "  配置热加载:    ${reloads} 次 | 控制连接: ${conns} 次"
             echo "  Zygisk 提供方: $provider"
-            echo "  L1 探针桩:     未实现（L1 阶段交付）"
+            if [ "$stub" = "1" ]; then
+                echo "  L1 探针桩:     ✅ 已注入 system_server (hash: $phash)"
+            else
+                echo "  L1 探针桩:     ⏸ 已打包入模块，待重启后激活"
+            fi
             echo "  L2 探针 dex:   未实现（L2 阶段交付）"
         fi
         return 0
@@ -125,7 +131,7 @@ EOF
             echo "  守护进程:      ❌ 未运行"
         fi
         echo "  Zygisk 提供方: $provider"
-        echo "  L1 探针桩:     未实现（L1 阶段交付）"
+        echo "  L1 探针桩:     ⏸ 已打包入模块，待重启后激活"
         echo "  L2 探针 dex:   未实现（L2 阶段交付）"
     fi
     [ "$running" = "1" ] && return 0 || return 1

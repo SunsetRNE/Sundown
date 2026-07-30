@@ -2,6 +2,9 @@
 daemon/target/
 target/
 
+# C++ 探针桩构建产物
+probe/build/
+
 # 打包产物
 *.zip
 

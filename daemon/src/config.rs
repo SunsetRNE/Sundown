@@ -11,6 +11,8 @@ use crate::{loge, logi, logw, paths};
 /// 由 socket 的 reload-config 命令调用：与 inotify 路径共用同一个重载入口。
 pub fn request_reload(state: &Arc<DaemonState>) {
     state.bump_config_reloads();
+    // 模块 zip 更新后 probe.hash 可能变化，同步重读期望 hash
+    state.refresh_expected_hash();
     logi!(
         "配置重载触发（手动），累计 {} 次",
         state.config_reloads.load(std::sync::atomic::Ordering::Relaxed)
@@ -42,7 +44,8 @@ pub fn watch_conf(state: Arc<DaemonState>) {
             let len = libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
             if len <= 0 {
                 // EINTR 等：继续；fd 异常则退出
-                let err = *libc::__errno();
+                // （用 std 包装而非 libc::__errno()：glibc 主机与 bionic 均可编译）
+                let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
                 if err == libc::EINTR {
                     continue;
                 }

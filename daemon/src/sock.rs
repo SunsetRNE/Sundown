@@ -1,13 +1,14 @@
 //! Unix socket 控制面：/data/adb/sundown/sundownd.sock
 //!
-//! 协议（L0）：一行一个命令（UTF-8，\n 结尾），应答为一行 JSON。
-//!   ping           -> {"ok":1,"pong":1}
-//!   status         -> 见 state::DaemonState::status_json()
-//!   reload-config  -> 触发一次 conf/ 重载（与 inotify 自动热加载等价）
-//!   stop           -> 优雅退出（service.sh 看门狗会按策略重启）
+//! 协议（L0/L1）：一行一个命令（UTF-8，\n 结尾），应答为一行 JSON。
+//!   ping                 -> {"ok":1,"pong":1}
+//!   status               -> 见 state::DaemonState::status_json()
+//!   reload-config        -> 触发一次 conf/ 重载（与 inotify 自动热加载等价）
+//!   stop                 -> 优雅退出（service.sh 看门狗会按策略重启）
+//!   hello-probe <hash>   -> L1 桩上报 build hash（见 probe_response，含记录副作用）
+//!   probe-query          -> 同 hello-probe 的应答，但只查询不记录（L2 dex 层轮询用）
 //!
-//! L1/L2 扩展点：握手命令 hello-probe（build hash 上报）、push-dex（probe.dex 推送），
-//! 协议保持行分隔，新增命令即可，不破坏兼容。
+//! L2 扩展点：push-dex（probe.dex 推送），协议保持行分隔，新增命令即可，不破坏兼容。
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -64,7 +65,10 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<(
     if n == 0 {
         return Ok(());
     }
-    let cmd = line.trim();
+    // 命令与参数：首个空格分隔（hello-probe <hash>）
+    let mut parts = line.trim().splitn(2, ' ');
+    let cmd = parts.next().unwrap_or("");
+    let arg = parts.next().unwrap_or("").trim();
 
     let resp = match cmd {
         "ping" => "{\"ok\":1,\"pong\":1}".to_string(),
@@ -73,6 +77,20 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<(
             crate::config::request_reload(&state);
             "{\"ok\":1,\"reloaded\":1}".to_string()
         }
+        "hello-probe" => {
+            if arg.is_empty() {
+                "{\"ok\":0,\"error\":\"hello-probe requires <build_hash>\"}".to_string()
+            } else {
+                state.record_probe(arg);
+                logi!(
+                    "探针桩握手: hash={}（期望: {}）",
+                    arg,
+                    state.expected_hash().as_deref().unwrap_or("<无 probe.hash>")
+                );
+                probe_response(&state)
+            }
+        }
+        "probe-query" => probe_response(&state),
         "stop" => {
             logi!("收到 stop 命令，优雅退出");
             writer.write_all(b"{\"ok\":1,\"stopping\":1}\n")?;
@@ -88,4 +106,29 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<(
     writer.write_all(resp.as_bytes())?;
     writer.write_all(b"\n")?;
     Ok(())
+}
+
+/// hello-probe / probe-query 的统一应答：
+/// 期望 hash 比对结果 + probe.dex 路径与存在性（L1 桩据此决定是否加载 dex）
+fn probe_response(state: &DaemonState) -> String {
+    let expected = state.expected_hash();
+    let reported = state.probe.lock().unwrap().as_ref().map(|p| p.build_hash.clone());
+    // hash_match 三态：1=匹配，0=不匹配，-1=无期望值可比（dev 场景）
+    let hash_match = match (&expected, &reported) {
+        (Some(e), Some(r)) if e == r => 1,
+        (Some(_), Some(_)) => 0,
+        _ => -1,
+    };
+    let expected_json = match &expected {
+        Some(h) => format!("\"{}\"", h),
+        None => "null".to_string(),
+    };
+    let dex_present = std::path::Path::new(paths::PROBE_DEX).exists();
+    format!(
+        "{{\"ok\":1,\"hash_match\":{},\"expected_hash\":{},\"dex_path\":\"{}\",\"dex_present\":{}}}",
+        hash_match,
+        expected_json,
+        paths::PROBE_DEX,
+        dex_present as i32,
+    )
 }

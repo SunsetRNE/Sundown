@@ -32,6 +32,11 @@ Sundown/
 │       ├── state.rs        # 共享状态 + status JSON（兼容 sunctl-spec）
 │       ├── sock.rs         # Unix socket 控制面（行协议）
 │       └── config.rs       # inotify conf/ 热加载（L3 接入点）
+├── probe/                  # libsunprobe.so C++ 源码（L1 探针桩）
+│   ├── CMakeLists.txt      # NDK 构建（arm64-v8a，-DPROBE_BUILD_HASH 注入）
+│   ├── README.md           # L1 定位铁律 / hash 闭环 / L2 契约 / SELinux 备忘
+│   ├── include/zygisk.hpp  # Zygisk API v4 头文件（模板同款）
+│   └── src/probe.cpp       # 桩：system_server 驻留 + hello-probe + dex 加载桥
 └── module/                 # KSU 模块（目录内容即模块 zip 内容）
     ├── module.prop         # id=sundown, author=SunsetREN
     ├── customize.sh        # 安装脚本（环境/ABI 检查、设备适配属性、ReZygisk 检测）
@@ -41,13 +46,14 @@ Sundown/
     ├── sepolicy.rule       # system_server ↔ root 域 socket 规则（L1 探针需要）
     ├── system.prop         # LMKD 保后台参数
     ├── system/bin/
-    │   ├── sundownd        # 【占位】守护进程二进制，L0 开发阶段交付
+    │   ├── sundownd        # 【占位】守护进程二进制，CI 打包时注入真实产物
     │   └── sunctl          # 控制 CLI（L0 shell 实现，命令面已定稿）
+    ├── zygisk/             # 【CI 生成】arm64-v8a.so（libsunprobe）+ probe.hash
     └── webroot/
         └── index.html      # KSU WebUI 仪表盘（L0 只读 + daemon/运行时控制）
 ```
 
-## 当前状态：L0 ✅（骨架 + daemon Rust 最小实现）
+## 当前状态：L0 ✅ ｜ L1 桩工程化 ✅（待真机验证）
 
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
@@ -60,7 +66,9 @@ Sundown/
 - [x] CI 升级 Node 24 actions + Nightly 滚动 Release（单层模块 zip 主下载渠道）
 - [x] sunctl status 切换 socket 数据源（nc -U 行协议，失败降级文件探测）
 - [ ] daemon 真机冒烟（Nightly Release 下载单层 zip 刷入 → sunctl status / socket 验证）
-- [ ] L1：`libsunprobe.so`（基于 zygisk-research/5ec1cff 模板）
+- [x] L1 桩工程化：`libsunprobe.so`（probe/：hello-probe hash 握手 + dex 加载桥，
+  daemon 协议面 hello-probe/probe-query，CI build-probe 注入 zygisk/arm64-v8a.so）
+- [ ] L1 真机验证（重启激活桩 → sunctl status 显示 probe_stub_loaded=1 + hash 匹配）
 - [ ] L2：`probe.dex` + LSPlant 集成 + 热切换
 - [ ] L3：策略引擎与情景预设
 

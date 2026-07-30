@@ -48,8 +48,10 @@ WebUI 仪表盘依赖以下字段，**任何实现变更必须向后兼容**（�
 ```
 
 - `daemon_pid`：daemon 未运行时为 `null`
-- `probe_stub_loaded` / `probe_dex_version`：L1/L2 阶段填入真实值；L0 恒为 `0` / `null`
-- L1 阶段将追加 `probe_stub_build_hash`（软重启 hash 验证闭环用）
+- `probe_stub_loaded`：L1 起为真实值（桩 hello-probe 上报后置 1）；socket 数据源专属，fs 降级时恒 0
+- `probe_stub_build_hash`：L1 起由 socket 数据源追加（桩上报的 build hash；未上报为 `null`），
+  软重启 hash 验证闭环见 probe/README.md
+- `probe_dex_version`：L2 阶段填入真实值；当前恒为 `null`
 
 ## `status` 数据源与 socket 通道
 
@@ -60,8 +62,10 @@ WebUI 仪表盘依赖以下字段，**任何实现变更必须向后兼容**（�
 | A | daemon socket | `nc -U /data/adb/sundown/sundownd.sock`（toybox nc，行协议） | 真实 uptime / 热加载计数 / 连接计数 |
 | B | 文件探测 | pgrep + ready 标记 + getprop | daemon 未运行/未就绪时的降级视图 |
 
-- socket 协议：一行一个命令，应答一行 JSON。L0 命令：`ping` / `status` / `reload-config` / `stop`；
-  L1/L2 预留：`hello-probe` / `push-dex`
+- socket 协议：一行一个命令，应答一行 JSON。命令面：
+  `ping` / `status` / `reload-config` / `stop`（L0）；
+  `hello-probe <hash>` / `probe-query`（L1，桩握手与查询）；
+  `push-dex`（L2 预留）
 - socket 应答比 CLI 契约**多** `release_no` / `uptime_s` / `config_reloads` / `connections_served`；
   `zygisk_provider` / `boot_completed` daemon 不掌握，由 sunctl 本地探测**补全**后输出
 - 文本输出标注当前数据源（`daemon socket` / `文件探测`）；`--json` 字段契约与退出码约定**不变**（只增不改）

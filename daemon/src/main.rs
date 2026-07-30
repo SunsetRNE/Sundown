@@ -47,6 +47,8 @@ fn ensure_dirs() -> std::io::Result<()> {
         paths::DATA_DIR,
         paths::LOG_DIR,
         paths::UPDATE_DIR,
+        paths::PROBE_DIR,
+        paths::PROBE_OAT_DIR,
     ] {
         std::fs::create_dir_all(d)?;
     }

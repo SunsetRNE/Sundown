@@ -48,9 +48,44 @@ jobs:
           path: daemon/target/aarch64-linux-android/release/sundownd
           retention-days: 30
 
+  build-probe:
+    name: 编译 libsunprobe.so (arm64-v8a)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 构建 L1 探针桩（runner 自带 NDK + CMake + Ninja）
+        working-directory: probe
+        run: |
+          HASH="${GITHUB_SHA::7}"
+          echo "PROBE_BUILD_HASH=$HASH"
+          cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK_LATEST_HOME}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-${{ env.API_LEVEL }} \
+            -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DPROBE_BUILD_HASH="$HASH"
+          cmake --build build
+          echo "$HASH" > build/probe.hash
+
+      - name: 校验产物
+        run: |
+          file probe/build/libsunprobe.so
+          ls -lh probe/build/libsunprobe.so
+          cat probe/build/probe.hash
+
+      - name: 上传探针桩与 hash
+        uses: actions/upload-artifact@v7
+        with:
+          name: libsunprobe-arm64-v8a
+          path: |
+            probe/build/libsunprobe.so
+            probe/build/probe.hash
+          retention-days: 30
+
   package-module:
     name: 打包 KSU 模块 zip
-    needs: build-daemon
+    needs: [build-daemon, build-probe]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -62,6 +97,19 @@ jobs:
           path: module/system/bin/
       # 注意：此时 module/system/bin/sundownd 的文本占位文件被真实二进制覆盖
       # （仅 CI 工作区，不提交；占位文件仍在 git 中保证脚本兼容）
+
+      - name: 下载探针桩并注入模块（zygisk 约定路径 + 期望 hash）
+        uses: actions/download-artifact@v8
+        with:
+          name: libsunprobe-arm64-v8a
+          path: probe/build/
+
+      - name: 布置 zygisk 资产
+        run: |
+          mkdir -p module/zygisk
+          cp probe/build/libsunprobe.so module/zygisk/arm64-v8a.so
+          cp probe/build/probe.hash module/zygisk/probe.hash
+          ls -lh module/zygisk/
 
       - name: 修正权限
         run: |
@@ -79,12 +127,8 @@ jobs:
           cd ..
           ls -lh sundown-*.zip
 
-      - name: 上传模块 zip
-        uses: actions/upload-artifact@v7
-        with:
-          name: sundown-module
-          path: sundown-*.zip
-          retention-days: 30
+      # 模块 zip 不再上传 artifact：artifact 下载强制双层套娃（机制无法关闭），
+      # 单层模块包统一走下方 Nightly 滚动 Release 渠道，避免误下载。
 
       - name: 滚动 Nightly Release（单层 zip 下载渠道）
         if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
