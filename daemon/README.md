@@ -24,7 +24,8 @@ rustup target add aarch64-linux-android
 
 # 构建
 cd daemon
-cargo ndk -t arm64-v8a -p 30 build --release   # 方式 A（推荐，API 30 对齐模块最低要求）
+cargo ndk -t arm64-v8a --platform 30 build --release   # 方式 A（推荐，API 30 对齐模块最低要求）
+# 注意：cargo-ndk v4 起 -p 表示 cargo 包选择，API 级别必须用 --platform
 
 # 产物拷入模块
 cp target/aarch64-linux-android/release/sundownd ../module/system/bin/sundownd

@@ -31,7 +31,7 @@ jobs:
 
       - name: 构建 sundownd (release)
         working-directory: daemon
-        run: cargo ndk -t arm64-v8a -p ${{ env.API_LEVEL }} build --release
+        run: cargo ndk -t arm64-v8a --platform ${{ env.API_LEVEL }} build --release
 
       - name: 校验产物
         run: |
