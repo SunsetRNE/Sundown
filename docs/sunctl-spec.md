@@ -66,6 +66,13 @@ WebUI 仪表盘依赖以下字段，**任何实现变更必须向后兼容**（�
   `ping` / `status` / `reload-config` / `stop`（L0）；
   `hello-probe <hash>` / `probe-query`（L1，桩握手与查询）；
   `push-dex`（L2 预留）
+- **双通道**（同一套行协议，daemon 同时监听）：
+  - 文件 socket `/data/adb/sundown/sundownd.sock` —— root 管理面（sunctl/WebUI）。
+    注意 `/data/adb` 为 `drwx------ root root`，**system_server(uid 1000) 在 DAC 层
+    即被 EACCES**（无 avc，纯文件权限拒绝），此通道只服务 root 客户端；
+  - abstract socket `sundown_probe`（abstract namespace，无文件路径）—— L1 桩 /
+    L2 dex 层通道。无 DAC 路径穿越问题，SELinux `connectto ksu` 已由 sepolicy.rule
+    放行。Java 侧连接方式：`LocalSocketAddress("sundown_probe", Namespace.ABSTRACT)`
 - socket 应答比 CLI 契约**多** `release_no` / `uptime_s` / `config_reloads` / `connections_served`；
   `zygisk_provider` / `boot_completed` daemon 不掌握，由 sunctl 本地探测**补全**后输出
 - 文本输出标注当前数据源（`daemon socket` / `文件探测`）；`--json` 字段契约与退出码约定**不变**（只增不改）

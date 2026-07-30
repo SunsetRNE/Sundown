@@ -1,4 +1,8 @@
-//! Unix socket 控制面：/data/adb/sundown/sundownd.sock
+//! Unix socket 控制面（双通道，同一套行协议）
+//!   1. 文件 socket：/data/adb/sundown/sundownd.sock —— root 管理面（sunctl/WebUI）
+//!   2. abstract socket：sundown_probe —— L1 桩 / L2 dex 层通道
+//!      （/data/adb 为 drwx------ root，system_server 在 DAC 层不可达文件路径；
+//!        abstract namespace 无文件系统路径，SELinux connectto ksu 已由 sepolicy 放行）
 //!
 //! 协议（L0/L1）：一行一个命令（UTF-8，\n 结尾），应答为一行 JSON。
 //!   ping                 -> {"ok":1,"pong":1}
@@ -11,6 +15,7 @@
 //! L2 扩展点：push-dex（probe.dex 推送），协议保持行分隔，新增命令即可，不破坏兼容。
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::io::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -18,12 +23,52 @@ use std::sync::Arc;
 use crate::state::DaemonState;
 use crate::{loge, logi, logw, paths};
 
+/// 绑定 Linux abstract namespace socket（sun_path[0] = '\0' + name）。
+/// std 的高级 abstract API 平台归属（std::os::linux vs android）易踩坑，
+/// 直接用 libc 手工构造，glibc 主机与 bionic 均可编译。
+fn bind_abstract(name: &str) -> std::io::Result<UnixListener> {
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = name.as_bytes();
+        if bytes.len() > addr.sun_path.len() - 1 {
+            libc::close(fd);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "abstract socket 名过长",
+            ));
+        }
+        // sun_path[0] 保持 0（abstract 标志），名字从 [1] 开始
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr() as *const libc::c_char,
+            addr.sun_path.as_mut_ptr().add(1),
+            bytes.len(),
+        );
+        let len = (std::mem::size_of::<libc::sa_family_t>() + 1 + bytes.len()) as libc::socklen_t;
+        if libc::bind(fd, &addr as *const _ as *const libc::sockaddr, len) < 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(e);
+        }
+        if libc::listen(fd, 16) < 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(e);
+        }
+        Ok(UnixListener::from_raw_fd(fd))
+    }
+}
+
 pub fn serve(state: Arc<DaemonState>, shutdown: Arc<AtomicBool>) -> std::io::Result<()> {
     // 清理陈旧 socket 文件
     let _ = std::fs::remove_file(paths::SOCKET_PATH);
 
     let listener = UnixListener::bind(paths::SOCKET_PATH)?;
-    // root:root 0660 —— sunctl（root）与未来 L1 探针（system_server，走 sepolicy 放行）可连
+    // root:root 0660 —— sunctl（root）管理面；桩不走这里（DAC 不可达），见 abstract 通道
     unsafe {
         let c_path = std::ffi::CString::new(paths::SOCKET_PATH).unwrap();
         libc::chmod(c_path.as_ptr(), 0o660);
@@ -32,24 +77,34 @@ pub fn serve(state: Arc<DaemonState>, shutdown: Arc<AtomicBool>) -> std::io::Res
     listener.set_nonblocking(true)?;
     logi!("控制 socket 已监听: {}", paths::SOCKET_PATH);
 
+    // L1 桩 / L2 dex 通道：abstract namespace socket（无文件路径，system_server 可直连）
+    let probe_listener = bind_abstract(paths::PROBE_ABSTRACT_SOCK)?;
+    probe_listener.set_nonblocking(true)?;
+    logi!("探针 socket 已监听（abstract）: @{}", paths::PROBE_ABSTRACT_SOCK);
+
     while !shutdown.load(Ordering::Relaxed) {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                state.bump_connections();
-                let st = Arc::clone(&state);
-                std::thread::spawn(move || {
-                    if let Err(e) = handle_conn(stream, st) {
-                        logw!("连接处理异常: {}", e);
-                    }
-                });
+        let mut idle = true;
+        for l in [&listener, &probe_listener] {
+            match l.accept() {
+                Ok((stream, _)) => {
+                    idle = false;
+                    state.bump_connections();
+                    let st = Arc::clone(&state);
+                    std::thread::spawn(move || {
+                        if let Err(e) = handle_conn(stream, st) {
+                            logw!("连接处理异常: {}", e);
+                        }
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => {
+                    loge!("accept 失败: {}", e);
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            Err(e) => {
-                loge!("accept 失败: {}", e);
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
+        }
+        if idle {
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
     Ok(())

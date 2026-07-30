@@ -7,8 +7,19 @@
 因此桩内只保留三件稳定职责，一切可变逻辑下沉 L2 `probe.dex`：
 
 1. **识别 system_server 并驻留**（`preAppSpecialize` 对普通 app 立即 `DLCLOSE`，零侵入）
-2. **hello-probe 握手**：连接 `sundownd.sock` 上报编译期 build hash（带重试，见下节）
+2. **hello-probe 握手**：连接 daemon 上报编译期 build hash（带重试，见下节）
 3. **加载 probe.dex 并调用入口**（L2 契约，见下），随后控制权完全移交 dex 层
+
+## 桩 ↔ daemon 通道：abstract namespace socket（踩坑定稿）
+
+桩运行在 system_server(uid 1000) 内，**不能**用文件 socket 连 daemon：
+`/data/adb` 是 `drwx------ root root`，DAC 层（传统文件权限）直接 EACCES——
+不走 SELinux，所以 **avc 日志里看不到任何痕迹**，极易误判为策略缺失。
+
+定稿通道：**abstract namespace socket `sundown_probe`**（无文件系统路径）。
+daemon 双监听：文件 socket 服务 root 管理面（sunctl/WebUI），abstract 服务桩/dex。
+SELinux 侧 `allow system_server ksu unix_stream_socket connectto`（sepolicy.rule）
+已覆盖该通道；Java 侧（L2 dex）用 `LocalSocketAddress(..., Namespace.ABSTRACT)` 连接。
 
 ## 开机时序与握手重试（踩坑定稿）
 

@@ -1,6 +1,6 @@
 id=sundown
 name=Sundown
-version=v0.2.1-l1
-versionCode=3
+version=v0.2.2-l1
+versionCode=4
 author=SunsetREN
 description=🌇 日落而息 · 墓碑调度 | L1 探针桩（system_server 注入 + build hash 闭环）| 初始化中，请重启激活

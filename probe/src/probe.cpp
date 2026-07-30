@@ -13,6 +13,7 @@
 // 若未来需要注入 32 位 app 进程再补 armeabi-v7a 构建）。
 
 #include <cstring>
+#include <cstddef>
 #include <string>
 #include <unistd.h>
 #include <pthread.h>
@@ -32,20 +33,25 @@ using zygisk::Api;
 #define PROBE_BUILD_HASH "dev"
 #endif
 
-static constexpr const char *SOCKET_PATH = "/data/adb/sundown/sundownd.sock";
+static constexpr const char *ABSTRACT_SOCK = "sundown_probe"; // 与 daemon paths.rs PROBE_ABSTRACT_SOCK 对齐
 static constexpr const char *FALLBACK_DEX = "/data/adb/sundown/probe/probe.dex";
 static constexpr const char *OAT_DIR = "/data/adb/sundown/probe/oat";
 static constexpr const char *ENTRY_CLASS = "ren.sunset.sundown.ProbeMain";
 
 // 与 daemon 控制面行协议通信：发一行命令，读一行 JSON 应答。失败返回空串。
+// 通道用 abstract namespace socket：/data/adb 为 drwx------ root root，
+// system_server(uid 1000) 在 DAC 层即被 EACCES（无 avc），文件 socket 不可达；
+// abstract socket 无文件路径，SELinux connectto ksu 已由 sepolicy.rule 放行。
 static std::string sock_query(const char *cmd) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return "";
 
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
-    if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+    // abstract namespace：sun_path 首字节 '\0' + 名字（不带路径）
+    strncpy(addr.sun_path + 1, ABSTRACT_SOCK, sizeof(addr.sun_path) - 2);
+    socklen_t len = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + 1 + strlen(ABSTRACT_SOCK));
+    if (connect(fd, reinterpret_cast<sockaddr *>(&addr), len) < 0) {
         close(fd);
         return "";
     }
@@ -214,7 +220,8 @@ private:
             LOGE("ProbeMain.init 签名不匹配，期望 (String, String)V");
             return;
         }
-        jstring j_sock = env->NewStringUTF(SOCKET_PATH);
+        // L2 契约第一参为 abstract socket 名（Java 侧用 LocalSocketAddress ABSTRACT 连接）
+        jstring j_sock = env->NewStringUTF(ABSTRACT_SOCK);
         jstring j_hash = env->NewStringUTF(PROBE_BUILD_HASH);
         env->CallStaticVoidMethod(entry_cls, init, j_sock, j_hash);
         if (env->ExceptionCheck()) {
