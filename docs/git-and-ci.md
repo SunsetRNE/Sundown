@@ -90,6 +90,25 @@ cp target/release/sundownd ../module/system/bin/sundownd
 | 编译验证 | push 到 GitHub → Actions（主力）；或 Termux cargo build（应急） |
 | 真机刷入 | 下载 sundown-module artifact → KSU 管理器本地安装 |
 
+### Artifact 产物形态（为什么"压缩包里还有压缩包"）
+
+GitHub Artifacts 的硬性行为：**任何 artifact 下载到本地都是一层 zip 容器**。
+因此两个 artifact 的实际结构是：
+
+```
+sundown-module.zip          ← artifact 容器（下载所得）
+└── sundown-vX.Y.Z.zip      ← 真正的 KSU 模块包（刷入用这个）
+
+sundownd-aarch64.zip        ← artifact 容器
+└── sundownd                ← 裸二进制
+```
+
+边界：
+- 套娃由 artifact 机制决定，与 upload-artifact v4/v7 无关，无法关闭
+- **KSU 管理器本地安装时必须选内层的 `sundown-vX.Y.Z.zip`**
+- 正式发布走 Release（action-gh-release 把模块 zip 直接作为 asset 附加），
+  从 Release 页面下载得到的是**单层 zip，无套娃**——对外分发一律用 Release
+
 ## 边界
 
 - `daemon/target/`、模块 zip 不入库（.gitignore 已定）
