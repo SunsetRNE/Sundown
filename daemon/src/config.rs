@@ -54,7 +54,12 @@ pub fn watch_conf(state: Arc<DaemonState>) {
             while offset < len as usize {
                 let ev = &*(buf.as_ptr().add(offset) as *const libc::inotify_event);
                 if ev.len > 0 {
-                    let name_ptr = ev.name.as_ptr();
+                    // libc crate 的 inotify_event 未建模柔性数组成员 name[]，
+                    // 需手动从结构体末尾偏移取 C 字符串
+                    let name_ptr = buf
+                        .as_ptr()
+                        .add(offset + std::mem::size_of::<libc::inotify_event>())
+                        as *const libc::c_char;
                     let name = std::ffi::CStr::from_ptr(name_ptr).to_string_lossy();
                     // 只关心策略文件，忽略临时文件噪音
                     if name.ends_with(".toml") || name.ends_with(".json") {
