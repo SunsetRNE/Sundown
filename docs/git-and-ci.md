@@ -94,25 +94,27 @@ cp target/release/sundownd ../module/system/bin/sundownd
 | 编译验证 | push 到 GitHub → Actions（主力）；或 Termux cargo build（应急） |
 | 真机刷入 | Nightly Release 下载单层模块 zip → KSU 管理器本地安装 |
 
-### Artifact 产物形态（为什么"压缩包里还有压缩包"）
+### Artifact 产物形态（半成品留档，非下载入口）
 
-GitHub Artifacts 的硬性行为：**任何 artifact 下载到本地都是一层 zip 容器**。
-因此两个 artifact 的实际结构是：
+CI 现存两个 artifact，**均为跨 job 传递的半成品，不是下载对象**：
 
 ```
-sundown-module.zip          ← artifact 容器（下载所得）
-└── sundown-vX.Y.Z.zip      ← 真正的 KSU 模块包（刷入用这个）
-
 sundownd-aarch64.zip        ← artifact 容器
-└── sundownd                ← 裸二进制
+└── sundownd                ← daemon 裸二进制（package-module 取回注入模块）
+
+libsunprobe-arm64-v8a.zip   ← artifact 容器
+├── libsunprobe.so          ← L1 探针桩（同上）
+└── probe.hash              ← 期望 build hash（同上）
 ```
 
 边界：
-- 套娃由 artifact 机制决定，与 upload-artifact v4/v7 无关，无法关闭
-- **KSU 管理器本地安装时必须选内层的 `sundown-vX.Y.Z.zip`**
-- **日常下载走 Nightly 滚动 Release**（每次 push main 自动更新，asset 为单层 zip）：
+- artifact 机制是 CI 隔离 job 之间传递文件的唯一通道，上传步骤**不可删**
+  （删了 package-module 拿不到二进制）；但**用户永远不需要下载它们**
+- 模块 zip **不上传 artifact**（曾经上传过，因下载强制双层套娃已移除）
+- **唯一下载入口：Nightly 滚动 Release**（每次 push main 自动更新，asset 为单层 zip，
+  上述半成品已全部打包在内）：
   `https://github.com/SunsetRNE/Sundown/releases/tag/nightly`
-- 正式发版手动建 Release（tag 如 v0.1.0-l0），同样单层；Artifacts 仅作 CI 调试留档
+- 正式发版手动建 Release（tag 如 v0.1.0-l0），同样单层
 
 ## 边界
 
