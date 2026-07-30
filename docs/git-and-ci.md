@@ -114,6 +114,8 @@ libsunprobe-arm64-v8a.zip   ← artifact 容器
 - **唯一下载入口：Nightly 滚动 Release**（每次 push main 自动更新，asset 为单层 zip，
   上述半成品已全部打包在内）：
   `https://github.com/SunsetRNE/Sundown/releases/tag/nightly`
+  - 必须在 **Releases** 页下载（Assets 里的模块 zip）；**Tags 页的 zip/tar.gz 是源码快照，不可刷**
+  - tag 由 CI 强制移动，始终指向最新构建 commit（与 asset 内 `probe.hash` 一致）
 - 正式发版手动建 Release（tag 如 v0.1.0-l0），同样单层
 
 ## 边界

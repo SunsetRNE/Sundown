@@ -130,6 +130,15 @@ jobs:
       # 模块 zip 不再上传 artifact：artifact 下载强制双层套娃（机制无法关闭），
       # 单层模块包统一走下方 Nightly 滚动 Release 渠道，避免误下载。
 
+      - name: 移动 nightly tag 到本次构建 commit
+        # action-gh-release 滚动更新只换 asset 不移 tag，需手动强制移动保持指向一致
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f nightly "${GITHUB_SHA}"
+          git push -f origin "refs/tags/nightly"
+
       - name: 滚动 Nightly Release（单层 zip 下载渠道）
         if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v3
