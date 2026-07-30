@@ -55,7 +55,9 @@ Sundown/
 - [x] `sunctl` L0 实现 + 命令规范（docs/sunctl-spec.md）
 - [x] WebUI L0 仪表盘（状态展示、daemon 重启、软重启按钮二次确认）
 - [x] `sundownd` Rust 最小实现（daemon/：ready 标记 + socket 控制面 + inotify 热加载）
-- [ ] daemon 交叉编译 + 真机冒烟（cargo ndk → module/system/bin/sundownd）
+- [x] Git 仓库初始化 + GitHub Actions CI（docs/git-and-ci.md：push 即编译出模块 zip）
+- [ ] 推送远端仓库（Termux SSH 已就绪，步骤见 docs/git-and-ci.md）
+- [ ] daemon 交叉编译 + 真机冒烟（CI 产物 → module/system/bin/sundownd）
 - [ ] sunctl status 切换到 socket 数据源（当前为进程/文件探测）
 - [ ] L1：`libsunprobe.so`（基于 zygisk-research/5ec1cff 模板）
 - [ ] L2：`probe.dex` + LSPlant 集成 + 热切换
