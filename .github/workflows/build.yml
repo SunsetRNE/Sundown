@@ -25,7 +25,9 @@ jobs:
           targets: aarch64-linux-android
 
       - name: 安装 cargo-ndk
-        uses: taiki-e/install-action@cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
 
       - name: 构建 sundownd (release)
         working-directory: daemon
