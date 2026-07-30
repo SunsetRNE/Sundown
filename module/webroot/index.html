@@ -125,6 +125,13 @@ async function refreshStatus() {
     : '<span class="err">❌ 未运行</span>';
   const zp = { rezygisk: "ReZygisk ✅", zygisknext: "ZygiskNext ✅", "magisk-zygisk": "Magisk Zygisk", none: '<span class="warn">⚠️ 未检测到</span>' };
   $("st-zygisk").innerHTML = zp[s.zygisk_provider] || s.zygisk_provider;
+  // L1 探针桩 / L2 dex：daemon status 真实字段驱动（原硬编码占位会误导）
+  $("st-stub").innerHTML = s.probe_stub_loaded
+    ? '<span class="ok">✅ 已注入 system_server (hash: ' + (s.probe_stub_build_hash || "?") + ')</span>'
+    : '<span class="warn">⏳ 待重启后激活</span>';
+  $("st-dex").innerHTML = s.probe_dex_version
+    ? '<span class="ok">✅ ' + s.probe_dex_version + '</span>'
+    : '<span style="color:var(--dim)">未交付（L2 阶段）</span>';
 }
 
 async function loadLogs() {

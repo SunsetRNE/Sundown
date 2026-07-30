@@ -7,8 +7,21 @@
 因此桩内只保留三件稳定职责，一切可变逻辑下沉 L2 `probe.dex`：
 
 1. **识别 system_server 并驻留**（`preAppSpecialize` 对普通 app 立即 `DLCLOSE`，零侵入）
-2. **hello-probe 握手**：连接 `sundownd.sock` 上报编译期 build hash
+2. **hello-probe 握手**：连接 `sundownd.sock` 上报编译期 build hash（带重试，见下节）
 3. **加载 probe.dex 并调用入口**（L2 契约，见下），随后控制权完全移交 dex 层
+
+## 开机时序与握手重试（踩坑定稿）
+
+```
+开机早期：zygote fork system_server → 桩 postServerSpecialize
+          → 此时 sundownd.sock 还不存在（daemon 未拉起）
+boot completed 后：service.sh 才启动 sundownd → socket 开始监听
+```
+
+**一次性握手在开机时必然失败**（ENOENT 层面失败，不触发 SELinux，无 avc 痕迹）。
+因此握手整体挪入**后台线程**（不阻塞 system_server 启动），每 2s 重试、
+窗口 120s 覆盖 daemon 拉起延迟；dex 加载前 `AttachCurrentThread` 获取
+本线程 JNIEnv（后台线程不能复用 specialize 线程的 env）。
 
 ## build hash 验证闭环
 

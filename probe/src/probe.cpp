@@ -15,6 +15,7 @@
 #include <cstring>
 #include <string>
 #include <unistd.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <android/log.h>
@@ -82,6 +83,7 @@ public:
     void onLoad(Api *api, JNIEnv *env) override {
         this->api = api;
         this->env = env;
+        env->GetJavaVM(&this->vm); // JavaVM 进程级共享：后台线程 attach 取自己的 JNIEnv
     }
 
     void preAppSpecialize(zygisk::AppSpecializeArgs *) override {
@@ -95,24 +97,49 @@ public:
 
     void postServerSpecialize(const zygisk::ServerSpecializeArgs *) override {
         if (do_unload) return;
-        run();
+        // 握手必须挪后台线程：开机时序上 daemon 要等 boot completed 后才由
+        // service.sh 拉起（远晚于 system_server specialize），握手需要重试窗口，
+        // 同步执行会阻塞 system_server 启动流程。
+        // 安全性：preServerSpecialize 未设 DLCLOSE，本进程内桩常驻（不 unmap），
+        // 后台线程持有 this 安全。
+        pthread_t tid;
+        if (pthread_create(&tid, nullptr, &SunProbe::run_entry, this) == 0) {
+            pthread_detach(tid);
+        } else {
+            run(); // 线程创建失败兜底：退回同步执行（保留旧行为）
+        }
     }
 
 private:
     Api *api = nullptr;
     JNIEnv *env = nullptr;
+    JavaVM *vm = nullptr;
     bool do_unload = true;
+
+    static void *run_entry(void *self) {
+        static_cast<SunProbe *>(self)->run();
+        return nullptr;
+    }
 
     void run() {
         LOGI("L1 桩已注入 system_server (hash=%s)", PROBE_BUILD_HASH);
 
-        // 1. hello-probe 握手：上报 build hash
+        // 1. hello-probe 握手：上报 build hash（带重试）
+        //    开机时序：system_server specialize 远早于 daemon 就绪（service.sh
+        //    在 boot completed 后才拉起 sundownd），一次性握手开机时必然失败。
+        //    每 2s 重试一次，窗口 120s 覆盖 daemon 拉起延迟。
         //    daemon 应答示例: {"ok":1,"hash_match":1,"expected_hash":"abc1234",
         //                      "dex_path":"/data/adb/sundown/probe/probe.dex","dex_present":0}
         std::string hello = std::string("hello-probe ") + PROBE_BUILD_HASH;
-        std::string resp = sock_query(hello.c_str());
+        std::string resp;
+        for (int i = 1; i <= 60; ++i) {
+            resp = sock_query(hello.c_str());
+            if (!resp.empty()) break;
+            if (i == 1) LOGI("daemon 未就绪，握手重试中（每 2s，至多 120s）");
+            sleep(2);
+        }
         if (resp.empty()) {
-            LOGE("hello-probe 失败（daemon 未就绪？），桩驻留待命 (hash=%s)", PROBE_BUILD_HASH);
+            LOGE("hello-probe 重试耗尽（120s），桩驻留待命 (hash=%s)", PROBE_BUILD_HASH);
             return;
         }
         LOGI("hello-probe 应答: %s", resp.c_str());
@@ -127,10 +154,17 @@ private:
         }
 
         // 3. 加载 dex 并移交控制权（L2 契约；任何缺失仅告警，桩不崩）
-        load_dex(dex);
+        //    后台线程没有自己的 JNIEnv，必须 attach 获取本线程 env
+        JNIEnv *t_env = nullptr;
+        if (vm == nullptr || vm->AttachCurrentThread(&t_env, nullptr) != JNI_OK || t_env == nullptr) {
+            LOGE("后台线程 attach JVM 失败，放弃 dex 加载");
+            return;
+        }
+        load_dex(t_env, dex);
+        vm->DetachCurrentThread();
     }
 
-    void load_dex(const std::string &dex_path) {
+    void load_dex(JNIEnv *env, const std::string &dex_path) {
         jclass cl_cls = env->FindClass("dalvik/system/DexClassLoader");
         jclass class_cls = env->FindClass("java/lang/Class");
         if (!cl_cls || !class_cls) {
