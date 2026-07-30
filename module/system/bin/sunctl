@@ -1,0 +1,196 @@
+#!/system/bin/sh
+# sunctl - Sundown 控制 CLI (L0)
+# WebUI 的唯一后端入口；所有管理动作经此收敛，便于审计。
+# 命令规范详见 docs/sunctl-spec.md
+
+MODBASE="/data/adb/modules/sundown"
+SUNDOWN_DIR="/data/adb/sundown"
+DAEMON_PATH="$MODBASE/system/bin/sundownd"
+INSTALLED_META="$SUNDOWN_DIR/update/installed.json"
+READY_MARKER="$SUNDOWN_DIR/update/daemon.ready"
+LOG_DIR="$SUNDOWN_DIR/logs"
+VERSION="0.1.0-l0"
+
+# ---------- 工具函数 ----------
+
+json_string() {
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -n 1
+}
+
+daemon_pid() {
+    pgrep -f "$DAEMON_PATH" 2>/dev/null | head -n 1
+}
+
+daemon_version() {
+    v="$(json_string version_name "$INSTALLED_META")"
+    [ -n "$v" ] && echo "$v" || echo "$VERSION"
+}
+
+# 探测 Zygisk 提供方：rezygisk / zygisknext / magisk-zygisk / none
+zygisk_provider() {
+    if [ -d /data/adb/modules/rezygisk ]; then
+        echo "rezygisk"
+    elif [ -d /data/adb/modules/zygisksu ] || [ -d /data/adb/modules/ZygiskNext ]; then
+        echo "zygisknext"
+    elif [ -f /data/adb/magisk/zygisk_enabled ] 2>/dev/null; then
+        echo "magisk-zygisk"
+    else
+        echo "none"
+    fi
+}
+
+# ---------- 命令实现 ----------
+
+cmd_status() {
+    json_out=0
+    [ "$1" = "--json" ] && json_out=1
+
+    pid="$(daemon_pid)"
+    running=0; [ -n "$pid" ] && running=1
+    provider="$(zygisk_provider)"
+    ready=0; [ -f "$READY_MARKER" ] && ready=1
+    boot_completed="$(getprop sys.boot_completed)"
+
+    if [ "$json_out" = "1" ]; then
+        cat <<EOF
+{
+  "module": "sundown",
+  "version": "$(daemon_version)",
+  "daemon_running": $running,
+  "daemon_pid": ${pid:-null},
+  "daemon_ready": $ready,
+  "zygisk_provider": "$provider",
+  "probe_stub_loaded": 0,
+  "probe_dex_version": null,
+  "boot_completed": "$boot_completed"
+}
+EOF
+    else
+        echo "Sundown 状态"
+        echo "  模块版本:      $(daemon_version)"
+        if [ "$running" = "1" ]; then
+            echo "  守护进程:      ✅ 运行中 (PID: $pid, ready=$ready)"
+        else
+            echo "  守护进程:      ❌ 未运行"
+        fi
+        echo "  Zygisk 提供方: $provider"
+        echo "  L1 探针桩:     未实现（L1 阶段交付）"
+        echo "  L2 探针 dex:   未实现（L2 阶段交付）"
+    fi
+    [ "$running" = "1" ] && return 0 || return 1
+}
+
+cmd_restart_daemon() {
+    echo "正在重启 sundownd..."
+    pgrep -f "$DAEMON_PATH" | while read -r p; do kill "$p" 2>/dev/null; done
+    sleep 1
+    if [ ! -x "$DAEMON_PATH" ]; then
+        echo "❌ $DAEMON_PATH 不存在或不可执行（L0 骨架尚未内置二进制）" >&2
+        return 1
+    fi
+    nohup "$DAEMON_PATH" >/dev/null 2>&1 &
+    sleep 3
+    pid="$(daemon_pid)"
+    if [ -n "$pid" ]; then
+        echo "✅ sundownd 已启动 (PID: $pid)"
+        return 0
+    fi
+    echo "❌ sundownd 启动失败，请检查 $LOG_DIR" >&2
+    return 1
+}
+
+cmd_restart_runtime() {
+    # 软重启：重启 Android 运行时（zygote），不丢应用数据
+    # 用于 L1 探针桩 .so 更新后的热重启
+    if [ "$1" != "--yes" ]; then
+        echo "⚠️  软重启将结束所有应用进程（状态由系统保存，通常不丢数据）。"
+        echo "    屏幕会黑屏几秒后回到锁屏界面。"
+        echo "    确认执行请运行: sunctl restart-runtime --yes" >&2
+        return 2
+    fi
+    echo "正在重启 Android 运行时..."
+    setprop ctl.restart zygote
+    setprop ctl.restart zygote_secondary 2>/dev/null
+    return 0
+}
+
+cmd_reload_probe() {
+    # L2 阶段实现：通知 daemon 推送新 probe.dex 并热切换
+    echo "❌ reload-probe 将在 L2 阶段提供（probe.dex 热更新）" >&2
+    return 3
+}
+
+cmd_apply_update() {
+    # staged 更新：将已校验的 sundownd.new 放入 pending，等待重启激活
+    echo "❌ apply-update 由更新中心在后续阶段提供（staged 通道已就绪）" >&2
+    return 3
+}
+
+cmd_env_check() {
+    echo "Sundown 环境自检"
+    ok=0
+
+    if [ -n "$KSU" ] || command -v ksud >/dev/null 2>&1; then
+        echo "  ✅ KernelSU 环境"
+    else
+        echo "  ℹ️  非 KSU 环境（Magisk?）"
+    fi
+
+    provider="$(zygisk_provider)"
+    case "$provider" in
+        none) echo "  ⚠️  未检测到 Zygisk 提供方（ReZygisk/ZygiskNext），L1 探针不可用" ;;
+        *)    echo "  ✅ Zygisk 提供方: $provider" ;;
+    esac
+
+    if [ -x "$DAEMON_PATH" ]; then
+        echo "  ✅ sundownd 二进制存在"
+    else
+        echo "  ❌ sundownd 二进制缺失（L0 骨架阶段正常）"
+        ok=1
+    fi
+
+    [ -d "$SUNDOWN_DIR" ] && echo "  ✅ 数据目录 $SUNDOWN_DIR" || { echo "  ❌ 数据目录缺失"; ok=1; }
+    [ -f "$SUNDOWN_DIR/data/.migrated_from_cerberus" ] && echo "  ℹ️  已完成 Cerberus 旧资产迁移"
+
+    return $ok
+}
+
+cmd_logs() {
+    lines="${1:-50}"
+    [ -f "$LOG_DIR/boot_watchdog.log" ] && tail -n "$lines" "$LOG_DIR/boot_watchdog.log" || echo "暂无日志"
+}
+
+cmd_version() {
+    echo "Sundown $VERSION (by SunsetREN)"
+    echo "  daemon: $(daemon_version)"
+}
+
+usage() {
+    cat >&2 <<EOF
+用法: sunctl <命令> [参数]
+
+  status [--json]        查看模块与守护进程状态
+  env-check              环境自检（KSU / Zygisk 提供方 / 文件完整性）
+  restart-daemon         重启 sundownd 守护进程
+  restart-runtime --yes  软重启 Android 运行时（zygote，不丢数据）
+  reload-probe           [L2] 热更新探针 dex
+  apply-update           [后续] 激活 staged 守护进程更新
+  logs [行数]            查看启动看门狗日志
+  version                版本信息
+EOF
+    return 2
+}
+
+# ---------- 入口 ----------
+
+case "$1" in
+    status)          shift; cmd_status "$@" ;;
+    env-check)       cmd_env_check ;;
+    restart-daemon)  cmd_restart_daemon ;;
+    restart-runtime) shift; cmd_restart_runtime "$@" ;;
+    reload-probe)    cmd_reload_probe ;;
+    apply-update)    cmd_apply_update ;;
+    logs)            shift; cmd_logs "$@" ;;
+    version|--version|-v) cmd_version ;;
+    *)               usage ;;
+esac

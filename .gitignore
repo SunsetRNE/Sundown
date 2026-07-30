@@ -1,0 +1,13 @@
+# Rust 构建产物
+daemon/target/
+target/
+
+# 打包产物
+*.zip
+
+# 系统杂项
+.DS_Store
+Thumbs.db
+
+# 注意：module/system/bin/sundownd 的文本占位文件需要被 git 跟踪（保证脚本权限设置不失败），
+# CI 打包时会在工作区覆盖为真实二进制，不提交该变更。

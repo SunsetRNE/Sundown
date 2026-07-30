@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sundown · 日落而息</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #14101e;
+    --card: #1f1830;
+    --accent: #ff9a5a;      /* 日落橙 */
+    --accent2: #c96dd8;     /* 暮紫 */
+    --text: #f0eaf8;
+    --dim: #9a8fb5;
+    --ok: #6ddb8f;
+    --warn: #ffd166;
+    --err: #ff6b6b;
+  }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: linear-gradient(180deg, #1a1030 0%, #14101e 60%);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 20px 16px calc(20px + var(--window-inset-bottom, 0px));
+    padding-top: calc(20px + var(--window-inset-top, 0px));
+  }
+  header { text-align: center; margin-bottom: 24px; }
+  header h1 {
+    font-size: 1.8rem;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  header p { color: var(--dim); font-size: 0.85rem; margin-top: 4px; }
+  .card {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 14px;
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+  .card h2 { font-size: 0.95rem; color: var(--dim); margin-bottom: 12px; font-weight: 600; }
+  .row { display: flex; justify-content: space-between; padding: 7px 0; font-size: 0.92rem; }
+  .row + .row { border-top: 1px dashed rgba(255,255,255,0.07); }
+  .row .k { color: var(--dim); }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+  button {
+    width: 100%; padding: 13px; border: none; border-radius: 10px;
+    font-size: 0.95rem; font-weight: 600; margin-top: 8px; cursor: pointer;
+    background: #2c2344; color: var(--text);
+  }
+  button.primary { background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #1a1030; }
+  button.danger { background: #3d2030; color: var(--err); border: 1px solid var(--err); }
+  button:disabled { opacity: 0.45; }
+  #log-box {
+    font-family: monospace; font-size: 0.72rem; white-space: pre-wrap;
+    max-height: 220px; overflow-y: auto; color: var(--dim);
+    background: #100c1a; border-radius: 8px; padding: 10px;
+  }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 0.75rem; background: #2c2344; color: var(--dim); margin-left: 6px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🌇 Sundown</h1>
+  <p>日落而息 · 墓碑调度 <span class="badge" id="ver-badge">L0</span></p>
+</header>
+
+<div class="card">
+  <h2>运行状态</h2>
+  <div class="row"><span class="k">守护进程 sundownd</span><span id="st-daemon">查询中…</span></div>
+  <div class="row"><span class="k">模块版本</span><span id="st-version">-</span></div>
+  <div class="row"><span class="k">Zygisk 提供方</span><span id="st-zygisk">-</span></div>
+  <div class="row"><span class="k">L1 探针桩</span><span id="st-stub">未交付（L1 阶段）</span></div>
+  <div class="row"><span class="k">L2 探针 dex</span><span id="st-dex">未交付（L2 阶段）</span></div>
+</div>
+
+<div class="card">
+  <h2>守护进程控制</h2>
+  <button class="primary" id="btn-refresh">🔄 刷新状态</button>
+  <button id="btn-restart-daemon">♻️ 重启守护进程</button>
+</div>
+
+<div class="card">
+  <h2>运行时</h2>
+  <button class="danger" id="btn-restart-runtime">⚡ 软重启运行时（zygote）</button>
+</div>
+
+<div class="card">
+  <h2>日志（boot_watchdog）</h2>
+  <div id="log-box">尚未加载</div>
+</div>
+
+<script>
+// ---- KernelSU WebUI 桥（参考 ReZygisk webroot/js/kernelsu.js）----
+function exec(command) {
+  return new Promise((resolve, reject) => {
+    if (typeof ksu === "undefined") { resolve({ errno: -1, stdout: "", stderr: "dev-preview" }); return; }
+    const cb = "sunctl_cb_" + Date.now() + "_" + Math.floor(Math.random() * 1e6);
+    window[cb] = (errno, stdout, stderr) => { delete window[cb]; resolve({ errno, stdout, stderr }); };
+    try { ksu.exec(command, "{}", cb); } catch (e) { delete window[cb]; reject(e); }
+  });
+}
+function toast(msg) { (typeof ksu !== "undefined") ? ksu.toast(msg) : console.log("toast:", msg); }
+
+const SUNCTL = "/data/adb/modules/sundown/system/bin/sunctl";
+const $ = id => document.getElementById(id);
+
+async function refreshStatus() {
+  const r = await exec(SUNCTL + " status --json");
+  let s = null;
+  try { s = JSON.parse(r.stdout); } catch (e) {}
+  if (!s) {
+    $("st-daemon").innerHTML = '<span class="err">sunctl 不可用</span>';
+    $("st-daemon").innerHTML += '<br><small style="color:var(--dim)">' + (r.stderr || "请确认模块已安装并重启") + '</small>';
+    return;
+  }
+  $("ver-badge").textContent = s.version || "L0";
+  $("st-version").textContent = s.version || "-";
+  $("st-daemon").innerHTML = s.daemon_running
+    ? '<span class="ok">✅ 运行中 (PID ' + s.daemon_pid + (s.daemon_ready ? ", ready" : ", 未就绪") + ')</span>'
+    : '<span class="err">❌ 未运行</span>';
+  const zp = { rezygisk: "ReZygisk ✅", zygisknext: "ZygiskNext ✅", "magisk-zygisk": "Magisk Zygisk", none: '<span class="warn">⚠️ 未检测到</span>' };
+  $("st-zygisk").innerHTML = zp[s.zygisk_provider] || s.zygisk_provider;
+}
+
+async function loadLogs() {
+  const r = await exec(SUNCTL + " logs 60");
+  $("log-box").textContent = (r.stdout || "").trim() || (r.stderr || "暂无日志");
+}
+
+$("btn-refresh").onclick = () => { refreshStatus(); loadLogs(); };
+
+$("btn-restart-daemon").onclick = async () => {
+  const r = await exec(SUNCTL + " restart-daemon");
+  toast(r.errno === 0 ? "守护进程已重启" : ("重启失败: " + (r.stderr || "")));
+  setTimeout(refreshStatus, 1200);
+};
+
+$("btn-restart-runtime").onclick = async () => {
+  // 二次确认（边界要求）
+  if (!confirm("⚠️ 软重启将结束所有应用进程（状态由系统保存，通常不丢数据）。\n屏幕会黑屏几秒后回到锁屏界面。\n\n确认继续？")) return;
+  if (!confirm("最后确认：现在重启 Android 运行时？")) return;
+  const r = await exec(SUNCTL + " restart-runtime --yes");
+  if (r.errno !== 0) toast("执行失败: " + (r.stderr || ""));
+};
+
+refreshStatus();
+loadLogs();
+</script>
+</body>
+</html>

@@ -1,0 +1,88 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [created]
+
+env:
+  CARGO_TERM_COLOR: always
+  API_LEVEL: "30" # 与 customize.sh 最低要求 API 30 对齐
+
+jobs:
+  build-daemon:
+    name: 交叉编译 sundownd (aarch64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: 安装 cargo-ndk
+        uses: taiki-e/install-action@cargo-ndk
+
+      - name: 构建 sundownd (release)
+        working-directory: daemon
+        run: cargo ndk -t arm64-v8a -p ${{ env.API_LEVEL }} build --release
+
+      - name: 校验产物
+        run: |
+          file daemon/target/aarch64-linux-android/release/sundownd
+          ls -lh daemon/target/aarch64-linux-android/release/sundownd
+
+      - name: 上传 daemon 二进制
+        uses: actions/upload-artifact@v4
+        with:
+          name: sundownd-aarch64
+          path: daemon/target/aarch64-linux-android/release/sundownd
+          retention-days: 30
+
+  package-module:
+    name: 打包 KSU 模块 zip
+    needs: build-daemon
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载 daemon 二进制并注入模块
+        uses: actions/download-artifact@v4
+        with:
+          name: sundownd-aarch64
+          path: module/system/bin/
+      # 注意：此时 module/system/bin/sundownd 的文本占位文件被真实二进制覆盖
+      # （仅 CI 工作区，不提交；占位文件仍在 git 中保证脚本兼容）
+
+      - name: 修正权限
+        run: |
+          chmod 755 module/system/bin/sundownd module/system/bin/sunctl
+          chmod 755 module/post-fs-data.sh module/service.sh module/uninstall.sh module/customize.sh
+
+      - name: 读取模块版本
+        id: meta
+        run: echo "version=$(grep '^version=' module/module.prop | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: 打包模块 zip
+        run: |
+          cd module
+          zip -r9 "../sundown-${{ steps.meta.outputs.version }}.zip" . -x '.*'
+          cd ..
+          ls -lh sundown-*.zip
+
+      - name: 上传模块 zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: sundown-module
+          path: sundown-*.zip
+          retention-days: 30
+
+      - name: 发布到 GitHub Release（手动创建 Release 时触发）
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sundown-*.zip

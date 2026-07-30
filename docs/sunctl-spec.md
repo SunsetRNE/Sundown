@@ -1,0 +1,61 @@
+# sunctl 命令规范（L0 定稿）
+
+`sunctl` 是 Sundown 的**唯一管理入口**。WebUI（ksu.exec）、脚本、用户 shell 全部经由此 CLI 操作，保证单一可审计入口。
+
+- 路径（模块挂载后）：`/data/adb/modules/sundown/system/bin/sunctl`，同时位于系统 PATH 的 `/system/bin/sunctl`
+- 运行身份：root（KSU WebUI 的 `ksu.exec` 自动以 root 执行）
+- L0 实现为 shell 脚本；后续可由 `sundownd` 内建子命令替代，**命令面与退出码必须保持兼容**
+
+## 命令面
+
+| 命令 | 参数 | 说明 | 退出码 |
+|---|---|---|---|
+| `status` | `[--json]` | 模块/守护进程/Zygisk 提供方状态 | 0=daemon 运行中；1=daemon 未运行 |
+| `env-check` | — | 环境自检（KSU、Zygisk 提供方、文件完整性、迁移标记） | 0=通过；1=存在缺失项 |
+| `restart-daemon` | — | 重启 sundownd（杀旧→启动→验证 PID） | 0=成功；1=失败 |
+| `restart-runtime` | `--yes`（必需） | 软重启 zygote（`ctl.restart`）。无 `--yes` 时仅打印警告 | 0=已触发；2=未确认拒绝执行 |
+| `reload-probe` | — | 【L2 交付】通知 daemon 推送 probe.dex 热切换 | 3=当前阶段未实现 |
+| `apply-update` | — | 【后续交付】激活 staged 守护进程更新 | 3=当前阶段未实现 |
+| `logs` | `[行数=50]` | 输出 boot_watchdog.log 末尾 | 0 |
+| `version` | — | 模块与 daemon 版本 | 0 |
+| （无参数/未知） | — | 用法说明 | 2 |
+
+## 退出码约定（全局）
+
+| 码 | 含义 |
+|---|---|
+| 0 | 成功 |
+| 1 | 执行失败 / 状态异常（status 专指 daemon 未运行） |
+| 2 | 参数错误或缺少必要确认 |
+| 3 | 功能在当前交付阶段未实现（预留命令面） |
+
+## `status --json` 输出契约
+
+WebUI 仪表盘依赖以下字段，**任何实现变更必须向后兼容**（只增不改）：
+
+```json
+{
+  "module": "sundown",
+  "version": "0.1.0-l0",
+  "daemon_running": 1,
+  "daemon_pid": 1234,
+  "daemon_ready": 1,
+  "zygisk_provider": "rezygisk | zygisknext | magisk-zygisk | none",
+  "probe_stub_loaded": 0,
+  "probe_dex_version": null,
+  "boot_completed": "1"
+}
+```
+
+- `daemon_pid`：daemon 未运行时为 `null`
+- `probe_stub_loaded` / `probe_dex_version`：L1/L2 阶段填入真实值；L0 恒为 `0` / `null`
+- L1 阶段将追加 `probe_stub_build_hash`（软重启 hash 验证闭环用）
+
+## 与分层热更新的对应
+
+| 命令 | 作用层 |
+|---|---|
+| `restart-daemon` | L0（daemon 自身，无感） |
+| `reload-probe` | L2（probe.dex，无感热更新） |
+| `restart-runtime` | L1（libsunprobe.so，需软重启） |
+| `apply-update` | L0 staged 通道（配合 service.sh 在重启/软重启后激活） |

@@ -1,0 +1,18 @@
+# Sundown SELinux Policy Rules
+# L0：允许 system_server 通过 Unix 套接字与 root 域通信
+#     （L1 探针桩注入 system_server 后，经 socket 与 sundownd 通信时必需）
+
+# SU 域
+allow system_server su unix_stream_socket connectto
+allow system_server su sock_file { read write getattr setattr }
+
+# Magisk 域
+allow system_server magisk unix_stream_socket connectto
+allow system_server magisk sock_file { read write getattr setattr }
+
+# KernelSU 域
+allow system_server kernelsu unix_stream_socket connectto
+allow system_server kernelsu sock_file { read write getattr setattr }
+
+allow system_server ksu unix_stream_socket connectto
+allow system_server ksu sock_file { read write getattr setattr }

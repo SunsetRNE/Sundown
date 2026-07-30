@@ -1,0 +1,32 @@
+# Sundown System Properties
+# 这些通用属性会在系统启动时由 KernelSU/Magisk 自动应用
+# 设备差异化属性（mi/oplus/qti）由 customize.sh 按设备追加后删除临时文件
+
+# ========== AOSP/LMKD 保后台参数 ==========
+ro.sys.fw.bg_apps_limit=32768
+ro.lmk.use_psi=true
+ro.lmk.psi_partial_stall_ms=250
+ro.lmk.psi_complete_stall_ms=700
+ro.lmk.pressure_after_kill_min_score=800
+ro.lmk.thrashing_limit=100
+ro.lmk.thrashing_limit_decay=10
+ro.lmk.use_minfree_levels=false
+ro.lmk.swap_free_low_percentage=1
+persist.sys.min.swap.free=0
+ro.lmk.swap_util_max=100
+ro.lmk.swap_is_low_kill_enable=0
+ro.lmk.low=1001
+ro.lmk.medium=906
+ro.lmk.critical=800
+ro.lmk.critical_upgrade=false
+ro.lmk.upgrade_pressure=100
+ro.lmk.downgrade_pressure=100
+ro.lmk.kill_heaviest_task=false
+ro.lmk.kill_timeout_ms=200
+ro.lmk.enhance_batch_kill=false
+ro.lmk.enable_adaptive_lmk=false
+sys.lmk.minfree_levels=4096:0,5120:100,8192:200,32768:250,56320:900,71680:906
+ro.lmk.swap_compression_ratio=4
+ro.lmk.lowmem_min_oom_score=1001
+ro.lmk.direct_reclaim_threshold_ms=0
+debug.video.recovery.killenable=false

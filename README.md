@@ -1,0 +1,74 @@
+# 🌇 Sundown
+
+**日落而息 · 墓碑调度** — by SunsetREN
+
+面向 KernelSU 系的 Android 墓碑（应用冻结）调度模块。从 AStop/Cerberus 演进而来：
+脱离 LSPosed 依赖，改用自有 Zygisk 探针 + KSU WebUI 管理，全链路支持热更新。
+
+## 架构分层（热更新粒度）
+
+| 层 | 资产 | 职责 | 更新方式 |
+|---|---|---|---|
+| L0 | `sundownd` | 调度大脑：冻结执行、策略决策、socket 服务 | staged 更新，看门狗重启 |
+| L1 | `libsunprobe.so` | Zygisk 探针桩：注入 system_server，socket 收发 + dex 加载 | 软重启 zygote |
+| L2 | `probe.dex` | 探针逻辑：LSPlant Java hook（焦点/豁免/Binder） | socket 推送，ClassLoader 热切换 |
+| L3 | conf/*.toml | 策略与豁免配置 | inotify 热加载，完全无感 |
+
+## 目录结构
+
+```
+Sundown/
+├── README.md               # 本文件
+├── NAMING.md               # 命名规范（定稿，唯一权威副本）
+├── docs/
+│   └── sunctl-spec.md      # sunctl CLI 命令规范与退出码契约
+├── daemon/                 # sundownd Rust 源码（L0 最小实现）
+│   ├── Cargo.toml          # 仅依赖 libc；release 体积优化
+│   ├── README.md           # 构建/部署/staged 更新约定/冒烟测试
+│   └── src/
+│       ├── main.rs         # 入口：信号、ready 标记、主循环
+│       ├── paths.rs        # 路径与版本常量（RELEASE_NO 只增不改）
+│       ├── logging.rs      # 极简日志（sundownd.log + stdout）
+│       ├── state.rs        # 共享状态 + status JSON（兼容 sunctl-spec）
+│       ├── sock.rs         # Unix socket 控制面（行协议）
+│       └── config.rs       # inotify conf/ 热加载（L3 接入点）
+└── module/                 # KSU 模块（目录内容即模块 zip 内容）
+    ├── module.prop         # id=sundown, author=SunsetREN
+    ├── customize.sh        # 安装脚本（环境/ABI 检查、设备适配属性、ReZygisk 检测）
+    ├── post-fs-data.sh     # 早期初始化 + Cerberus 旧资产迁移
+    ├── service.sh          # sundownd 启动 / staged 更新激活 / 看门狗
+    ├── uninstall.sh        # 卸载清理（杀 daemon、恢复属性、删数据目录）
+    ├── sepolicy.rule       # system_server ↔ root 域 socket 规则（L1 探针需要）
+    ├── system.prop         # LMKD 保后台参数
+    ├── system/bin/
+    │   ├── sundownd        # 【占位】守护进程二进制，L0 开发阶段交付
+    │   └── sunctl          # 控制 CLI（L0 shell 实现，命令面已定稿）
+    └── webroot/
+        └── index.html      # KSU WebUI 仪表盘（L0 只读 + daemon/运行时控制）
+```
+
+## 当前状态：L0 ✅（骨架 + daemon Rust 最小实现）
+
+- [x] 命名规范定稿（NAMING.md）
+- [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
+- [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
+- [x] `sunctl` L0 实现 + 命令规范（docs/sunctl-spec.md）
+- [x] WebUI L0 仪表盘（状态展示、daemon 重启、软重启按钮二次确认）
+- [x] `sundownd` Rust 最小实现（daemon/：ready 标记 + socket 控制面 + inotify 热加载）
+- [ ] daemon 交叉编译 + 真机冒烟（cargo ndk → module/system/bin/sundownd）
+- [ ] sunctl status 切换到 socket 数据源（当前为进程/文件探测）
+- [ ] L1：`libsunprobe.so`（基于 zygisk-research/5ec1cff 模板）
+- [ ] L2：`probe.dex` + LSPlant 集成 + 热切换
+- [ ] L3：策略引擎与情景预设
+
+## 依赖
+
+- KernelSU 系 root（原版 / Next / SukiSU 等分支均兼容）
+- ReZygisk（L1 探针提供方，L0 阶段可选；推荐 v1.0.0+）
+- Android 11 (API 30)+
+
+## 参考资产
+
+工作区 `zygisk-research/` 内有完整调研包：Zygisk API v4 头文件、
+5ec1cff/PShocker 模块模板、Magisk 原生加载链源码、ReZygisk 源码（含 webroot 参考实现）。
+旧实现参考：`AStopV1.7/`（Cerberus daemon + 全套模块脚本，本骨架由其改名演进）。

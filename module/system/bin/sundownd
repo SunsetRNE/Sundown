@@ -1,0 +1,14 @@
+# Sundown daemon placeholder
+#
+# L0 骨架阶段：本文件仅用于占位，保证 customize.sh 的 set_perm 不失败。
+# 真实的 sundownd 守护进程二进制（Rust/C++）在 L0 开发阶段编译后放入本路径：
+#   module/system/bin/sundownd
+#
+# 守护进程职责（L0 范围）：
+#   - 启动后写 update/daemon.ready（含 release_no），供 service.sh readiness 校验
+#   - 创建 Unix socket /data/adb/sundown/sundownd.sock，接受 sunctl/WebUI 控制连接
+#   - inotify 监听 conf/ 实现 L3 配置热加载
+# L1/L2 阶段追加：
+#   - 接受 libsunprobe.so 握手（build hash 上报，软重启验证闭环）
+#   - 向探针推送 probe.dex（socket 字节流，InMemoryDexClassLoader 加载）
+PLACEHOLDER_NOT_A_BINARY

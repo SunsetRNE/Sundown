@@ -1,0 +1,17 @@
+[package]
+name = "sundownd"
+version = "0.1.0-l0"
+edition = "2021"
+description = "Sundown daemon - 日落而息 · 墓碑调度 (L0: ready 标记 + Unix socket 控制面 + conf 热加载)"
+authors = ["SunsetREN"]
+license = "GPL-3.0-only"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = "z"      # 体积优先（模块 zip 体积敏感）
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
