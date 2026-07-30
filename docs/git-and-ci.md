@@ -18,6 +18,23 @@ push → build-daemon (rustup + cargo-ndk 交叉编译 aarch64, API 30)
 
 **本机零工具链要求**：不需要 NDK、不需要 Rust，push 即编译。
 
+### Action 版本基线（2026-07-30 核实）
+
+GitHub 已弃用 Node 20 运行时（声明 Node 20 的 action 会被强制按 Node 24
+执行并在 Annotations 告警）。workflow 已统一升到声明 Node 24 的大版本：
+
+| Action | 版本 | 备注 |
+|---|---|---|
+| actions/checkout | `@v7`（v7.0.1） | |
+| actions/upload-artifact | `@v7`（v7.0.1） | |
+| actions/download-artifact | `@v8`（v8.0.1） | |
+| softprops/action-gh-release | `@v3`（v3.0.2） | 官方 Node 24 pin |
+| dtolnay/rust-toolchain | `@stable` | 无运行时告警 |
+| taiki-e/install-action | `@v2` | 无运行时告警 |
+
+升级原则：只跟随 major tag，不锁 patch；若 Actions 页面再出现运行时弃用
+告警，先查对应 action 的 latest release 再 bump，不盲目升级。
+
 ### 首次推送步骤（Termux 执行）
 
 ```sh
@@ -30,7 +47,7 @@ cp -r /data/user/0/com.ai.assistance.operit/files/workspace/48e38deb-6e79-44a7-9
 cd ~/Sundown
 
 # 3. 绑定远端并推送（ssh config 已配 443，无需额外处理）
-git remote add origin git@github.com:SunsetREN/Sundown.git
+git remote add origin git@github.com:SunsetRNE/Sundown.git
 git push -u origin main
 
 # 4. 推送后约 1~3 分钟，Actions 产出:

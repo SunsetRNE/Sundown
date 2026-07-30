@@ -17,7 +17,7 @@ jobs:
     name: 交叉编译 sundownd (aarch64)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
@@ -39,7 +39,7 @@ jobs:
           ls -lh daemon/target/aarch64-linux-android/release/sundownd
 
       - name: 上传 daemon 二进制
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sundownd-aarch64
           path: daemon/target/aarch64-linux-android/release/sundownd
@@ -50,10 +50,10 @@ jobs:
     needs: build-daemon
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 下载 daemon 二进制并注入模块
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: sundownd-aarch64
           path: module/system/bin/
@@ -77,7 +77,7 @@ jobs:
           ls -lh sundown-*.zip
 
       - name: 上传模块 zip
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sundown-module
           path: sundown-*.zip
@@ -85,6 +85,6 @@ jobs:
 
       - name: 发布到 GitHub Release（手动创建 Release 时触发）
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: sundown-*.zip
