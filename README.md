@@ -65,6 +65,7 @@ Sundown/
 | zip 文件名 | `sundown-<version>.zip` | CI 从 module.prop 读取，自动跟随，无需手改 |
 
 - 分层语义：L0→`v0.1.0-l0`，L1→`v0.2.0-l1`，L2→`v0.3.0-l2`，L3→`v0.4.0-l3`；正式版从 `v1.0.0` 起去阶段后缀
+- 阶段内修复/迭代走 **patch 位**（如 L1 握手修复 `v0.2.0-l1`→`v0.2.1-l1`），versionCode 照常 +1；跨阶段才动次版本号
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
