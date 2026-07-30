@@ -53,8 +53,22 @@ Sundown/
         └── index.html      # KSU WebUI 仪表盘（L0 只读 + daemon/运行时控制）
 ```
 
-## 当前状态：L0 ✅ ｜ L1 桩工程化 ✅（待真机验证）
+## 版本号策略（升级检查清单）
 
+模块版本三处同步 + 一处自动，**漏改任何一处都会造成版本漂移**（L1 期间已踩过一次）：
+
+| 位置 | 字段 | 规则 |
+|---|---|---|
+| `module/module.prop` | `version` / `versionCode` | version 语义化带阶段后缀（如 `v0.2.0-l1`）；versionCode **单调 +1**（KSU 更新感知与未来 updateJson 在线更新的硬要求） |
+| `daemon/src/paths.rs` | `VERSION_NAME` / `RELEASE_NO` | VERSION_NAME 与 module.prop version 同步（去 `v` 前缀）；RELEASE_NO 在 **daemon 二进制任何变更时 +1**（只加不改，staged readiness 校验依据） |
+| `module/system/bin/sunctl` | `VERSION` | 与 module.prop version 同步（去 `v` 前缀） |
+| zip 文件名 | `sundown-<version>.zip` | CI 从 module.prop 读取，自动跟随，无需手改 |
+
+- 分层语义：L0→`v0.1.0-l0`，L1→`v0.2.0-l1`，L2→`v0.3.0-l2`，L3→`v0.4.0-l3`；正式版从 `v1.0.0` 起去阶段后缀
+- CI 打包 job 内置防呆校验：三处版本不一致则构建失败
+- Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
+
+## 当前状态：L0 ✅ ｜ L1 桩工程化 ✅（待真机验证）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
