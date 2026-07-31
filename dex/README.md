@@ -20,6 +20,11 @@ dex/
 
 构建产物（`dex/build/`，git 忽略）：`probe.dex`（约 12K）+ `probe.dex.hash`。
 
+> **语法红线：本工程禁用 lambda / 方法引用。**
+> 编译走 `javac -source 8 -target 8 -bootclasspath android.jar`，lambda 的
+> invokedynamic 需要在 bootclasspath 解析 `LambdaMetafactory.metafactory`，
+> 而 android.jar 无此符号（javac 直接 fatal，CI #18 已踩坑）。一律写匿名内部类。
+
 ## DAC 铁律与字节通道（本层存在的理由）
 
 L1 真机实证：`/data/adb` 为 `drwx------ root root`，`system_server`（uid 1000）
@@ -79,6 +84,7 @@ mkdir -p dex/build/classes
 javac -source 8 -target 8 \
   -bootclasspath "$ANDROID_HOME/platforms/android-36/android.jar" \
   -d dex/build/classes $(find dex/src -name '*.java')
+mkdir -p dex/build/out   # d8 要求 --output 为已存在目录
 find dex/build/classes -name '*.class' | xargs \
   "$ANDROID_HOME/build-tools/34.0.0/d8" --min-api 30 --output dex/build/out
 mv dex/build/out/classes.dex dex/build/probe.dex

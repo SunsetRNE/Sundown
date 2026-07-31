@@ -121,6 +121,8 @@ jobs:
         run: |
           D8="$(ls -d "$ANDROID_HOME"/build-tools/*/d8 | sort -V | tail -n1)"
           echo "使用 d8: $D8"
+          # d8 要求 --output 为已存在目录（或 zip/jar 文件名），必须先创建
+          mkdir -p dex/build/out
           find dex/build/classes -name '*.class' | sort | xargs "$D8" \
             --min-api ${{ env.API_LEVEL }} \
             --output dex/build/out

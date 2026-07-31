@@ -45,7 +45,15 @@ final class Runtime {
         this.socketName = socketName;
         this.stubHash = stubHash;
         this.hooks = LsPlantBridge.create();
-        this.eventThread = new Thread(this::eventLoop, "SundownDex-Events");
+        // 注意：禁止 lambda/方法引用——javac -source 8 + -bootclasspath android.jar 时
+        // lambda 的 invokedynamic 需在 bootclasspath 解析 LambdaMetafactory.metafactory，
+        // 而 android.jar 无此符号（编译期 fatal）。匿名类由 d8 原样保留，无 desugar 依赖。
+        this.eventThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                eventLoop();
+            }
+        }, "SundownDex-Events");
         this.eventThread.setDaemon(true);
     }
 
