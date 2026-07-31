@@ -22,7 +22,8 @@ Sundown/
 ├── NAMING.md               # 命名规范（定稿，唯一权威副本）
 ├── docs/
 │   ├── sunctl-spec.md      # sunctl CLI 命令规范与退出码契约
-│   └── l2-plan.md          # L2 推进计划（DAC 裁决 / 协议 / 热切换，权威副本）
+│   ├── l2-plan.md          # L2 推进计划（DAC 裁决 / 协议 / 热切换，权威副本）
+│   └── l2b-plan.md         # L2b 推进计划（LSPlant 集成 / hook 点 / 事件上行，权威副本）
 ├── daemon/                 # sundownd Rust 源码（L0 最小实现）
 │   ├── Cargo.toml          # 仅依赖 libc；release 体积优化
 │   ├── README.md           # 构建/部署/staged 更新约定/冒烟测试
@@ -105,6 +106,8 @@ Sundown/
   WebUI/sunctl 热更新入口、status 新增 probe_dex_version/probe_dex_hash_match；
   本地 javac+d8 编译链与 cargo check 零错误。LSPlant 真实 hook 留 L2b
 - [ ] L2b：LSPlant native 集成 + AMS 焦点/Binder 豁免真实 hook（需真机验证 execmod）
+  —— 🚧 计划已立（docs/l2b-plan.md：LGPL 动态链接 + dex System.load 伴生库，桩零触碰；
+  hook 点经 AStop v1.6.0 dex 静态扫描实证萃取；全观测模式，冻结动作留 L3）
 - [ ] L3：策略引擎与情景预设
 
 ## 依赖
