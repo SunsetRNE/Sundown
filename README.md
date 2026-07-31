@@ -69,7 +69,7 @@ Sundown/
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
-## 当前状态：L0 ✅ ｜ L1 桩工程化 ✅（待真机验证）
+## 当前状态：L0 ✅ ｜ L1 ✅（真机验证通过）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
@@ -80,10 +80,16 @@ Sundown/
 - [x] 推送远端仓库 github.com/SunsetRNE/Sundown + CI 首跑成功（模块 zip artifact 已产出）
 - [x] CI 升级 Node 24 actions + Nightly 滚动 Release（单层模块 zip 主下载渠道）
 - [x] sunctl status 切换 socket 数据源（nc -U 行协议，失败降级文件探测）
-- [ ] daemon 真机冒烟（Nightly Release 下载单层 zip 刷入 → sunctl status / socket 验证）
+- [x] daemon 真机冒烟（2026-07-31：Nightly 单层 zip 刷入，sunctl status / socket 行协议
+  ping/status/probe-query 全部通过，daemon 长稳运行 uptime 7.8h+ 无异常）
 - [x] L1 桩工程化：`libsunprobe.so`（probe/：hello-probe hash 握手 + dex 加载桥，
   daemon 协议面 hello-probe/probe-query，CI build-probe 注入 zygisk/arm64-v8a.so）
-- [ ] L1 真机验证（重启激活桩 → sunctl status 显示 probe_stub_loaded=1 + hash 匹配）
+- [x] L1 真机验证（2026-07-31，ReZygisk v1.0.0 提供方）：
+  桩注入 system_server 实证（/proc/<pid>/maps 含 arm64-v8a.so r-xp 可执行映射）；
+  probe_stub_loaded=1 + hash_match=1，hash ce2f36b 四位一体闭环
+  （桩上报 = 模块 probe.hash = CI 构建 commit = git HEAD）；
+  v0.2.2-l1 abstract socket 启动同秒握手成功，对照 v0.2.1-l1 文件 socket 全程无握手，
+  根治 /data/adb DAC 层 EACCES 实证
 - [ ] L2：`probe.dex` + LSPlant 集成 + 热切换
 - [ ] L3：策略引擎与情景预设
 
