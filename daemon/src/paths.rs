@@ -11,12 +11,23 @@ pub const SOCKET_PATH: &str = "/data/adb/sundown/sundownd.sock";
 pub const LOG_FILE: &str = "/data/adb/sundown/logs/sundownd.log";
 
 // ---- L1 探针桩相关 ----
-/// probe.dex / oat 目录（L2 资产落点）
+/// probe.dex / oat 目录（root 侧字节源落点；桩/dex 层不直接读——DAC 不可达，见下）
 pub const PROBE_DIR: &str = "/data/adb/sundown/probe";
+/// canonical dex 字节源（root 专属）：fetch-dex / push-dex 从这里读字节经 socket 下发
 pub const PROBE_DEX: &str = "/data/adb/sundown/probe/probe.dex";
 pub const PROBE_OAT_DIR: &str = "/data/adb/sundown/probe/oat";
 /// 期望的桩 build hash（CI 打包时写入模块，daemon 据此比对 hello-probe 上报值）
 pub const PROBE_EXPECTED_HASH_FILE: &str = "/data/adb/modules/sundown/zygisk/probe.hash";
+
+// ---- L2 探针 dex 相关 ----
+/// 期望的 dex 构建版本（CI 打包写入模块；= 构建 commit short sha，与桩 hash 同源闭环：
+/// dex 上报版本 = 模块 probe.dex.hash = CI 构建 commit = git HEAD）
+pub const PROBE_EXPECTED_DEX_HASH_FILE: &str = "/data/adb/modules/sundown/probe/probe.dex.hash";
+/// 冷启动兜底 dex 路径：模块 magic-mount（module/system/etc/sundown/probe.dex → /system/...）。
+/// 全局可读、SELinux 无争议，uid 1000 的桩文件加载桥可直达；
+/// hello-probe / hello-dex 应答的 dex_path 一律指向这里（不再指向 /data/adb 下任何路径，
+/// 该目录 drwx------ root，uid 1000 在 DAC 层 EACCES——L1 真机已实证）。
+pub const PROBE_DEX_MOUNT: &str = "/system/etc/sundown/probe.dex";
 
 /// 探针桩 / L2 dex 专用通道：abstract namespace socket（无文件路径）。
 /// 为什么不用文件 socket 给桩用：/data/adb 是 drwx------ root root，
@@ -26,7 +37,7 @@ pub const PROBE_EXPECTED_HASH_FILE: &str = "/data/adb/modules/sundown/zygisk/pro
 pub const PROBE_ABSTRACT_SOCK: &str = "sundown_probe";
 
 /// 守护进程版本（与 module.prop version 同步，策略见主 README「版本号策略」）
-pub const VERSION_NAME: &str = "0.2.2-l1";
+pub const VERSION_NAME: &str = "0.3.0-l2";
 /// 单调递增的发布号：service.sh readiness 校验依据（installed.json vs daemon.ready）
 /// daemon 二进制任何变更必须 +1（只加不改）
-pub const RELEASE_NO: u32 = 3;
+pub const RELEASE_NO: u32 = 4;

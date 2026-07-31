@@ -12,7 +12,16 @@
 //!   hello-probe <hash>   -> L1 桩上报 build hash（见 probe_response，含记录副作用）
 //!   probe-query          -> 同 hello-probe 的应答，但只查询不记录（L2 dex 层轮询用）
 //!
-//! L2 扩展点：push-dex（probe.dex 推送），协议保持行分隔，新增命令即可，不破坏兼容。
+//! 协议（L2 新增，行协议不变，只增不改）：
+//!   hello-dex <version>  -> dex 层上报构建版本；应答后连接保持为事件订阅通道
+//!                           （EOF/写失败注销；通道上仅支持 ping / 重复 hello-dex 重登记）
+//!   fetch-dex            -> 拉取 dex 字节：应答头行 {"ok":1,"size":N,"expected_hash":...}
+//!                           紧跟 N 字节原始 dex（独立短连接，用完即关）
+//!   push-dex [path]      -> 【仅 root 管理面】读 dex 文件并向全部订阅连接推送
+//!                           {"event":"dex-push","size":N,...} + N 字节（热切换触发）
+//!
+//! 二进制帧纪律：头行声明 size，紧随其后恰为 size 字节，无额外分隔符；
+//! 客户端必须按字节精确读取（dex 侧 DaemonLink 自行分行，不用 BufferedReader）。
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::io::FromRawFd;
@@ -84,14 +93,15 @@ pub fn serve(state: Arc<DaemonState>, shutdown: Arc<AtomicBool>) -> std::io::Res
 
     while !shutdown.load(Ordering::Relaxed) {
         let mut idle = true;
-        for l in [&listener, &probe_listener] {
+        // 文件 socket = root 管理面（mgmt=true）；abstract = 桩/dex 通道（mgmt=false）
+        for (l, is_mgmt) in [(&listener, true), (&probe_listener, false)] {
             match l.accept() {
                 Ok((stream, _)) => {
                     idle = false;
                     state.bump_connections();
                     let st = Arc::clone(&state);
                     std::thread::spawn(move || {
-                        if let Err(e) = handle_conn(stream, st) {
+                        if let Err(e) = handle_conn(stream, st, is_mgmt) {
                             logw!("连接处理异常: {}", e);
                         }
                     });
@@ -110,7 +120,7 @@ pub fn serve(state: Arc<DaemonState>, shutdown: Arc<AtomicBool>) -> std::io::Res
     Ok(())
 }
 
-fn handle_conn(stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<()> {
+fn handle_conn(stream: UnixStream, state: Arc<DaemonState>, mgmt: bool) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
@@ -120,10 +130,35 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<(
     if n == 0 {
         return Ok(());
     }
-    // 命令与参数：首个空格分隔（hello-probe <hash>）
+    // 命令与参数：首个空格分隔（hello-probe <hash> / hello-dex <version> / push-dex <path>）
     let mut parts = line.trim().splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let arg = parts.next().unwrap_or("").trim();
+
+    // hello-dex 特殊路径：应答后保持连接，转为事件订阅通道（push-dex 推送对象）
+    if cmd == "hello-dex" {
+        if arg.is_empty() {
+            writer.write_all(b"{\"ok\":0,\"error\":\"hello-dex requires <build_version>\"}\n")?;
+            return Ok(());
+        }
+        state.record_dex(arg);
+        logi!(
+            "探针 dex 握手: version={}（期望: {}）",
+            arg,
+            state.expected_dex_hash().as_deref().unwrap_or("<无 probe.dex.hash>")
+        );
+        let resp = dex_hello_response(&state);
+        writer.write_all(resp.as_bytes())?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+        // 登记订阅 + 读循环；EOF/错误注销（daemon 重启后 dex 侧自动重连重登记）
+        let id = state.register_dex_client(writer.try_clone()?);
+        logi!("dex 事件订阅已建立 (id={}, version={})", id, arg);
+        let r = dex_subscription_loop(&mut reader, &mut writer, &state);
+        state.unregister_dex_client(id);
+        logi!("dex 事件订阅断开 (id={})", id);
+        return r;
+    }
 
     let resp = match cmd {
         "ping" => "{\"ok\":1,\"pong\":1}".to_string(),
@@ -146,6 +181,18 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<(
             }
         }
         "probe-query" => probe_response(&state),
+        "fetch-dex" => {
+            // 头行 + 原始字节帧（无行尾分隔）；写完即关连接
+            return serve_dex_bytes(&mut writer, &state);
+        }
+        "push-dex" => {
+            if !mgmt {
+                // 管理动作收敛 root 管理面（单一可审计入口），abstract 面仅桩/dex 消费
+                "{\"ok\":0,\"error\":\"push-dex is management-channel only\"}".to_string()
+            } else {
+                push_dex(&state, arg)
+            }
+        }
         "stop" => {
             logi!("收到 stop 命令，优雅退出");
             writer.write_all(b"{\"ok\":1,\"stopping\":1}\n")?;
@@ -163,8 +210,135 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<(
     Ok(())
 }
 
+/// hello-dex 订阅连接的读循环：dex 侧只收事件，期间仅支持
+/// ping（保活探测）与重复 hello-dex（重登记）；EOF 返回由调用方注销。
+fn dex_subscription_loop(
+    reader: &mut BufReader<UnixStream>,
+    writer: &mut UnixStream,
+    state: &DaemonState,
+) -> std::io::Result<()> {
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            return Ok(()); // EOF：dex 侧主动断开（热切换换代 / 进程退出）
+        }
+        let mut parts = line.trim().splitn(2, ' ');
+        let cmd = parts.next().unwrap_or("");
+        let arg = parts.next().unwrap_or("").trim();
+        let resp = match cmd {
+            "ping" => "{\"ok\":1,\"pong\":1}".to_string(),
+            "hello-dex" => {
+                if arg.is_empty() {
+                    "{\"ok\":0,\"error\":\"hello-dex requires <build_version>\"}".to_string()
+                } else {
+                    state.record_dex(arg);
+                    logi!("dex 重登记: version={}", arg);
+                    dex_hello_response(state)
+                }
+            }
+            other => format!(
+                "{{\"ok\":0,\"error\":\"subscription connection: unsupported command: {}\"}}",
+                other
+            ),
+        };
+        writer.write_all(resp.as_bytes())?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+}
+
+/// fetch-dex：读 canonical 字节源（root 专属路径），头行 + 原始字节帧应答。
+/// 客户端（桩冷启动自愈 / dex 层版本落后自愈）按 size 精确读取后自行关闭连接。
+fn serve_dex_bytes(writer: &mut UnixStream, state: &DaemonState) -> std::io::Result<()> {
+    match std::fs::read(paths::PROBE_DEX) {
+        Ok(bytes) => {
+            let expected_json = match state.expected_dex_hash() {
+                Some(h) => format!("\"{}\"", h),
+                None => "null".to_string(),
+            };
+            let header = format!(
+                "{{\"ok\":1,\"size\":{},\"expected_hash\":{}}}",
+                bytes.len(),
+                expected_json
+            );
+            writer.write_all(header.as_bytes())?;
+            writer.write_all(b"\n")?;
+            writer.write_all(&bytes)?;
+            writer.flush()?;
+            logi!("fetch-dex: 已下发 {} 字节", bytes.len());
+        }
+        Err(e) => {
+            let resp = format!(
+                "{{\"ok\":0,\"error\":\"read {} failed: {}\"}}",
+                paths::PROBE_DEX,
+                e
+            );
+            writer.write_all(resp.as_bytes())?;
+            writer.write_all(b"\n")?;
+            writer.flush()?;
+        }
+    }
+    Ok(())
+}
+
+/// push-dex（仅 root 管理面）：读 dex 文件 → 广播事件头行 + 字节帧给全部订阅者。
+/// 无订阅者不算失败（notified=0：冷启动时桩会经 hello 应答拿到新 dex / dex 自愈）。
+fn push_dex(state: &DaemonState, arg: &str) -> String {
+    let path = if arg.is_empty() { paths::PROBE_DEX } else { arg };
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let expected_json = match state.expected_dex_hash() {
+                Some(h) => format!("\"{}\"", h),
+                None => "null".to_string(),
+            };
+            let header = format!(
+                "{{\"event\":\"dex-push\",\"size\":{},\"expected_hash\":{}}}\n",
+                bytes.len(),
+                expected_json
+            );
+            let notified = state.broadcast_dex(header.as_bytes(), &bytes);
+            logi!("push-dex: {} 字节 → 通知 {} 个订阅者", bytes.len(), notified);
+            format!(
+                "{{\"ok\":1,\"notified\":{},\"size\":{},\"dex_path\":\"{}\"}}",
+                notified,
+                bytes.len(),
+                path
+            )
+        }
+        Err(e) => format!("{{\"ok\":0,\"error\":\"read {} failed: {}\"}}", path, e),
+    }
+}
+
+/// hello-dex 应答：期望版本比对结果 + 冷启动兜底 dex 路径（magic-mount，uid 1000 可读）
+fn dex_hello_response(state: &DaemonState) -> String {
+    let expected = state.expected_dex_hash();
+    let reported = state.dex.lock().unwrap().as_ref().map(|d| d.build_version.clone());
+    // dex_hash_match 三态：1=匹配，0=不匹配（dex 侧据此 fetch-dex 自愈），-1=无期望值可比
+    let hash_match = match (&expected, &reported) {
+        (Some(e), Some(r)) if e == r => 1,
+        (Some(_), Some(_)) => 0,
+        _ => -1,
+    };
+    let expected_json = match &expected {
+        Some(h) => format!("\"{}\"", h),
+        None => "null".to_string(),
+    };
+    let dex_present = std::path::Path::new(paths::PROBE_DEX_MOUNT).exists();
+    format!(
+        "{{\"ok\":1,\"dex_hash_match\":{},\"expected_dex_hash\":{},\"dex_path\":\"{}\",\"dex_present\":{}}}",
+        hash_match,
+        expected_json,
+        paths::PROBE_DEX_MOUNT,
+        dex_present as i32,
+    )
+}
+
 /// hello-probe / probe-query 的统一应答：
-/// 期望 hash 比对结果 + probe.dex 路径与存在性（L1 桩据此决定是否加载 dex）
+/// 期望 hash 比对结果 + probe.dex 路径与存在性（L1 桩据此决定是否加载 dex）。
+/// 注意：dex_path 必须指向 uid 1000 可读的 magic-mount 路径（PROBE_DEX_MOUNT），
+/// 绝不指向 /data/adb 下的 canonical 字节源（DAC 层 EACCES，L1 真机已实证）；
+/// canonical 路径仅供 root 侧 fetch-dex / push-dex 读字节经 socket 下发。
 fn probe_response(state: &DaemonState) -> String {
     let expected = state.expected_hash();
     let reported = state.probe.lock().unwrap().as_ref().map(|p| p.build_hash.clone());
@@ -178,12 +352,12 @@ fn probe_response(state: &DaemonState) -> String {
         Some(h) => format!("\"{}\"", h),
         None => "null".to_string(),
     };
-    let dex_present = std::path::Path::new(paths::PROBE_DEX).exists();
+    let dex_present = std::path::Path::new(paths::PROBE_DEX_MOUNT).exists();
     format!(
         "{{\"ok\":1,\"hash_match\":{},\"expected_hash\":{},\"dex_path\":\"{}\",\"dex_present\":{}}}",
         hash_match,
         expected_json,
-        paths::PROBE_DEX,
+        paths::PROBE_DEX_MOUNT,
         dex_present as i32,
     )
 }

@@ -5,6 +5,13 @@ target/
 # C++ 探针桩构建产物
 probe/build/
 
+# L2 dex 工程构建产物
+dex/build/
+
+# CI 打包时注入模块的 dex 资产（不提交；git 中仅保留源码，资产由 build-dex job 产出）
+module/probe/
+module/system/etc/sundown/probe.dex
+
 # 打包产物
 *.zip
 

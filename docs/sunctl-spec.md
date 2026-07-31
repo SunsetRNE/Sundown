@@ -14,7 +14,7 @@
 | `env-check` | — | 环境自检（KSU、Zygisk 提供方、文件完整性、迁移标记） | 0=通过；1=存在缺失项 |
 | `restart-daemon` | — | 重启 sundownd（杀旧→启动→验证 PID） | 0=成功；1=失败 |
 | `restart-runtime` | `--yes`（必需） | 软重启 zygote（`ctl.restart`）。无 `--yes` 时仅打印警告 | 0=已触发；2=未确认拒绝执行 |
-| `reload-probe` | — | 【L2 交付】通知 daemon 推送 probe.dex 热切换 | 3=当前阶段未实现 |
+| `reload-probe` | — | 【L2 已交付】经 daemon 管理面推送 probe.dex，运行中 dex 层 ClassLoader 热切换 | 0=成功（含 notified:0 的静默落地）；1=daemon 未连接/推送失败 |
 | `apply-update` | — | 【后续交付】激活 staged 守护进程更新 | 3=当前阶段未实现 |
 | `logs` | `[行数=50]` | 输出 boot_watchdog.log 末尾 | 0 |
 | `version` | — | 模块与 daemon 版本 | 0 |
@@ -43,6 +43,7 @@ WebUI 仪表盘依赖以下字段，**任何实现变更必须向后兼容**（�
   "zygisk_provider": "rezygisk | zygisknext | magisk-zygisk | none",
   "probe_stub_loaded": 0,
   "probe_dex_version": null,
+  "probe_dex_hash_match": null,
   "boot_completed": "1"
 }
 ```
@@ -51,7 +52,11 @@ WebUI 仪表盘依赖以下字段，**任何实现变更必须向后兼容**（�
 - `probe_stub_loaded`：L1 起为真实值（桩 hello-probe 上报后置 1）；socket 数据源专属，fs 降级时恒 0
 - `probe_stub_build_hash`：L1 起由 socket 数据源追加（桩上报的 build hash；未上报为 `null`），
   软重启 hash 验证闭环见 probe/README.md
-- `probe_dex_version`：L2 阶段填入真实值；当前恒为 `null`
+- `probe_dex_version`：L2 起为真实值（dex 层 hello-dex 上报的构建版本 = CI 构建 commit short sha；
+  未上报为 `null`），四位一体闭环见 dex/README.md
+- `probe_dex_hash_match`：L2 起由 socket 数据源追加。三态：`1`=与模块内 probe.dex.hash 匹配；
+  `0`=不匹配（可 `reload-probe` 热更新自愈）；`-1`=无期望值可比（dev 场景，模块内无 probe.dex.hash）。
+  fs 降级时为 `null`
 
 ## `status` 数据源与 socket 通道
 
@@ -65,7 +70,8 @@ WebUI 仪表盘依赖以下字段，**任何实现变更必须向后兼容**（�
 - socket 协议：一行一个命令，应答一行 JSON。命令面：
   `ping` / `status` / `reload-config` / `stop`（L0）；
   `hello-probe <hash>` / `probe-query`（L1，桩握手与查询）；
-  `push-dex`（L2 预留）
+  `hello-dex <version>` / `fetch-dex` / `push-dex`（L2，dex 握手订阅/字节拉取/管理面推送，
+  协议细节与热切换时序见 dex/README.md 与 docs/l2-plan.md）
 - **双通道**（同一套行协议，daemon 同时监听）：
   - 文件 socket `/data/adb/sundown/sundownd.sock` —— root 管理面（sunctl/WebUI）。
     注意 `/data/adb` 为 `drwx------ root root`，**system_server(uid 1000) 在 DAC 层

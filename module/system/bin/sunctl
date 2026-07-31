@@ -10,7 +10,7 @@ INSTALLED_META="$SUNDOWN_DIR/update/installed.json"
 READY_MARKER="$SUNDOWN_DIR/update/daemon.ready"
 SOCK_PATH="$SUNDOWN_DIR/sundownd.sock"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.2.2-l1"
+VERSION="0.3.0-l2"
 
 # ---------- 工具函数 ----------
 
@@ -98,7 +98,17 @@ cmd_status() {
             else
                 echo "  L1 探针桩:     ⏸ 已打包入模块，待重启后激活"
             fi
-            echo "  L2 探针 dex:   未实现（L2 阶段交付）"
+            dver="$(printf '%s' "$sock_json" | json_str_in probe_dex_version)"
+            dmatch="$(printf '%s' "$sock_json" | json_int_in probe_dex_hash_match)"
+            if [ -n "$dver" ]; then
+                case "$dmatch" in
+                    1) echo "  L2 探针 dex:   ✅ 运行中 (build: $dver, 版本闭环匹配)" ;;
+                    0) echo "  L2 探针 dex:   ⚠️ 运行中 (build: $dver, 与期望版本不符，可 sunctl reload-probe)" ;;
+                    *) echo "  L2 探针 dex:   ✅ 运行中 (build: $dver)" ;;
+                esac
+            else
+                echo "  L2 探针 dex:   ⏸ 待探针上线后加载（冷启动/断线自愈）"
+            fi
         fi
         return 0
     fi
@@ -119,6 +129,7 @@ cmd_status() {
   "zygisk_provider": "$provider",
   "probe_stub_loaded": 0,
   "probe_dex_version": null,
+  "probe_dex_hash_match": null,
   "boot_completed": "$boot_completed"
 }
 EOF
@@ -132,7 +143,7 @@ EOF
         fi
         echo "  Zygisk 提供方: $provider"
         echo "  L1 探针桩:     ⏸ 已打包入模块，待重启后激活"
-        echo "  L2 探针 dex:   未实现（L2 阶段交付）"
+        echo "  L2 探针 dex:   ⏸ daemon 未连接，运行态未知（冷启动兜底走 magic-mount 路径）"
     fi
     [ "$running" = "1" ] && return 0 || return 1
 }
@@ -172,9 +183,30 @@ cmd_restart_runtime() {
 }
 
 cmd_reload_probe() {
-    # L2 阶段实现：通知 daemon 推送新 probe.dex 并热切换
-    echo "❌ reload-probe 将在 L2 阶段提供（probe.dex 热更新）" >&2
-    return 3
+    # L2 热更新：经 daemon 管理面推送 probe.dex，运行中的 dex 层 ClassLoader 热切换
+    resp="$(sock_query "push-dex")"
+    if [ -z "$resp" ]; then
+        echo "❌ daemon 未连接（socket 不可用），无法推送" >&2
+        return 1
+    fi
+    ok="$(printf '%s' "$resp" | json_int_in ok)"
+    if [ "$ok" != "1" ]; then
+        err="$(printf '%s' "$resp" | json_str_in error)"
+        echo "❌ 推送失败: ${err:-未知错误}" >&2
+        return 1
+    fi
+    notified="$(printf '%s' "$resp" | json_int_in notified)"
+    dex_path="$(printf '%s' "$resp" | json_str_in dex_path)"
+    size="$(printf '%s' "$resp" | json_int_in size)"
+    if [ "${notified:-0}" -ge 1 ]; then
+        echo "✅ 已推送 probe.dex（${size:-?} 字节）并通知 ${notified} 个在线探针热切换"
+        echo "   字节源: $dex_path"
+        echo "   提示: 热切换结果以 logcat（tag SundownDex）与 sunctl status 的 probe_dex_version 为准"
+    else
+        echo "ℹ️  当前无在线探针 dex；新 dex 将在探针下次上线时自动加载（冷启动/自愈）"
+        echo "   字节源: $dex_path（${size:-?} 字节）"
+    fi
+    return 0
 }
 
 cmd_apply_update() {

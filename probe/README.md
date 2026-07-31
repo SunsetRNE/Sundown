@@ -47,6 +47,9 @@ CI 构建：git short sha ──(-DPROBE_BUILD_HASH)──► libsunprobe.so 内
 
 - daemon 应答：`{"ok":1,"hash_match":1|0|-1,"expected_hash":"...","dex_path":"...","dex_present":0|1}`
   （`hash_match=-1` 表示模块内无 probe.hash，本地 dev 构建场景）
+- **L2 起 `dex_path` 一律指向 magic-mount 的 `/system/etc/sundown/probe.dex`**
+  （uid 1000 可读、SELinux `system_file` 无争议），不再指向 `/data/adb` 下任何路径——
+  该目录 `drwx------ root`，桩/dex 层在 DAC 层不可达（同上方踩坑定稿）
 - `probe-query` 命令提供相同应答但无记录副作用（L2 dex 层轮询用）
 
 ## L2 契约（dex 层入口）
@@ -54,13 +57,17 @@ CI 构建：git short sha ──(-DPROBE_BUILD_HASH)──► libsunprobe.so 内
 ```java
 package ren.sunset.sundown;
 public final class ProbeMain {
-    /** 由 L1 桩在 system_server 中经 DexClassLoader 调用 */
+    /** 由 L1 桩在 system_server 中经 DexClassLoader 调用（冷启动，dex 走 dex_path） */
     public static void init(String socketPath, String stubBuildHash) { ... }
+    /** 热切换：旧代 ClassLoader 反射调用新代（跨 ClassLoader 只传 bootstrap 类型） */
+    public static boolean hotSwap(String socketPath, String stubBuildHash) { ... }
 }
 ```
 
-dex 层自此接管：连 daemon 订阅事件、热切换（新 ClassLoader 重载自身）、
-Hook 编排（LSPlant）。桩不再参与，这是"桩不更新"的关键。
+dex 层自此接管：连 daemon 订阅事件、热切换（`InMemoryDexClassLoader` 重载自身，
+失败回滚铁律）、Hook 编排（LSPlant 骨架）。桩不再参与，这是"桩不更新"的关键。
+协议三命令（`hello-dex`/`fetch-dex`/`push-dex`）、热切换时序、版本闭环详见
+[dex/README.md](../dex/README.md)。
 
 ## 构建
 

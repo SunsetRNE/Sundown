@@ -75,6 +75,31 @@ done
 [ -f "$SUNDOWN_DIR/index_dump.log" ] && move_if_missing "$SUNDOWN_DIR/index_dump.log" "$LOG_DIR"
 # =================================================
 
+# ========== L2 探针 dex 同步：模块资产 → root 侧字节源 ==========
+# daemon(root) 从 /data/adb/sundown/probe/probe.dex 读字节，经 abstract socket 下发给
+# system_server 内的 dex 层；桩/dex 层（uid 1000）不直接读该路径（/data/adb 为
+# drwx------ root，DAC 层 EACCES——L1 真机实证）。
+# 按 hash 比对避免无谓拷贝：dex 文件 mtime 变化会触发运行期 dexopt/oat 失效。
+PROBE_SRC="$MODDIR/probe/probe.dex"
+PROBE_HASH_SRC="$MODDIR/probe/probe.dex.hash"
+PROBE_DST_DIR="$SUNDOWN_DIR/probe"
+PROBE_DST="$PROBE_DST_DIR/probe.dex"
+DEPLOYED_MARK="$PROBE_DST_DIR/.deployed_dex_hash"
+
+if [ -f "$PROBE_SRC" ]; then
+    mkdir -p "$PROBE_DST_DIR"
+    new_hash="$(cat "$PROBE_HASH_SRC" 2>/dev/null)"
+    old_hash="$(cat "$DEPLOYED_MARK" 2>/dev/null)"
+    if [ "$new_hash" != "$old_hash" ] || [ ! -f "$PROBE_DST" ]; then
+        cp "$PROBE_SRC" "$PROBE_DST"
+        chmod 0600 "$PROBE_DST"
+        # dex 变更后旧 oat 缓存失效，一并清理
+        rm -rf "$PROBE_DST_DIR/oat" 2>/dev/null
+        echo "$new_hash" > "$DEPLOYED_MARK"
+    fi
+fi
+# =================================================
+
 # 注意：属性设置已移至 system.prop，由 KernelSU/Magisk 自动应用。
 # Magisk fallback 只兜底 persist.*，避免在 post-fs-data 阶段强制覆盖 ro.* / sys.*。
 if [ -z "$KSU" ] && [ -f "$PROP_FILE" ]; then

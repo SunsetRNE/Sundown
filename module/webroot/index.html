@@ -85,6 +85,11 @@
 </div>
 
 <div class="card">
+  <h2>探针（L2）</h2>
+  <button id="btn-reload-probe">🚀 热更新探针 dex</button>
+</div>
+
+<div class="card">
   <h2>运行时</h2>
   <button class="danger" id="btn-restart-runtime">⚡ 软重启运行时（zygote）</button>
 </div>
@@ -129,9 +134,13 @@ async function refreshStatus() {
   $("st-stub").innerHTML = s.probe_stub_loaded
     ? '<span class="ok">✅ 已注入 system_server (hash: ' + (s.probe_stub_build_hash || "?") + ')</span>'
     : '<span class="warn">⏳ 待重启后激活</span>';
-  $("st-dex").innerHTML = s.probe_dex_version
-    ? '<span class="ok">✅ ' + s.probe_dex_version + '</span>'
-    : '<span style="color:var(--dim)">未交付（L2 阶段）</span>';
+  if (s.probe_dex_version) {
+    $("st-dex").innerHTML = (s.probe_dex_hash_match === 0)
+      ? '<span class="warn">⚠️ ' + s.probe_dex_version + '（与期望版本不符，可点下方热更新）</span>'
+      : '<span class="ok">✅ ' + s.probe_dex_version + '</span>';
+  } else {
+    $("st-dex").innerHTML = '<span style="color:var(--dim)">⏸ 待探针上线后加载（冷启动/断线自愈）</span>';
+  }
 }
 
 async function loadLogs() {
@@ -145,6 +154,18 @@ $("btn-restart-daemon").onclick = async () => {
   const r = await exec(SUNCTL + " restart-daemon");
   toast(r.errno === 0 ? "守护进程已重启" : ("重启失败: " + (r.stderr || "")));
   setTimeout(refreshStatus, 1200);
+};
+
+$("btn-reload-probe").onclick = async () => {
+  toast("正在推送 probe.dex …");
+  const r = await exec(SUNCTL + " reload-probe");
+  const firstLine = (r.stdout || "").split("\n")[0];
+  if (r.errno === 0) {
+    toast(firstLine || "✅ 已推送");
+  } else {
+    toast("❌ " + ((r.stderr || "").trim() || "推送失败"));
+  }
+  setTimeout(refreshStatus, 2000);
 };
 
 $("btn-restart-runtime").onclick = async () => {

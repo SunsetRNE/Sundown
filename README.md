@@ -21,7 +21,8 @@ Sundown/
 ├── README.md               # 本文件
 ├── NAMING.md               # 命名规范（定稿，唯一权威副本）
 ├── docs/
-│   └── sunctl-spec.md      # sunctl CLI 命令规范与退出码契约
+│   ├── sunctl-spec.md      # sunctl CLI 命令规范与退出码契约
+│   └── l2-plan.md          # L2 推进计划（DAC 裁决 / 协议 / 热切换，权威副本）
 ├── daemon/                 # sundownd Rust 源码（L0 最小实现）
 │   ├── Cargo.toml          # 仅依赖 libc；release 体积优化
 │   ├── README.md           # 构建/部署/staged 更新约定/冒烟测试
@@ -37,6 +38,9 @@ Sundown/
 │   ├── README.md           # L1 定位铁律 / hash 闭环 / L2 契约 / SELinux 备忘
 │   ├── include/zygisk.hpp  # Zygisk API v4 头文件（模板同款）
 │   └── src/probe.cpp       # 桩：system_server 驻留 + hello-probe + dex 加载桥
+├── dex/                    # probe.dex Java 源码（L2 探针逻辑层）
+│   ├── README.md           # DAC 铁律 / 协议三命令 / 热切换时序 / 版本闭环 / 本地构建
+│   └── src/ren/sunset/sundown/  # ProbeMain 入口 + DaemonLink + Runtime 代际 + hook 骨架
 └── module/                 # KSU 模块（目录内容即模块 zip 内容）
     ├── module.prop         # id=sundown, author=SunsetREN
     ├── customize.sh        # 安装脚本（环境/ABI 检查、设备适配属性、ReZygisk 检测）
@@ -49,8 +53,10 @@ Sundown/
     │   ├── sundownd        # 【占位】守护进程二进制，CI 打包时注入真实产物
     │   └── sunctl          # 控制 CLI（L0 shell 实现，命令面已定稿）
     ├── zygisk/             # 【CI 生成】arm64-v8a.so（libsunprobe）+ probe.hash
+    ├── probe/              # 【CI 生成】probe.dex + probe.dex.hash（root 字节源，post-fs-data 同步到 /data/adb）
+    ├── system/etc/sundown/probe.dex  # 【CI 生成】magic-mount 冷启动兜底（uid 1000 可读）
     └── webroot/
-        └── index.html      # KSU WebUI 仪表盘（L0 只读 + daemon/运行时控制）
+        └── index.html      # KSU WebUI 仪表盘（状态展示 + daemon/运行时/探针热更新控制）
 ```
 
 ## 版本号策略（升级检查清单）
@@ -69,7 +75,7 @@ Sundown/
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
-## 当前状态：L0 ✅ ｜ L1 ✅（真机验证通过）
+## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅（工程闭环完成，待真机回归）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
@@ -90,7 +96,15 @@ Sundown/
   （桩上报 = 模块 probe.hash = CI 构建 commit = git HEAD）；
   v0.2.2-l1 abstract socket 启动同秒握手成功，对照 v0.2.1-l1 文件 socket 全程无握手，
   根治 /data/adb DAC 层 EACCES 实证
-- [ ] L2：`probe.dex` + LSPlant 集成 + 热切换
+- [x] L2：`probe.dex` 工程化 + 热切换闭环（v0.3.0-l2）：
+  dex/ Java 工程（ProbeMain 契约入口 + DaemonLink 帧纪律 + Runtime 代际模型 + LSPlant 降级桥）；
+  daemon 协议面 hello-dex（订阅长连接）/ fetch-dex（字节帧）/ push-dex（root 管理面广播）；
+  dex 字节全程走 abstract socket（InMemoryDexClassLoader），冷启动兜底 magic-mount
+  `/system/etc/sundown/probe.dex`——绕开 /data/adb DAC 铁律；
+  post-fs-data dex 同步（hash 比对防无谓 dexopt）、CI build-dex job、
+  WebUI/sunctl 热更新入口、status 新增 probe_dex_version/probe_dex_hash_match；
+  本地 javac+d8 编译链与 cargo check 零错误。LSPlant 真实 hook 留 L2b
+- [ ] L2b：LSPlant native 集成 + AMS 焦点/Binder 豁免真实 hook（需真机验证 execmod）
 - [ ] L3：策略引擎与情景预设
 
 ## 依赖
