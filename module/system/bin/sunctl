@@ -10,7 +10,7 @@ INSTALLED_META="$SUNDOWN_DIR/update/installed.json"
 READY_MARKER="$SUNDOWN_DIR/update/daemon.ready"
 SOCK_PATH="$SUNDOWN_DIR/sundownd.sock"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.3.0-l2"
+VERSION="0.3.1-l2"
 
 # ---------- 工具函数 ----------
 
@@ -107,7 +107,13 @@ cmd_status() {
                     *) echo "  L2 探针 dex:   ✅ 运行中 (build: $dver)" ;;
                 esac
             else
-                echo "  L2 探针 dex:   ⏸ 待探针上线后加载（冷启动/断线自愈）"
+                if [ "$stub" = "1" ]; then
+                    # 桩在线但 dex 未上报：桩的 dex 加载桥是一次性的（失败不重试），
+                    # 此状态=冷启动加载失败，需软重启 zygote 重试或查 logcat 取证
+                    echo "  L2 探针 dex:   ⚠️ 桩已在线但 dex 未接管（软重启运行时重试；查 logcat SundownProbe/SundownDex）"
+                else
+                    echo "  L2 探针 dex:   ⏸ 待重启后随桩注入加载（冷启动/断线自愈）"
+                fi
             fi
         fi
         return 0

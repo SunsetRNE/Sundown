@@ -1,6 +1,11 @@
 # L2 推进计划：probe.dex 工程化 + 热切换闭环（第一阶段）
 
-> 状态：✅ 已完成（v0.3.0-l2，工程闭环；LSPlant 真实 hook 留 L2b，真机回归待办）｜ 目标版本：v0.3.0-l2 ｜ 决策：SunsetREN
+> 状态：✅ 已完成（v0.3.0-l2，工程闭环；LSPlant 真实 hook 留 L2b）｜ 目标版本：v0.3.0-l2 ｜ 决策：SunsetREN
+> 真机回归：v0.3.0-l2 首验发现桩 dex 加载桥断裂（GetStaticMethodID 拿错归属类
+> `java/lang/Class`→应为 `java/lang/ClassLoader`；optimizedDirectory 显式指向 DAC 死路径
+> 改传 nullptr；FALLBACK_DEX 对齐 magic-mount）→ **v0.3.1-l2 patch 修复**（桩三处 +
+> sunctl/WebUI L2 状态行文案按「桩一次性加载」如实化；RELEASE_NO 保持 4，daemon 逻辑未变）。
+> 详见 probe/README.md「dex 加载桥 JNI 备忘」。
 > 前置：L0 ✅ L1 ✅（真机验证通过）。本计划为 L2 第一刀：先立「dex 工程闭环 + 热切换」，
 > LSPlant hook 逻辑作为接入骨架留下一刀（类比 L1「先桩工程化、再真机验证」的节奏）。
 

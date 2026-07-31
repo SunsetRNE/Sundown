@@ -34,6 +34,25 @@ boot completed 后：service.sh 才启动 sundownd → socket 开始监听
 窗口 120s 覆盖 daemon 拉起延迟；dex 加载前 `AttachCurrentThread` 获取
 本线程 JNIEnv（后台线程不能复用 specialize 线程的 env）。
 
+## dex 加载桥 JNI 备忘（v0.3.1-l2 真机实证修复）
+
+v0.3.0-l2 真机验证时 dex 冷启动链断裂（桩静默驻留、dex 永不上线），logcat
+取证 `DexClassLoader 方法签名解析失败`，修复三点：
+
+1. **`ClassLoader.getSystemClassLoader()` 是 `java.lang.ClassLoader` 的静态方法，
+   不是 `java.lang.Class` 的**。`GetStaticMethodID` 拿错类返回 nullptr（伴随
+   `NoSuchMethodError` 待查异常）。桩的 JNI 反射一律显式 `FindClass` 到方法
+   真正归属的类，不图省事复用 jclass。
+2. **DexClassLoader 的 `optimizedDirectory` 传 `nullptr`**，由 ART 自选 oat 落点
+   （dalvik-cache，system_server 可写）。严禁显式指向 `/data/adb` 下目录
+   （uid 1000 DAC 不可达，dexopt 失败/降级）。
+3. **`FALLBACK_DEX` 与 daemon 应答对齐到 magic-mount 的
+   `/system/etc/sundown/probe.dex`**；`/data/adb/sundown/probe/probe.dex` 对
+   uid 1000 是 DAC 死路径，只作 daemon(root) 的 socket 字节源。
+
+另注意：桩的 dex 加载是**一次性**的（失败/缺失后桩驻留不重试，等待下次
+软重启或开机）——状态面文案已按此如实描述（sunctl/WebUI 的 L2 状态行）。
+
 ## build hash 验证闭环
 
 ```

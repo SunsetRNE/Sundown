@@ -139,7 +139,11 @@ async function refreshStatus() {
       ? '<span class="warn">⚠️ ' + s.probe_dex_version + '（与期望版本不符，可点下方热更新）</span>'
       : '<span class="ok">✅ ' + s.probe_dex_version + '</span>';
   } else {
-    $("st-dex").innerHTML = '<span style="color:var(--dim)">⏸ 待探针上线后加载（冷启动/断线自愈）</span>';
+    // 桩在线但 dex 未上报 = 冷启动加载失败（桩加载桥一次性，不重试）；
+    // 桩不在线 = 待重启后随桩注入加载。两种状态文案分开，避免误导（v0.3.1-l2 修正）
+    $("st-dex").innerHTML = s.probe_stub_loaded
+      ? '<span class="warn">⚠️ 桩已在线但 dex 未接管（软重启运行时重试；查 logcat SundownProbe/SundownDex）</span>'
+      : '<span style="color:var(--dim)">⏸ 待重启后随桩注入加载（冷启动/断线自愈）</span>';
   }
 }
 

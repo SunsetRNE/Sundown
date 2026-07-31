@@ -34,8 +34,10 @@ using zygisk::Api;
 #endif
 
 static constexpr const char *ABSTRACT_SOCK = "sundown_probe"; // 与 daemon paths.rs PROBE_ABSTRACT_SOCK 对齐
-static constexpr const char *FALLBACK_DEX = "/data/adb/sundown/probe/probe.dex";
-static constexpr const char *OAT_DIR = "/data/adb/sundown/probe/oat";
+// 冷启动兜底 dex 路径：模块 magic-mount（全局可读、SELinux system_file 无争议）。
+// 严禁指向 /data/adb 下任何路径：该目录 drwx------ root root，uid 1000 在 DAC 层
+// 即 EACCES（L1 真机实证）；daemon hello-probe 应答的 dex_path 也一律指向此路径。
+static constexpr const char *FALLBACK_DEX = "/system/etc/sundown/probe.dex";
 static constexpr const char *ENTRY_CLASS = "ren.sunset.sundown.ProbeMain";
 
 // 与 daemon 控制面行协议通信：发一行命令，读一行 JSON 应答。失败返回空串。
@@ -172,28 +174,33 @@ private:
 
     void load_dex(JNIEnv *env, const std::string &dex_path) {
         jclass cl_cls = env->FindClass("dalvik/system/DexClassLoader");
-        jclass class_cls = env->FindClass("java/lang/Class");
-        if (!cl_cls || !class_cls) {
+        jclass loader_cls = env->FindClass("java/lang/ClassLoader");
+        if (!cl_cls || !loader_cls) {
             if (env->ExceptionCheck()) env->ExceptionClear();
-            LOGE("系统类查找失败（DexClassLoader/Class）");
+            LOGE("系统类查找失败（DexClassLoader/ClassLoader）");
             return;
         }
 
         jmethodID cl_ctor = env->GetMethodID(
                 cl_cls, "<init>",
                 "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/ClassLoader;)V");
+        // getSystemClassLoader 是 java.lang.ClassLoader 的静态方法
+        // （不是 java.lang.Class 的——v0.3.0-l2 真机实证拿错类导致签名解析失败，
+        //   dex 冷启动链断裂，桩静默驻留）
         jmethodID get_sys_cl = env->GetStaticMethodID(
-                class_cls, "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
+                loader_cls, "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
         if (!cl_ctor || !get_sys_cl) {
             if (env->ExceptionCheck()) env->ExceptionClear();
             LOGE("DexClassLoader 方法签名解析失败");
             return;
         }
-        jobject sys_cl = env->CallStaticObjectMethod(class_cls, get_sys_cl);
+        jobject sys_cl = env->CallStaticObjectMethod(loader_cls, get_sys_cl);
 
         jstring j_dex = env->NewStringUTF(dex_path.c_str());
-        jstring j_oat = env->NewStringUTF(OAT_DIR);
-        jobject loader = env->NewObject(cl_cls, cl_ctor, j_dex, j_oat, nullptr, sys_cl);
+        // optimizedDirectory 传 nullptr：由 ART 自选 oat 落点（dalvik-cache，
+        // system_server 可写）。严禁显式指向 /data/adb 下目录——uid 1000 DAC 不可达，
+        // 真机会导致 dexopt 失败/降级（v0.3.0-l2 真机排障结论）。
+        jobject loader = env->NewObject(cl_cls, cl_ctor, j_dex, nullptr, nullptr, sys_cl);
         if (env->ExceptionCheck() || !loader) {
             if (env->ExceptionCheck()) { env->ExceptionDescribe(); env->ExceptionClear(); }
             LOGE("DexClassLoader 创建失败: %s", dex_path.c_str());
