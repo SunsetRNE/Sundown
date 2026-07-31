@@ -11,6 +11,12 @@ dex/build/
 # CI 打包时注入模块的 dex 资产（不提交；git 中仅保留源码，资产由 build-dex job 产出）
 module/probe/
 module/system/etc/sundown/probe.dex
+module/system/etc/sundown/bridge.dex
+
+# L2b native 伴生库构建产物与 CI 注入资产（build-bridge job 产出）
+bridge/build/
+module/system/lib64/
+module/hook/
 
 # 打包产物
 *.zip

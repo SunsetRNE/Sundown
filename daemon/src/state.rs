@@ -23,6 +23,13 @@ pub struct DexReport {
     pub reported_after_secs: u64,
 }
 
+/// L2b native 伴生库的 report-bridge 上报记录
+pub struct BridgeReport {
+    /// bridge 构建 hash（= CI 构建 commit short sha，与桩/dex hash 同源闭环）
+    pub build_hash: String,
+    pub reported_after_secs: u64,
+}
+
 pub struct DaemonState {
     pub started_at: Instant,
     pub config_reloads: AtomicU64,
@@ -39,6 +46,16 @@ pub struct DaemonState {
     /// 元素为 (订阅 id, 可写副本)，id 单调分配，断连/写失败剔除
     pub dex_clients: Mutex<Vec<(u64, UnixStream)>>,
     pub next_dex_client_id: AtomicU64,
+    /// bridge 最近一次 report-bridge 上报（L2b：只存最新一条即够）
+    pub hook_bridge: Mutex<Option<BridgeReport>>,
+    /// 期望的 bridge build hash（模块内 hook/hook.hash；缺失时为 None）
+    pub expected_hook_hash: Mutex<Option<String>>,
+    /// 最近一次焦点包名（event focus 上行；L2b 观测面）
+    pub last_focus_pkg: Mutex<Option<String>>,
+    /// 焦点切换累计次数
+    pub focus_changes: AtomicU64,
+    /// 唤醒入口命中累计次数（event wakeup 上行）
+    pub wakeup_events: AtomicU64,
 }
 
 /// 从模块目录读取期望 hash（启动 / reload-config 时调用）
@@ -57,6 +74,14 @@ fn read_expected_dex_hash() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// 从模块目录读取期望 bridge build hash（同上，L2b 闭环）
+fn read_expected_hook_hash() -> Option<String> {
+    std::fs::read_to_string(paths::PROBE_EXPECTED_HOOK_HASH_FILE)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 impl DaemonState {
     pub fn new() -> Self {
         Self {
@@ -69,6 +94,11 @@ impl DaemonState {
             expected_dex_hash: Mutex::new(read_expected_dex_hash()),
             dex_clients: Mutex::new(Vec::new()),
             next_dex_client_id: AtomicU64::new(0),
+            hook_bridge: Mutex::new(None),
+            expected_hook_hash: Mutex::new(read_expected_hook_hash()),
+            last_focus_pkg: Mutex::new(None),
+            focus_changes: AtomicU64::new(0),
+            wakeup_events: AtomicU64::new(0),
         }
     }
 
@@ -102,6 +132,7 @@ impl DaemonState {
     pub fn refresh_expected_hash(&self) {
         *self.expected_probe_hash.lock().unwrap() = read_expected_hash();
         *self.expected_dex_hash.lock().unwrap() = read_expected_dex_hash();
+        *self.expected_hook_hash.lock().unwrap() = read_expected_hook_hash();
     }
 
     // ---------------- L2 dex 层状态 ----------------
@@ -118,6 +149,33 @@ impl DaemonState {
     /// 当前期望的 dex 构建版本（None = 模块内无 probe.dex.hash）
     pub fn expected_dex_hash(&self) -> Option<String> {
         self.expected_dex_hash.lock().unwrap().clone()
+    }
+
+    // ---------------- L2b bridge / 事件观测面 ----------------
+
+    /// report-bridge：记录 bridge 上报的 build hash
+    pub fn record_bridge(&self, hash: &str) {
+        let report = BridgeReport {
+            build_hash: hash.to_string(),
+            reported_after_secs: self.uptime_secs(),
+        };
+        *self.hook_bridge.lock().unwrap() = Some(report);
+    }
+
+    /// 当前期望的 bridge build hash（None = 模块内无 hook/hook.hash）
+    pub fn expected_hook_hash(&self) -> Option<String> {
+        self.expected_hook_hash.lock().unwrap().clone()
+    }
+
+    /// event focus：记录最新焦点包名并累计切换次数
+    pub fn record_focus(&self, pkg: &str) {
+        *self.last_focus_pkg.lock().unwrap() = Some(pkg.to_string());
+        self.focus_changes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// event wakeup：累计唤醒入口命中次数（广播风暴下只计数不逐条日志）
+    pub fn bump_wakeup(&self) {
+        self.wakeup_events.fetch_add(1, Ordering::Relaxed);
     }
 
     // ---------------- dex 事件订阅注册表 ----------------
@@ -176,6 +234,25 @@ impl DaemonState {
                 None => ("null".to_string(), -1),
             }
         };
+        let (bridge_hash_json, bridge_hash_match) = {
+            let guard = self.hook_bridge.lock().unwrap();
+            let expected = self.expected_hook_hash.lock().unwrap();
+            match guard.as_ref() {
+                Some(b) => {
+                    let m = match expected.as_ref() {
+                        Some(e) if e == &b.build_hash => 1,
+                        Some(_) => 0,
+                        None => -1,
+                    };
+                    (format!("\"{}\"", b.build_hash), m)
+                }
+                None => ("null".to_string(), -1),
+            }
+        };
+        let focus_pkg_json = match self.last_focus_pkg.lock().unwrap().as_ref() {
+            Some(p) => format!("\"{}\"", p),
+            None => "null".to_string(),
+        };
         format!(
             concat!(
                 "{{",
@@ -190,6 +267,11 @@ impl DaemonState {
                 "\"probe_stub_build_hash\":{stub_hash},",
                 "\"probe_dex_version\":{dex_version},",
                 "\"probe_dex_hash_match\":{dex_match},",
+                "\"probe_hook_bridge_hash\":{bridge_hash},",
+                "\"probe_hook_bridge_hash_match\":{bridge_match},",
+                "\"focus_pkg\":{focus_pkg},",
+                "\"focus_changes\":{focus_changes},",
+                "\"wakeup_events\":{wakeup_events},",
                 "\"uptime_s\":{uptime},",
                 "\"config_reloads\":{reloads},",
                 "\"connections_served\":{conns}",
@@ -202,6 +284,11 @@ impl DaemonState {
             stub_hash = stub_hash_json,
             dex_version = dex_version_json,
             dex_match = dex_hash_match,
+            bridge_hash = bridge_hash_json,
+            bridge_match = bridge_hash_match,
+            focus_pkg = focus_pkg_json,
+            focus_changes = self.focus_changes.load(Ordering::Relaxed),
+            wakeup_events = self.wakeup_events.load(Ordering::Relaxed),
             uptime = self.uptime_secs(),
             reloads = self.config_reloads.load(Ordering::Relaxed),
             conns = self.connections_served.load(Ordering::Relaxed),

@@ -13,12 +13,18 @@ dex/
     ├── ProbeMain.java        L2 契约入口：init() / hotSwap()（与 L1 桩的加载桥约定）
     ├── DaemonLink.java       daemon 通道客户端（abstract LocalSocket + 行协议/字节帧纪律）
     ├── Runtime.java          代际模型（Generation）+ 热切换编排 + 断线 2s 重连自愈
+    ├── EventQueue.java       【L2b】hook 事件有界缓冲（回调非阻塞，发送线程串行 drain）
     └── hook/
-        ├── HookEngine.java   hook 编排接口（install/uninstall 生命周期）
-        └── LsPlantBridge.java LSPlant 软接入降级桥（native 未接入时 noop，不阻塞闭环）
+        ├── NativeBridge.java 【L2b】伴生库 Java 契约面（canonical 类加载纪律见类注释）
+        ├── LsPlantBridge.java LSPlant 引擎装配（bridge.dex 父链 + 伴生库加载 + 降级 no-op）
+        ├── FocusHooks.java   【L2b】焦点/进程生命周期 hook 组（观测模式）
+        ├── WakeupHooks.java  【L2b】唤醒入口 hook 组（观测模式）
+        └── HookEngine.java   hook 编排接口（install/uninstall 生命周期）
 ```
 
-构建产物（`dex/build/`，git 忽略）：`probe.dex`（约 12K）+ `probe.dex.hash`。
+构建产物（`dex/build/`，git 忽略）：
+- `probe.dex`（全量源码，含 NativeBridge 死代码副本）+ `probe.dex.hash`
+- `bridge.dex`（仅 NativeBridge，canonical 副本）——L2b 类加载拓扑的 native 唯一绑定点
 
 > **语法红线：本工程禁用 lambda / 方法引用。**
 > 编译走 `javac -source 8 -target 8 -bootclasspath android.jar`，lambda 的
@@ -62,6 +68,42 @@ L1 真机实证：`/data/adb` 为 `drwx------ root root`，`system_server`（uid
 6. **任一步失败 → 旧代原样保留 = 回滚**
 
 daemon 重启/断线：dex 侧每 2s 重连重握手（对齐 L1 桩哲学）。
+
+## 上行协议（L2b 新增，hello-dex 订阅连接上 dex→daemon，只增不改）
+
+| 命令 | 说明 | 应答 |
+|---|---|---|
+| `report-bridge <hash>` | 伴生库（libsundownhook）build hash 上报（hello-dex 后紧随） | `{"ok":1,"bridge_hash_match":1\|0\|-1}` |
+| `event focus pkg=<pkg>` | 前台焦点切换（AMS#updateActivityUsageStats 实证点位） | `{"ok":1}` |
+| `event wakeup pkg=<pkg> reason=<broadcast\|service\|pendingintent>` | 唤醒入口命中 | `{"ok":1}` |
+| `event proc-add/proc-remove/force-stop ...` | 进程生命周期（L3 进程表接入点） | `{"ok":1}` |
+
+- 未知 event 子类型容错 `{"ok":1,"ignored":1}`（新旧版本滚动不炸）
+- 事件由 hook 回调经 `EventQueue` 非阻塞投递（回调可能持有 AMS 锁，绝不阻塞），
+  Runtime 发送线程串行 drain；daemon 侧只记录/计数（观测模式，无动作）
+
+## L2b 类加载拓扑（canonical NativeBridge 裁决）
+
+`System.load` 同一路径不允许被第二个 ClassLoader 加载，而热切换每代都是新
+ClassLoader——因此 native 绑定点必须收敛到**唯一 canonical 类**：
+
+```
+system CL（L1 桩冷启父链）
+  └─ bridgeLoader（DexClassLoader @ /system/etc/sundown/bridge.dex，单例，
+  │    寄存于 System.getProperties()——进程内全 loader 可见的存活全局表）
+  │    └─ canonical NativeBridge（libsundownhook 只与这个副本绑定）
+  ├─ probe.dex gen1..N（父=bridgeLoader → 父委托看到 canonical 副本）✅ 工作代
+  └─ probe.dex gen0（父=system CL，桩创建）⚠️ 引导代：
+       只能解析到自己的私有死代码副本 → LsPlantBridge.needsGenerationHop()
+       判定后由 Runtime 自热切换到工作代（gen0 绝不 System.load）
+```
+
+- `NativeBridge.ensureLoaded()` 只许在 canonical 副本上执行（身份一致性由
+  ClassLoader 比较保证）；probe.dex 中的 NativeBridge 副本是死代码
+- 伴生库本体（`system/lib64/libsundownhook.so` + `liblsplant.so`）随 magic-mount
+  出现，uid 1000 可读；更新 = 软重启（与 L1 同级成本，机制面因此不做策略）
+- bridge build hash 闭环：`report-bridge` 上报 = 模块 `hook/hook.hash` =
+  CI commit = git HEAD（status 观测 `probe_hook_bridge_hash*`）
 
 ## 版本闭环（四位一体）
 

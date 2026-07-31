@@ -23,6 +23,11 @@ pub const PROBE_EXPECTED_HASH_FILE: &str = "/data/adb/modules/sundown/zygisk/pro
 /// 期望的 dex 构建版本（CI 打包写入模块；= 构建 commit short sha，与桩 hash 同源闭环：
 /// dex 上报版本 = 模块 probe.dex.hash = CI 构建 commit = git HEAD）
 pub const PROBE_EXPECTED_DEX_HASH_FILE: &str = "/data/adb/modules/sundown/probe/probe.dex.hash";
+
+// ---- L2b native 伴生库（libsundownhook.so）相关 ----
+/// 期望的 bridge build hash（CI 打包写入模块 hook/hook.hash；与桩/dex hash 同源闭环）。
+/// magic-mount 只挂 system/ 子树，hook/ 不入 /system（与 zygisk/、probe/ 同惯例）。
+pub const PROBE_EXPECTED_HOOK_HASH_FILE: &str = "/data/adb/modules/sundown/hook/hook.hash";
 /// 冷启动兜底 dex 路径：模块 magic-mount（module/system/etc/sundown/probe.dex → /system/...）。
 /// 全局可读、SELinux 无争议，uid 1000 的桩文件加载桥可直达；
 /// hello-probe / hello-dex 应答的 dex_path 一律指向这里（不再指向 /data/adb 下任何路径，
@@ -37,7 +42,7 @@ pub const PROBE_DEX_MOUNT: &str = "/system/etc/sundown/probe.dex";
 pub const PROBE_ABSTRACT_SOCK: &str = "sundown_probe";
 
 /// 守护进程版本（与 module.prop version 同步，策略见主 README「版本号策略」）
-pub const VERSION_NAME: &str = "0.3.1-l2";
+pub const VERSION_NAME: &str = "0.3.2-l2";
 /// 单调递增的发布号：service.sh readiness 校验依据（installed.json vs daemon.ready）
 /// daemon 二进制任何变更必须 +1（只加不改）
-pub const RELEASE_NO: u32 = 4;
+pub const RELEASE_NO: u32 = 5;

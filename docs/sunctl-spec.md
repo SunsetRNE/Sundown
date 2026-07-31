@@ -57,6 +57,12 @@ WebUI 仪表盘依赖以下字段，**任何实现变更必须向后兼容**（�
 - `probe_dex_hash_match`：L2 起由 socket 数据源追加。三态：`1`=与模块内 probe.dex.hash 匹配；
   `0`=不匹配（可 `reload-probe` 热更新自愈）；`-1`=无期望值可比（dev 场景，模块内无 probe.dex.hash）。
   fs 降级时为 `null`
+- `probe_hook_bridge_hash`：L2b 起由 socket 数据源追加（bridge 经 report-bridge 上报的 build hash；
+  未上报为 `null`）
+- `probe_hook_bridge_hash_match`：L2b 起由 socket 数据源追加。三态语义同上（期望值 = 模块内
+  hook/hook.hash；不匹配时刷入一致版本后**软重启**生效，bridge 不走 socket 热更新）
+- `focus_pkg` / `focus_changes` / `wakeup_events`：L2b 起由 socket 数据源追加（观测模式事件面：
+  最近焦点包名 / 焦点切换累计 / 唤醒入口命中累计；无数据时 `focus_pkg` 为 `null`，计数为 0）
 
 ## `status` 数据源与 socket 通道
 
@@ -71,7 +77,9 @@ WebUI 仪表盘依赖以下字段，**任何实现变更必须向后兼容**（�
   `ping` / `status` / `reload-config` / `stop`（L0）；
   `hello-probe <hash>` / `probe-query`（L1，桩握手与查询）；
   `hello-dex <version>` / `fetch-dex` / `push-dex`（L2，dex 握手订阅/字节拉取/管理面推送，
-  协议细节与热切换时序见 dex/README.md 与 docs/l2-plan.md）
+  协议细节与热切换时序见 dex/README.md 与 docs/l2-plan.md）；
+  `report-bridge <hash>` / `event <type> k=v...`（L2b，hello-dex 订阅连接上的
+  dex→daemon 上行命令：bridge hash 上报与焦点/唤醒/进程事件上行，见 dex/README.md）
 - **双通道**（同一套行协议，daemon 同时监听）：
   - 文件 socket `/data/adb/sundown/sundownd.sock` —— root 管理面（sunctl/WebUI）。
     注意 `/data/adb` 为 `drwx------ root root`，**system_server(uid 1000) 在 DAC 层

@@ -76,6 +76,9 @@
   <div class="row"><span class="k">Zygisk 提供方</span><span id="st-zygisk">-</span></div>
   <div class="row"><span class="k">L1 探针桩</span><span id="st-stub">未交付（L1 阶段）</span></div>
   <div class="row"><span class="k">L2 探针 dex</span><span id="st-dex">未交付（L2 阶段）</span></div>
+  <div class="row"><span class="k">L2b hook 桥</span><span id="st-bridge">未交付（L2b 阶段）</span></div>
+  <div class="row"><span class="k">前台焦点</span><span id="st-focus">-</span></div>
+  <div class="row"><span class="k">唤醒事件</span><span id="st-wakeup">-</span></div>
 </div>
 
 <div class="card">
@@ -145,6 +148,16 @@ async function refreshStatus() {
       ? '<span class="warn">⚠️ 桩已在线但 dex 未接管（软重启运行时重试；查 logcat SundownProbe/SundownDex）</span>'
       : '<span style="color:var(--dim)">⏸ 待重启后随桩注入加载（冷启动/断线自愈）</span>';
   }
+  // L2b hook 桥 + 焦点/唤醒观测面（daemon status 新字段，契约只增不改）
+  if (s.probe_hook_bridge_hash) {
+    $("st-bridge").innerHTML = (s.probe_hook_bridge_hash_match === 0)
+      ? '<span class="warn">⚠️ ' + s.probe_hook_bridge_hash + '（与期望不符，刷入一致版本后软重启）</span>'
+      : '<span class="ok">✅ ' + s.probe_hook_bridge_hash + '</span>';
+  } else {
+    $("st-bridge").innerHTML = '<span style="color:var(--dim)">⏸ 未上线（bridge.dex/伴生库未交付或引导中）</span>';
+  }
+  $("st-focus").textContent = (s.focus_pkg || "未知") + "（切换 " + (s.focus_changes || 0) + " 次）";
+  $("st-wakeup").textContent = (s.wakeup_events || 0) + " 条";
 }
 
 async function loadLogs() {

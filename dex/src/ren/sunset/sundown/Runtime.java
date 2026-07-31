@@ -35,6 +35,9 @@ final class Runtime {
     private final String version = BuildInfo.DEX_BUILD_VERSION;
     private final HookEngine hooks;
     private final Thread eventThread;
+    /** L2b：hook 事件缓冲（回调非阻塞投递，发送线程串行 drain） */
+    private final EventQueue events = new EventQueue();
+    private final Thread senderThread;
 
     private volatile boolean stopped;
     private volatile boolean swapping;   // 同代内切换去重（窗口期重复事件防护）
@@ -44,7 +47,12 @@ final class Runtime {
     private Runtime(String socketName, String stubHash) {
         this.socketName = socketName;
         this.stubHash = stubHash;
-        this.hooks = LsPlantBridge.create();
+        this.hooks = LsPlantBridge.create(new LsPlantBridge.EventDispatcher() {
+            @Override
+            public void dispatch(String line) {
+                events.offer(line); // 非阻塞（hook 回调可能在 AMS 锁内线程）
+            }
+        });
         // 注意：禁止 lambda/方法引用——javac -source 8 + -bootclasspath android.jar 时
         // lambda 的 invokedynamic 需在 bootclasspath 解析 LambdaMetafactory.metafactory，
         // 而 android.jar 无此符号（编译期 fatal）。匿名类由 d8 原样保留，无 desugar 依赖。
@@ -55,6 +63,13 @@ final class Runtime {
             }
         }, "SundownDex-Events");
         this.eventThread.setDaemon(true);
+        this.senderThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                senderLoop();
+            }
+        }, "SundownDex-Sender");
+        this.senderThread.setDaemon(true);
     }
 
     /** 冷启动（L1 桩 → ProbeMain.init）：建运行态即返回，建链在事件线程内重试推进 */
@@ -66,6 +81,7 @@ final class Runtime {
         Runtime r = new Runtime(socketName, stubHash);
         active = r;
         r.eventThread.start();
+        r.senderThread.start();
         Log.i(TAG, "L2 dex 冷启动 (v" + r.version + ", stub=" + stubHash + ")");
     }
 
@@ -82,6 +98,7 @@ final class Runtime {
         r.verifyAlive(); // 不可达/被拒 → 抛异常 → 回滚
         active = r;
         r.eventThread.start();
+        r.senderThread.start();
         Log.i(TAG, "L2 dex 热切换上线 (v" + prevVersion + " → v" + r.version + ")");
         return true;
     }
@@ -110,7 +127,25 @@ final class Runtime {
                 l.connect();
                 link = l;
                 JSONObject hello = l.helloDex(version);
+                // L2b 引导代 → 工作代自热切换（桩冷启 gen0 无 canonical NativeBridge 父链；
+                // hop 后本代 shutdown，由新代重装全部机制——见 LsPlantBridge 类加载拓扑）
+                if (LsPlantBridge.needsGenerationHop()) {
+                    Log.i(TAG, "引导代检测（无 bridge 父链），自热切换到工作代 (v" + version + ")");
+                    byte[] dex = DaemonLink.fetchDex(socketName);
+                    if (dex != null) {
+                        swapTo(dex, version);
+                        if (stopped) return; // 新代接管成功，本代已 shutdown
+                        Log.w(TAG, "引导代自热切换失败（回滚），以无 hook 降级继续运行");
+                    } else {
+                        Log.w(TAG, "引导代 fetch-dex 失败，以无 hook 降级继续运行");
+                    }
+                }
                 onHello(hello);
+                // L2b：上报伴生库 build hash（native 可用时；应答行由读循环静默吞掉）
+                String bridgeHash = LsPlantBridge.bridgeBuildHash();
+                if (bridgeHash != null) {
+                    l.writeLine("report-bridge " + bridgeHash);
+                }
                 // 订阅事件流（阻塞读；EOF/异常 → 重连）
                 String line;
                 while (!stopped && (line = l.readLine()) != null) {
@@ -127,6 +162,36 @@ final class Runtime {
             }
         }
         Log.i(TAG, "事件循环退出 (v" + version + ")");
+    }
+
+    /** 事件发送循环（L2b）：drain EventQueue → socket；断线期保序等待，不丢不乱序 */
+    private void senderLoop() {
+        String pending = null;
+        while (!stopped) {
+            try {
+                if (pending == null) {
+                    pending = events.poll();
+                    if (pending == null) continue; // 队列空（500ms 节拍）
+                }
+                DaemonLink l = link;
+                if (l == null) {
+                    Thread.sleep(200); // 断线窗口：持回 pending 保序等待
+                    continue;
+                }
+                l.writeLine(pending);
+                pending = null;
+            } catch (InterruptedException e) {
+                break; // shutdown
+            } catch (Throwable t) {
+                Log.w(TAG, "事件发送失败（保序重试）: " + t);
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+        }
+        Log.i(TAG, "事件发送线程退出 (v" + version + ")");
     }
 
     /** hello-dex 应答处理：安装 hook（一次性）+ 版本落后则 fetch-dex 自愈 */
@@ -150,10 +215,18 @@ final class Runtime {
         }
     }
 
-    /** 订阅事件分发：当前仅 dex-push（头行 + 紧随其后的原始字节帧） */
+    /** 订阅事件分发：dex-push（头行 + 字节帧）+ L2b 上行命令应答（静默吞掉） */
     private void onEvent(DaemonLink l, String line) {
         try {
             JSONObject ev = new JSONObject(line);
+            if (!ev.has("event")) {
+                // event/report-bridge 的上行应答行（{"ok":1} / {"ok":1,"bridge_hash_match":N}）；
+                // ok=0 才留痕（daemon 拒收=协议异常，需取证）
+                if (ev.optInt("ok", 0) != 1) {
+                    Log.w(TAG, "上行命令被 daemon 拒绝: " + line);
+                }
+                return;
+            }
             if (!"dex-push".equals(ev.optString("event"))) {
                 Log.w(TAG, "未知事件，忽略: " + line);
                 return;
@@ -185,8 +258,10 @@ final class Runtime {
             ByteBuffer buf = ByteBuffer.allocateDirect(newDex.length);
             buf.put(newDex);
             buf.rewind();
-            // 父加载器用 system CL（与 L1 桩一致）：两代命名空间完全隔离
-            ClassLoader loader = new InMemoryDexClassLoader(buf, ClassLoader.getSystemClassLoader());
+            // 父加载器 = bridgeLoader 单例（L2b 类加载拓扑：新一代看到 canonical
+            // NativeBridge；bridge 未交付时退回 system CL，等价引导代降级）。
+            // 两代命名空间完全隔离（兄弟 loader），唯 bridge.dex 经父链共享。
+            ClassLoader loader = new InMemoryDexClassLoader(buf, LsPlantBridge.generationParent());
             Class<?> entry = loader.loadClass("ren.sunset.sundown.ProbeMain");
             // 跨 ClassLoader 只传 bootstrap 类型（String）；返回值经反射为 Boolean（bootstrap）
             Method m = entry.getMethod("hotSwap", String.class, String.class, String.class);
@@ -204,7 +279,7 @@ final class Runtime {
         }
     }
 
-    /** 旧代自杀：断订阅连接（打断读循环）+ 卸 hook + 清静态引用（使旧 ClassLoader 可卸载） */
+    /** 旧代自杀：断订阅连接（打断读循环）+ 卸 hook + 停发送线程 + 清静态引用（使旧 ClassLoader 可卸载） */
     synchronized void shutdown() {
         stopped = true;
         try {
@@ -212,6 +287,7 @@ final class Runtime {
         } catch (Throwable t) {
             Log.w(TAG, "hook 卸载异常: " + t);
         }
+        senderThread.interrupt();
         DaemonLink l = link;
         link = null;
         if (l != null) l.close();

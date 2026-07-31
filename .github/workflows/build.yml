@@ -129,9 +129,22 @@ jobs:
           mv dex/build/out/classes.dex dex/build/probe.dex
           echo "${GITHUB_SHA::7}" > dex/build/probe.dex.hash
 
+      - name: 编译 bridge.dex（L2b canonical NativeBridge，独立产物）
+        run: |
+          # bridge.dex 只含 NativeBridge（probe.dex 中的副本为父委托遮蔽的死代码，
+          # 见 dex/src/.../hook/NativeBridge.java 类加载纪律注释）
+          mkdir -p dex/build/bridge-classes dex/build/bridge-out
+          javac -source 8 -target 8 \
+            -bootclasspath "${{ steps.platform.outputs.android_jar }}" \
+            -d dex/build/bridge-classes dex/src/ren/sunset/sundown/hook/NativeBridge.java
+          D8="$(ls -d "$ANDROID_HOME"/build-tools/*/d8 | sort -V | tail -n1)"
+          find dex/build/bridge-classes -name '*.class' | sort | xargs "$D8" \
+            --min-api ${{ env.API_LEVEL }} --output dex/build/bridge-out
+          mv dex/build/bridge-out/classes.dex dex/build/bridge.dex
+
       - name: 校验产物
         run: |
-          ls -lh dex/build/probe.dex
+          ls -lh dex/build/probe.dex dex/build/bridge.dex
           cat dex/build/probe.dex.hash
 
       - name: 上传探针 dex 与版本 hash
@@ -141,11 +154,70 @@ jobs:
           path: |
             dex/build/probe.dex
             dex/build/probe.dex.hash
+            dex/build/bridge.dex
+          retention-days: 30
+
+  build-bridge:
+    name: 编译 libsundownhook.so（L2b LSPlant bridge）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 拉取依赖 AAR（pinned 版本 + sha256 校验，可复现）
+        run: |
+          mkdir -p deps
+          curl -fsSL -o deps/lsplant.aar \
+            https://repo1.maven.org/maven2/org/lsposed/lsplant/lsplant/6.4/lsplant-6.4.aar
+          echo "9f40ff7d7b9ef6575aecc057c4de0796e5c6253ad24c2a91896c11435b404709  deps/lsplant.aar" \
+            | sha256sum -c -
+          curl -fsSL -o deps/dobby.aar \
+            https://repo1.maven.org/maven2/io/github/vvb2060/ndk/dobby/1.2/dobby-1.2.aar
+          echo "251f48ae21686d7f69276c50644ca345f450e45110057437f7d76bb14cddf3a1  deps/dobby.aar" \
+            | sha256sum -c -
+          cd deps
+          unzip -o -q lsplant.aar -d lsplant
+          unzip -o -q dobby.aar -d dobby
+          ls -lh lsplant/prefab/modules/lsplant/libs/android.arm64-v8a/ \
+                 dobby/prefab/modules/dobby/libs/android.arm64-v8a/
+
+      - name: 构建 libsundownhook.so（runner 自带 NDK + CMake + Ninja）
+        working-directory: bridge
+        run: |
+          HASH="${GITHUB_SHA::7}"
+          echo "BRIDGE_BUILD_HASH=$HASH"
+          cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK_LATEST_HOME}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-${{ env.API_LEVEL }} \
+            -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DLSPLANT_PREFAB="$GITHUB_WORKSPACE/deps/lsplant/prefab/modules/lsplant" \
+            -DDOBBY_PREFAB="$GITHUB_WORKSPACE/deps/dobby/prefab/modules/dobby" \
+            -DBRIDGE_BUILD_HASH="$HASH"
+          cmake --build build
+          echo "$HASH" > build/hook.hash
+          # LGPL-3.0：liblsplant.so 原样随模块分发（动态链接、不修改）
+          cp "$GITHUB_WORKSPACE/deps/lsplant/prefab/modules/lsplant/libs/android.arm64-v8a/liblsplant.so" \
+             build/liblsplant.so
+
+      - name: 校验产物
+        run: |
+          file bridge/build/libsundownhook.so bridge/build/liblsplant.so
+          ls -lh bridge/build/libsundownhook.so bridge/build/liblsplant.so
+          cat bridge/build/hook.hash
+
+      - name: 上传 bridge 产物与 hash
+        uses: actions/upload-artifact@v7
+        with:
+          name: sundownhook-arm64-v8a
+          path: |
+            bridge/build/libsundownhook.so
+            bridge/build/liblsplant.so
+            bridge/build/hook.hash
           retention-days: 30
 
   package-module:
     name: 打包 KSU 模块 zip
-    needs: [build-daemon, build-probe, build-dex]
+    needs: [build-daemon, build-probe, build-dex, build-bridge]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -187,8 +259,29 @@ jobs:
           # 2) magic-mount 兜底：uid 1000 可读、SELinux 无争议；dex 层冷启动/断线自愈用
           mkdir -p module/system/etc/sundown
           cp dex/build/probe.dex module/system/etc/sundown/probe.dex
-          chmod 0644 module/system/etc/sundown/probe.dex
+          # 3) L2b canonical NativeBridge（bridge.dex）：probe.dex 各代的父链，
+          #    native 唯一绑定点（类加载拓扑见 dex/src/.../hook/LsPlantBridge.java）
+          cp dex/build/bridge.dex module/system/etc/sundown/bridge.dex
+          chmod 0644 module/system/etc/sundown/probe.dex module/system/etc/sundown/bridge.dex
           ls -lh module/probe/ module/system/etc/sundown/
+
+      - name: 下载 bridge 产物并注入模块（L2b native 伴生库）
+        uses: actions/download-artifact@v8
+        with:
+          name: sundownhook-arm64-v8a
+          path: bridge/build/
+
+      - name: 布置 bridge 资产（magic-mount 原生库 + 期望 hash）
+        run: |
+          # system/lib64/：magic-mount → /system/lib64/，uid 1000 可读（dex 层 System.load）
+          mkdir -p module/system/lib64
+          cp bridge/build/libsundownhook.so module/system/lib64/libsundownhook.so
+          cp bridge/build/liblsplant.so module/system/lib64/liblsplant.so
+          chmod 0644 module/system/lib64/*.so
+          # hook/hook.hash：daemon 期望 bridge build hash（四位一体闭环；hook/ 不入 /system）
+          mkdir -p module/hook
+          cp bridge/build/hook.hash module/hook/hook.hash
+          ls -lh module/system/lib64/ module/hook/
 
       - name: 修正权限
         run: |

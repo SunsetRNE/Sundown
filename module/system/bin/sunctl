@@ -10,7 +10,7 @@ INSTALLED_META="$SUNDOWN_DIR/update/installed.json"
 READY_MARKER="$SUNDOWN_DIR/update/daemon.ready"
 SOCK_PATH="$SUNDOWN_DIR/sundownd.sock"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.3.1-l2"
+VERSION="0.3.2-l2"
 
 # ---------- 工具函数 ----------
 
@@ -114,6 +114,22 @@ cmd_status() {
                 else
                     echo "  L2 探针 dex:   ⏸ 待重启后随桩注入加载（冷启动/断线自愈）"
                 fi
+            fi
+            # L2b：native 伴生库（LSPlant 机制）+ 焦点/唤醒观测面
+            bhash="$(printf '%s' "$sock_json" | json_str_in probe_hook_bridge_hash)"
+            bmatch="$(printf '%s' "$sock_json" | json_int_in probe_hook_bridge_hash_match)"
+            focus="$(printf '%s' "$sock_json" | json_str_in focus_pkg)"
+            fchanges="$(printf '%s' "$sock_json" | json_int_in focus_changes)"
+            wevents="$(printf '%s' "$sock_json" | json_int_in wakeup_events)"
+            if [ -n "$bhash" ]; then
+                case "$bmatch" in
+                    1) echo "  L2b hook 桥:   ✅ 运行中 (build: $bhash, 版本闭环匹配)" ;;
+                    0) echo "  L2b hook 桥:   ⚠️ 运行中 (build: $bhash, 与期望不符，刷入一致版本后软重启)" ;;
+                    *) echo "  L2b hook 桥:   ✅ 运行中 (build: $bhash)" ;;
+                esac
+                echo "  焦点/唤醒:     前台=${focus:-未知} | 焦点切换 ${fchanges:-0} 次 | 唤醒事件 ${wevents:-0} 条"
+            else
+                echo "  L2b hook 桥:   ⏸ 未上线（bridge.dex/伴生库未交付或引导中；查 logcat SundownDex/SundownHook）"
             fi
         fi
         return 0

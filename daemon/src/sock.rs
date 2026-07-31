@@ -20,6 +20,14 @@
 //!   push-dex [path]      -> 【仅 root 管理面】读 dex 文件并向全部订阅连接推送
 //!                           {"event":"dex-push","size":N,...} + N 字节（热切换触发）
 //!
+//! 协议（L2b 新增，订阅连接上的 dex→daemon 上行命令，只增不改）：
+//!   report-bridge <hash> -> bridge（libsundownhook）上报 build hash；
+//!                           应答 {"ok":1,"bridge_hash_match":1|0|-1}
+//!   event focus pkg=<pkg>            -> 前台焦点切换（观测模式）
+//!   event wakeup pkg=<pkg> reason=<broadcast|service|pendingintent> -> 唤醒入口命中
+//!   event proc-add pid=<n> / proc-remove pid=<n> / force-stop pkg=<pkg> -> 进程生命周期
+//!                           应答 {"ok":1}；未知 event 子类型容错 {"ok":1,"ignored":1}
+//!
 //! 二进制帧纪律：头行声明 size，紧随其后恰为 size 字节，无额外分隔符；
 //! 客户端必须按字节精确读取（dex 侧 DaemonLink 自行分行，不用 BufferedReader）。
 
@@ -210,8 +218,8 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>, mgmt: bool) -> std::
     Ok(())
 }
 
-/// hello-dex 订阅连接的读循环：dex 侧只收事件，期间仅支持
-/// ping（保活探测）与重复 hello-dex（重登记）；EOF 返回由调用方注销。
+/// hello-dex 订阅连接的读循环：dex 侧只收事件 + L2b 起上行命令；
+/// EOF 返回由调用方注销。
 fn dex_subscription_loop(
     reader: &mut BufReader<UnixStream>,
     writer: &mut UnixStream,
@@ -237,6 +245,21 @@ fn dex_subscription_loop(
                     dex_hello_response(state)
                 }
             }
+            // ---- L2b 上行命令（观测模式事件面） ----
+            "report-bridge" => {
+                if arg.is_empty() {
+                    "{\"ok\":0,\"error\":\"report-bridge requires <build_hash>\"}".to_string()
+                } else {
+                    state.record_bridge(arg);
+                    logi!(
+                        "hook bridge 上报: hash={}（期望: {}）",
+                        arg,
+                        state.expected_hook_hash().as_deref().unwrap_or("<无 hook.hash>")
+                    );
+                    bridge_response(state)
+                }
+            }
+            "event" => handle_event(state, arg),
             other => format!(
                 "{{\"ok\":0,\"error\":\"subscription connection: unsupported command: {}\"}}",
                 other
@@ -246,6 +269,69 @@ fn dex_subscription_loop(
         writer.write_all(b"\n")?;
         writer.flush()?;
     }
+}
+
+/// L2b 事件分发（观测模式：只记录/计数，不做任何动作）。
+/// 未知子类型容错 {"ok":1,"ignored":1}——新旧版本滚动期间协议单向兼容。
+fn handle_event(state: &DaemonState, arg: &str) -> String {
+    let mut parts = arg.split_whitespace();
+    let kind = parts.next().unwrap_or("");
+    let rest: Vec<&str> = parts.collect();
+    let kv = |key: &str| -> Option<String> {
+        let prefix = format!("{}=", key);
+        rest.iter()
+            .find_map(|t| t.strip_prefix(prefix.as_str()).map(|v| v.to_string()))
+    };
+    match kind {
+        "focus" => match kv("pkg") {
+            Some(pkg) => {
+                state.record_focus(&pkg);
+                logi!(
+                    "焦点切换: {}（累计 {} 次）",
+                    pkg,
+                    state.focus_changes.load(std::sync::atomic::Ordering::Relaxed)
+                );
+                "{\"ok\":1}".to_string()
+            }
+            None => "{\"ok\":0,\"error\":\"event focus requires pkg=\"}".to_string(),
+        },
+        "wakeup" => {
+            state.bump_wakeup();
+            // 广播风暴防护：只计数，每 32 条才落一条日志
+            let n = state.wakeup_events.load(std::sync::atomic::Ordering::Relaxed);
+            if n % 32 == 1 {
+                logi!(
+                    "唤醒事件: pkg={} reason={}（累计 {} 条）",
+                    kv("pkg").unwrap_or_else(|| "?".to_string()),
+                    kv("reason").unwrap_or_else(|| "?".to_string()),
+                    n
+                );
+            }
+            "{\"ok\":1}".to_string()
+        }
+        "proc-add" | "proc-remove" | "force-stop" => {
+            // L2b 观测面暂只应答（进程表随 L3 策略引擎接入）
+            "{\"ok\":1}".to_string()
+        }
+        _ => format!("{{\"ok\":1,\"ignored\":1,\"kind\":\"{}\"}}", kind),
+    }
+}
+
+/// report-bridge 应答：期望 hash 比对三态（1=匹配，0=不匹配，-1=无期望值可比）
+fn bridge_response(state: &DaemonState) -> String {
+    let expected = state.expected_hook_hash();
+    let reported = state
+        .hook_bridge
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|b| b.build_hash.clone());
+    let hash_match = match (&expected, &reported) {
+        (Some(e), Some(r)) if e == r => 1,
+        (Some(_), Some(_)) => 0,
+        _ => -1,
+    };
+    format!("{{\"ok\":1,\"bridge_hash_match\":{}}}", hash_match)
 }
 
 /// fetch-dex：读 canonical 字节源（root 专属路径），头行 + 原始字节帧应答。

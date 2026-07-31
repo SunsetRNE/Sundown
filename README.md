@@ -41,7 +41,11 @@ Sundown/
 │   └── src/probe.cpp       # 桩：system_server 驻留 + hello-probe + dex 加载桥
 ├── dex/                    # probe.dex Java 源码（L2 探针逻辑层）
 │   ├── README.md           # DAC 铁律 / 协议三命令 / 热切换时序 / 版本闭环 / 本地构建
-│   └── src/ren/sunset/sundown/  # ProbeMain 入口 + DaemonLink + Runtime 代际 + hook 骨架
+│   └── src/ren/sunset/sundown/  # ProbeMain 入口 + DaemonLink + Runtime 代际 + hook 组
+├── bridge/                 # libsundownhook.so C++ 源码（L2b native 伴生库）
+│   ├── CMakeLists.txt      # NDK 构建（prefab LSPlant/Dobby 由 CI 注入 + sha256 校验）
+│   ├── README.md           # 机制面定位 / LGPL 合规 / 运行时链路 / 修改红线
+│   └── src/                # bridge.cpp（五机制出口）+ mini_art_elf（art 符号解析）
 └── module/                 # KSU 模块（目录内容即模块 zip 内容）
     ├── module.prop         # id=sundown, author=SunsetREN
     ├── customize.sh        # 安装脚本（环境/ABI 检查、设备适配属性、ReZygisk 检测）
@@ -55,7 +59,10 @@ Sundown/
     │   └── sunctl          # 控制 CLI（L0 shell 实现，命令面已定稿）
     ├── zygisk/             # 【CI 生成】arm64-v8a.so（libsunprobe）+ probe.hash
     ├── probe/              # 【CI 生成】probe.dex + probe.dex.hash（root 字节源，post-fs-data 同步到 /data/adb）
+    ├── hook/               # 【CI 生成】hook.hash（bridge 期望 build hash）
     ├── system/etc/sundown/probe.dex  # 【CI 生成】magic-mount 冷启动兜底（uid 1000 可读）
+    ├── system/etc/sundown/bridge.dex # 【CI 生成】canonical NativeBridge（L2b 类加载父链）
+    ├── system/lib64/       # 【CI 生成】libsundownhook.so + liblsplant.so（L2b 伴生库）
     └── webroot/
         └── index.html      # KSU WebUI 仪表盘（状态展示 + daemon/运行时/探针热更新控制）
 ```
@@ -76,7 +83,7 @@ Sundown/
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
-## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅（工程闭环完成，待真机回归）
+## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅（工程闭环完成，待真机回归 V1~V8）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
@@ -105,9 +112,17 @@ Sundown/
   post-fs-data dex 同步（hash 比对防无谓 dexopt）、CI build-dex job、
   WebUI/sunctl 热更新入口、status 新增 probe_dex_version/probe_dex_hash_match；
   本地 javac+d8 编译链与 cargo check 零错误。LSPlant 真实 hook 留 L2b
-- [ ] L2b：LSPlant native 集成 + AMS 焦点/Binder 豁免真实 hook（需真机验证 execmod）
-  —— 🚧 计划已立（docs/l2b-plan.md：LGPL 动态链接 + dex System.load 伴生库，桩零触碰；
-  hook 点经 AStop v1.6.0 dex 静态扫描实证萃取；全观测模式，冻结动作留 L3）
+- [x] L2b：LSPlant native 集成 + 焦点/唤醒感知真实 hook（v0.3.2-l2，工程闭环）：
+  bridge/ C++ 工程（lsplant::Init/Hook/UnHook/MakeDexFileTrusted 五机制出口 +
+  自研 mini_art_elf 符号解析，LGPL 动态链接 prefab liblsplant.so，Dobby 静态链入）；
+  canonical NativeBridge 类加载拓扑（bridge.dex 单例父链 + 引导代自热切换，
+  桩零触碰）；hook 组 FocusHooks（updateActivityUsageStats/addPidLocked/
+  removePidLocked/forceStopPackage）+ WakeupHooks（broadcastIntentLocked/
+  realStartServiceLocked/sendInner）全观测模式；EventQueue 非阻塞上行 +
+  report-bridge/event 协议扩展；daemon status 新增 probe_hook_bridge_hash/
+  focus_pkg/wakeup_events；CI build-bridge job（pinned AAR + sha256 校验）。
+  计划与裁决见 docs/l2b-plan.md，hook 点经 AStop v1.6.0 dex 静态扫描实证萃取
+- [ ] L2b 真机回归：V1~V8 验证清单（docs/l2b-plan.md §5，execmod/hidden API 首要）
 - [ ] L3：策略引擎与情景预设
 
 ## 依赖

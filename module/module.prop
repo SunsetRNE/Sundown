@@ -1,6 +1,6 @@
 id=sundown
 name=Sundown
-version=v0.3.1-l2
-versionCode=6
+version=v0.3.2-l2
+versionCode=7
 author=SunsetREN
-description=🌇 日落而息 · 墓碑调度 | L2 探针 dex（热切换闭环，LSPlant 骨架）| 初始化中，请重启激活
+description=🌇 日落而息 · 墓碑调度 | L2b hook 桥（LSPlant 机制 + 焦点/唤醒感知，观测模式）| 初始化中，请重启激活

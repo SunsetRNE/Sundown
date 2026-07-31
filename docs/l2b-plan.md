@@ -1,11 +1,17 @@
 # L2b 推进计划：LSPlant native 集成 + 焦点/唤醒感知真实 hook
 
-> 状态：🚧 进行中 ｜ 目标版本：v0.3.2-l2（L2 阶段内 patch 位，L3 仍为 v0.4.0-l3）｜ 决策：SunsetREN
+> 状态：✅ 工程闭环完成（v0.3.2-l2，待真机回归 V1~V8）｜ 决策：SunsetREN
 > 前置：L0 ✅ L1 ✅ L2 ✅（v0.3.1-l2 真机回归通过：四位一体闭环锚定 git HEAD f5eb163，
 > reload-probe 管理面实测 notified=1 + dex 同版本拒换代，全链路数据自洽）
 > 本刀定位：**机制先行**——LSPlant 真实 hook 机制落地 + 焦点/唤醒入口感知 + dex→daemon
 > 事件上行协议。所有 hook 一律**观测模式**（logcat 留痕 + event 上报 daemon），
 > 冻结执行、豁免动作、拦截策略、厂商适配矩阵一律留 L3/L3+。
+>
+> 实施注记（v0.3.2-l2 落地时补充）：
+> - §0.4 新增第四裁决「canonical NativeBridge 类加载拓扑」（System.load 单 loader
+>   约束 × 热切换多代 ClassLoader 的根本矛盾解法，引导代自热切换，桩保持零触碰）
+> - ProcessReceiverRecord 门禁数据源顺延 L3（协议消费面随策略引擎一起上，
+>   WakeupHooks 已留 TODO-L3 接入点）
 
 ---
 
@@ -55,6 +61,34 @@
   2. Dobby `mprotect` libart.so text 段为 rwx（apex 库，LSPosed 在 system_server 日常操作，
      预期可过；若见 avc → dmesg 取证 → sepolicy.rule 补规则，**此补规则属 L1 级变更**）
   3. LSPlant 运行时生成的 stub dex（`LSPHooker_`）trampoline 执行（匿名 exec 内存）
+
+### 0.4 canonical NativeBridge 类加载拓扑（实施期新增裁决）
+
+**矛盾**：`System.load` 同一路径不允许被第二个 ClassLoader 加载；而 L2 热切换
+每代都是新 `InMemoryDexClassLoader`——若 native 绑定点随 probe.dex 走，
+只有首代能 System.load，后续所有代 native 全废。
+
+**裁决**：native 绑定点收敛到唯一 canonical 类（bridge.dex 的 NativeBridge）：
+
+```
+system CL（L1 桩冷启父链）
+  └─ bridgeLoader（DexClassLoader @ /system/etc/sundown/bridge.dex，单例，
+  │    寄存于 System.getProperties()——进程内全 loader 可见的存活全局表）
+  │    └─ canonical NativeBridge（libsundownhook 只与这个副本绑定）
+  ├─ probe.dex gen1..N（父=bridgeLoader → 父委托看到 canonical 副本）✅ 工作代
+  └─ probe.dex gen0（父=system CL，桩创建）⚠️ 引导代：
+       只能解析到自己的私有死代码副本 → LsPlantBridge.needsGenerationHop()
+       判定后由 Runtime 自热切换到工作代（gen0 绝不 System.load）
+```
+
+- bridgeLoader 单例必须**跨代共享**：`System.getProperties()` 是进程内全
+  ClassLoader 可见的存活全局表，作跨 loader 单例寄存（进程局部、无外部暴露面）
+- 引导代 hop 防循环双保险：`needsGenerationHop()` 在 bridge.dex 缺失时恒 false；
+  `generationParent()` 在 bridge.dex 缺失时退回 system CL（等价引导代降级，不再 hop）
+- 代价：每次冷启动固定多一代 hop（fetch-dex ~12KB + 一次类加载，毫秒级）；
+  收益：桩零触碰、热切换与 native 机制完全解耦
+- probe.dex 中 NativeBridge 副本为父委托遮蔽的**死代码**（父委托优先，
+  永远不会被 probe.dex 各代加载生效），保留仅为编译期类型解析
 
 ## 1. hook 点清单（AStop v1.6.0 实证萃取）
 
