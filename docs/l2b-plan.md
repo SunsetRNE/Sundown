@@ -12,6 +12,20 @@
 >   约束 × 热切换多代 ClassLoader 的根本矛盾解法，引导代自热切换，桩保持零触碰）
 > - ProcessReceiverRecord 门禁数据源顺延 L3（协议消费面随策略引擎一起上，
 >   WakeupHooks 已留 TODO-L3 接入点）
+>
+> 实施注记（v0.3.3 追加，Android 16 实机回归裁决变更）：
+> - **§0.1 裁决变更**：Maven 官方 `lsplant:6.4`（2024-04，面向 Android 14）在 Android 16
+>   (API 36) 的 libart.so 上 **Init 必败**（实测 V2 卡点）：Instrumentation/JIT/DexFile/GC
+>   符号签名大面积变更 + 新 NDK LOCAL 符号 `.__uniq` 后缀使 6.4 精确解析失效。
+>   → 改为 CI **pinned commit（84256d4）源码构建 LSPlant master**（已适配 API 36/37），
+>   产物 `-static-libstdc++` 静态链入 libc++，**不依赖 libc++_shared.so**（实机无此库）。
+>   原 §6「不做 LSPlant 源码编译」红线作废——那是基于 6.4 可用的前提，Android 16 下
+>   源码构建成为必要路径；LGPL-3.0 动态链接分发合规路径不变。
+> - **libc++_shared 教训**：liblsplant.so 曾因缺失该依赖导致 `System.load` 失败（V1 卡点，
+>   已通过换 standalone artifact 修复并证实）；现 master 构建链以静态链接从根上消除此依赖。
+> - dex 侧 NativeBridge.java（vendor 官方 test 模式）与 master 的 callback 约定
+>   （`Object callback(Object[] args)`）**完全兼容，零改动**。
+> - 修复链：libc++_shared 缺失（V1）→ LSPlant 6.4 与 API36 不兼容（V2）→ master 源码构建。
 
 ---
 

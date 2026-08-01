@@ -10,8 +10,18 @@ L2 的 native 机制层（docs/l2b-plan.md §0.2 裁决）。由 dex 层 `System
 
 | 依赖 | 来源 | 许可证 | 链接方式 |
 |---|---|---|---|
-| LSPlant 6.4 | Maven `org.lsposed.lsplant:lsplant:6.4`（AAR prefab，原样搬运） | **LGPL-3.0** | 动态链接 `liblsplant.so`（随模块独立分发） |
+| LSPlant master | GitHub `LSPosed/LSPlant` pinned `84256d4`（CI 源码构建，Android 15/16/17 适配链；Maven 官方 6.4 仅适配到 Android 14，见下方说明） | **LGPL-3.0** | 动态链接 `liblsplant.so`（随模块独立分发） |
 | Dobby 1.2 | Maven `io.github.vvb2060.ndk:dobby:1.2`（LSPlant 官方 test 同款坐标） | Apache-2.0 | 静态链入 bridge |
+
+> **为什么不用 Maven `lsplant:6.4`**（2024-04，官方最新 release）：
+> Android 16 (API 36) 的 `libart.so` 相对 Android 14 发生大面积符号变更——Instrumentation
+> （`InitializeMethodsCode`→`GetOptimizedCodeFor`/`ReinitializeMethodsCode`）、JIT、DexFile、
+> GC 等签名全部变化，且新 NDK 工具链的 LOCAL 符号带 `.__uniq` 后缀导致 6.4 的精确解析失败，
+> `lsplant::Init` 在 system_server 内直接返回 false（实机 V2 卡点，见 Sundown-实机巡检报告）。
+> LSPlant master 已适配 API 36/37（含 Baklava/Cinnamon Bun 常量、Android 15+ jit 修复、
+> memfd/SDK 37 ashmem 限制准备），故 CI 改为 pinned commit 源码构建。
+> 构建产物静态链入 libc++（`-static-libstdc++`），**不引入 `libc++_shared.so` 依赖**
+> （Android 16 实机 /system/lib64 无此库，缺失会直接导致 `System.load` 失败——历史教训）。
 
 - LSPlant 官方 AAR 只发布 C++ API（`lsplant.hpp`）；Java 桥（`NativeBridge`/`Hooker`）
   按官方 test 模式 vendor 在 `dex/src/ren/sunset/sundown/hook/NativeBridge.java`

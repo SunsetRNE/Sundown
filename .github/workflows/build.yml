@@ -158,46 +158,88 @@ jobs:
           retention-days: 30
 
   build-bridge:
-    name: 编译 libsundownhook.so（L2b LSPlant bridge）
+    name: 编译 libsundownhook.so（L2b LSPlant bridge，Android16 兼容链）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      - name: 拉取依赖 AAR（pinned 版本 + sha256 校验，可复现）
+      - name: 拉取 Dobby AAR（pinned + sha256，静态链入 bridge）
         run: |
           mkdir -p deps
-          curl -fsSL -o deps/lsplant.aar \
-            https://repo1.maven.org/maven2/org/lsposed/lsplant/lsplant/6.4/lsplant-6.4.aar
-          echo "9f40ff7d7b9ef6575aecc057c4de0796e5c6253ad24c2a91896c11435b404709  deps/lsplant.aar" \
-            | sha256sum -c -
           curl -fsSL -o deps/dobby.aar \
             https://repo1.maven.org/maven2/io/github/vvb2060/ndk/dobby/1.2/dobby-1.2.aar
           echo "251f48ae21686d7f69276c50644ca345f450e45110057437f7d76bb14cddf3a1  deps/dobby.aar" \
             | sha256sum -c -
           cd deps
-          unzip -o -q lsplant.aar -d lsplant
           unzip -o -q dobby.aar -d dobby
-          ls -lh lsplant/prefab/modules/lsplant/libs/android.arm64-v8a/ \
-                 dobby/prefab/modules/dobby/libs/android.arm64-v8a/
+          ls -lh dobby/prefab/modules/dobby/libs/android.arm64-v8a/
 
-      - name: 构建 libsundownhook.so（runner 自带 NDK + CMake + Ninja）
+      - name: 拉取 LSPlant master（pinned commit，Android 15/16/17 适配）
+        # Maven 官方仅发布 lsplant 6.4（2024-04，面向 Android 14），在 Android 16 (API 36)
+        # 的 libart.so 上符号大面积不兼容（Instrumentation/JIT/DexFile/GC 签名变更 + LOCAL
+        # 符号 .__uniq 后缀），lsplant::Init 失败 → bridge 无法上线（实机 V2 卡点）。
+        # master 已适配 API 36/37（commit 含 Baklava/Cinnamon Bun 常量、Android15 jit 修复、
+        # memfd/SDK37 准备），故改为 pinned commit 源码构建。LGPL-3.0 动态链接分发不变。
+        run: |
+          git clone --depth 1 https://github.com/LSPosed/LSPlant.git /tmp/lsplant
+          cd /tmp/lsplant
+          # pin 防上游漂移：HEAD 非 pinned commit 时按需浅拉取指定 commit
+          if [ "$(git rev-parse HEAD)" != "84256d4cb51abd79280da5c29437fb7004391667" ]; then
+            git fetch --depth 1 origin 84256d4cb51abd79280da5c29437fb7004391667
+            git checkout 84256d4cb51abd79280da5c29437fb7004391667
+          fi
+          git submodule update --init --recursive --depth 1
+
+      - name: 安装 NDK r29（LSPlant master 要求 C++23 modules 工具链）
+        run: |
+          curl -fsSL -o /tmp/ndk.zip https://dl.google.com/android/repository/android-ndk-r29-linux.zip
+          unzip -q /tmp/ndk.zip -d /opt
+          echo "NDK_HOME=/opt/android-ndk-r29" >> "$GITHUB_ENV"
+
+      - name: 构建 liblsplant.so（master 源码，静态链入 libc++）
+        working-directory: /tmp/lsplant/lsplant/src/main/jni
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="${NDK_HOME}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-${{ env.API_LEVEL }} \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-static-libstdc++" \
+            -DDEBUG_SYMBOLS_PATH=/tmp/lsplant-sym
+          cmake --build build
+          # 防回归：Android 16 实机无 libc++_shared.so（bridge/README 记录），
+          # 产物不得引入该 DT_NEEDED（否则 System.load 必然失败）
+          if readelf -d build/liblsplant.so | grep -q 'libc++_shared'; then
+            echo "::error::liblsplant.so 意外依赖 libc++_shared.so"
+            exit 1
+          fi
+          file build/liblsplant.so
+          ls -lh build/liblsplant.so
+
+      - name: 构建 libsundownhook.so（bridge，链接 master 构建的 liblsplant.so）
         working-directory: bridge
         run: |
           HASH="${GITHUB_SHA::7}"
           echo "BRIDGE_BUILD_HASH=$HASH"
+          # 组装 prefab 布局（保持 bridge/CMakeLists.txt 不变）
+          mkdir -p /tmp/lsplant-prefab/libs/android.arm64-v8a /tmp/lsplant-prefab/include/utils
+          cp /tmp/lsplant/lsplant/src/main/jni/include/lsplant.hpp /tmp/lsplant-prefab/include/
+          cp /tmp/lsplant/lsplant/src/main/jni/include/utils/*.hpp /tmp/lsplant-prefab/include/utils/
+          cp /tmp/lsplant/lsplant/src/main/jni/build/liblsplant.so \
+             /tmp/lsplant-prefab/libs/android.arm64-v8a/
           cmake -B build -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK_LATEST_HOME}/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_TOOLCHAIN_FILE="${NDK_HOME}/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-${{ env.API_LEVEL }} \
             -DCMAKE_BUILD_TYPE=MinSizeRel \
-            -DLSPLANT_PREFAB="$GITHUB_WORKSPACE/deps/lsplant/prefab/modules/lsplant" \
+            -DLSPLANT_PREFAB=/tmp/lsplant-prefab \
             -DDOBBY_PREFAB="$GITHUB_WORKSPACE/deps/dobby/prefab/modules/dobby" \
             -DBRIDGE_BUILD_HASH="$HASH"
           cmake --build build
           echo "$HASH" > build/hook.hash
-          # LGPL-3.0：liblsplant.so 原样随模块分发（动态链接、不修改）
-          cp "$GITHUB_WORKSPACE/deps/lsplant/prefab/modules/lsplant/libs/android.arm64-v8a/liblsplant.so" \
-             build/liblsplant.so
+          # LGPL-3.0：liblsplant.so 随模块分发（master 源码构建，动态链接、不修改；
+          # 源码获取见 bridge/README.md）
+          cp /tmp/lsplant-prefab/libs/android.arm64-v8a/liblsplant.so build/liblsplant.so
 
       - name: 校验产物
         run: |
