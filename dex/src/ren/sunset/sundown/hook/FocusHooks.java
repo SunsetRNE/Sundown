@@ -157,12 +157,9 @@ final class FocusHooks implements HookEngine {
     }
 
     private static Class<?> findClass(String name) {
-        try {
-            return Class.forName(name);
-        } catch (Throwable t) {
-            Log.w(TAG, "类未找到: " + name);
-            return null;
-        }
+        // services.jar 不在 BOOTCLASSPATH（SYSTEMSERVERCLASSPATH 专属 loader 加载），
+        // 注入 dex 的 loader 链不可见——必须经 ServerClasses 解析（v0.3.4-l2 修复）
+        return ServerClasses.find(name);
     }
 
     private static Method findMethod(Class<?> cls, String name) {

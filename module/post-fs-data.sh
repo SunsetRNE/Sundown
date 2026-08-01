@@ -100,6 +100,19 @@ if [ -f "$PROBE_SRC" ]; then
 fi
 # =================================================
 
+# ========== L2b 排障辅助：Sundown/LSPlant 日志常驻记录器 ==========
+# 完整重启时由本脚本启动（KernelSU 进程树管理，常驻跨软重启存活）；
+# 只记录 Sundown 三 tag + LSPlant，避免被系统日志/其他应用刷屏淹没
+# （logcat main buffer 仅 256KB，启动早期日志约 2 分钟即被冲掉——真机实证）。
+# 文件：$LOG_DIR/boot-logcat.log（启动时清空重建；软重启由常驻进程继续追加，
+# 时间戳可区分；post-fs-data 阶段 logd 已就绪，且早于 zygote/system_server 注入窗口）。
+if [ -d "$LOG_DIR" ]; then
+    : > "$LOG_DIR/boot-logcat.log" 2>/dev/null
+    nohup logcat -b all -v threadtime -s SundownHook:I SundownDex:I SundownProbe:I LSPlant:I \
+        >> "$LOG_DIR/boot-logcat.log" 2>&1 &
+fi
+# =================================================
+
 # 注意：属性设置已移至 system.prop，由 KernelSU/Magisk 自动应用。
 # Magisk fallback 只兜底 persist.*，避免在 post-fs-data 阶段强制覆盖 ro.* / sys.*。
 if [ -z "$KSU" ] && [ -f "$PROP_FILE" ]; then

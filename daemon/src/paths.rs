@@ -42,7 +42,7 @@ pub const PROBE_DEX_MOUNT: &str = "/system/etc/sundown/probe.dex";
 pub const PROBE_ABSTRACT_SOCK: &str = "sundown_probe";
 
 /// 守护进程版本（与 module.prop version 同步，策略见主 README「版本号策略」）
-pub const VERSION_NAME: &str = "0.3.3-l2";
+pub const VERSION_NAME: &str = "0.3.4-l2";
 /// 单调递增的发布号：service.sh readiness 校验依据（installed.json vs daemon.ready）
 /// daemon 二进制任何变更必须 +1（只加不改）
-pub const RELEASE_NO: u32 = 5;
+pub const RELEASE_NO: u32 = 6;

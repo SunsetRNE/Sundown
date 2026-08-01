@@ -1,6 +1,6 @@
 id=sundown
 name=Sundown
-version=v0.3.3-l2
-versionCode=8
+version=v0.3.4-l2
+versionCode=9
 author=SunsetREN
 description=🌇 日落而息 · 墓碑调度 | L2b hook 桥（LSPlant 机制 + 焦点/唤醒感知，观测模式，Android 16 适配链）| 刷入后请重启激活
