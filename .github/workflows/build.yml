@@ -188,7 +188,11 @@ jobs:
             git fetch --depth 1 origin 84256d4cb51abd79280da5c29437fb7004391667
             git checkout 84256d4cb51abd79280da5c29437fb7004391667
           fi
-          git submodule update --init --recursive --depth 1
+          # 按需拉取构建所需的 https submodule（全量 --recursive 会触发 test/ 下
+          # SSH URL 的 lsparself/lsprism，CI 无密钥必败）
+          git submodule update --init --depth 1 lsplant/src/main/jni/external/dex_builder
+          git -C lsplant/src/main/jni/external/dex_builder \
+              submodule update --init --depth 1 external/parallel_hashmap
 
       - name: 安装 NDK r29（LSPlant master 要求 C++23 modules 工具链）
         run: |
