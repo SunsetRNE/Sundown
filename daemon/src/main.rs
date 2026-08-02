@@ -11,6 +11,7 @@
 
 mod config;
 mod engine;
+mod events;
 mod freezer;
 mod logging;
 mod paths;
@@ -96,6 +97,17 @@ fn main() {
     let state = Arc::new(DaemonState::new());
     let shutdown = Arc::new(AtomicBool::new(false));
 
+    // L3.1 结构化事件：daemon 启动
+    {
+        use crate::events::{EvAction, EvLevel};
+        state.engine.lock().unwrap().events.push_system(
+            EvLevel::Report,
+            EvAction::System,
+            Some("daemon_start"),
+            Some(&format!("v{} (release {})", paths::VERSION_NAME, paths::RELEASE_NO)),
+        );
+    }
+
     // L3 配置热加载监听线程
     {
         let st = Arc::clone(&state);
@@ -141,6 +153,16 @@ fn main() {
     }
 
     logi!("正在退出...");
+    // L3.1 结构化事件：daemon 停止
+    {
+        use crate::events::{EvAction, EvLevel};
+        state.engine.lock().unwrap().events.push_system(
+            EvLevel::Report,
+            EvAction::System,
+            Some("daemon_stop"),
+            None,
+        );
+    }
     shutdown.store(true, Ordering::Relaxed);
     remove_ready_marker();
     let _ = sock_handle.join();

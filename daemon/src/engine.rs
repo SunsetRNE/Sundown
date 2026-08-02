@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::events::{EvAction, EvLevel, EventBuffer};
 use crate::freezer;
 use crate::policy::{AppMode, Policy};
 use crate::{logi, logw};
@@ -40,6 +41,8 @@ pub struct EngineState {
     pub pkg_uids: HashMap<String, u32>,
     /// pkg → 存活 pid 集合（proc-add/remove 维护；force-stop/进程核验用）
     pub pkg_pids: HashMap<String, Vec<u32>>,
+    /// 结构化事件缓冲（日志数据层；环形 256，覆盖最旧——观测可损失）
+    pub events: EventBuffer,
     pub freeze_ops: u64,
     pub unfreeze_ops: u64,
     pub wakeup_thaws: u64,
@@ -56,6 +59,7 @@ impl Default for EngineState {
             last_focus: None,
             pkg_uids: HashMap::new(),
             pkg_pids: HashMap::new(),
+            events: EventBuffer::default(),
             freeze_ops: 0,
             unfreeze_ops: 0,
             wakeup_thaws: 0,
@@ -81,8 +85,22 @@ impl EngineState {
             if freezer::unfreeze_pkg(pkg) {
                 self.unfreeze_ops += 1;
                 logi!("L3 前台解冻: {}（解冻累计 {}）", pkg, self.unfreeze_ops);
+                self.events.push_app(
+                    EvLevel::Event,
+                    EvAction::Unfreeze,
+                    pkg,
+                    Some("foreground"),
+                    None,
+                );
             } else {
                 logw!("L3 前台解冻失败: {}", pkg);
+                self.events.push_app(
+                    EvLevel::Warn,
+                    EvAction::Unfreeze,
+                    pkg,
+                    Some("foreground_failed"),
+                    None,
+                );
             }
             self.cooldown.insert(pkg.to_string(), now + self.cooldown_dur());
         }
@@ -106,8 +124,22 @@ impl EngineState {
                 self.unfreeze_ops += 1;
                 self.wakeup_thaws += 1;
                 logi!("L3 唤醒解冻: {}（累计 {} 次）", pkg, self.wakeup_thaws);
+                self.events.push_app(
+                    EvLevel::Event,
+                    EvAction::Unfreeze,
+                    pkg,
+                    Some("wakeup"),
+                    None,
+                );
             } else {
                 logw!("L3 唤醒解冻失败: {}", pkg);
+                self.events.push_app(
+                    EvLevel::Warn,
+                    EvAction::Unfreeze,
+                    pkg,
+                    Some("wakeup_failed"),
+                    None,
+                );
             }
             self.cooldown.insert(pkg.to_string(), now + self.cooldown_dur());
         }
@@ -115,7 +147,8 @@ impl EngineState {
         self.grace.remove(pkg);
     }
 
-    /// event exempt pkg=P fg=0|1 media=0|1（dex 豁免判定监视器上行，独立线程 2s 节拍）
+    /// event exempt pkg=P fg=0|1 media=0|1（dex 豁免判定监视器上行，独立线程 2s 节拍；
+    /// dex 侧仅在判定值变化时上报 → 事件频率低，可直接入缓冲）
     pub fn on_exempt(&mut self, pkg: &str, fg: bool, media: bool) {
         self.exempt.insert(
             pkg.to_string(),
@@ -123,6 +156,20 @@ impl EngineState {
                 fg_service: fg,
                 media,
             },
+        );
+        let reason = if fg {
+            "fg_service"
+        } else if media {
+            "media"
+        } else {
+            "none"
+        };
+        self.events.push_app(
+            EvLevel::Info,
+            EvAction::Exempt,
+            pkg,
+            Some(reason),
+            None,
         );
     }
 
@@ -157,6 +204,13 @@ impl EngineState {
         // 保险解冻（幂等写 0；进程已死写失败无害）
         let _ = freezer::unfreeze_pkg(pkg);
         logi!("L3 force-stop 清理: {}", pkg);
+        self.events.push_app(
+            EvLevel::Event,
+            EvAction::Close,
+            pkg,
+            Some("force_stop"),
+            None,
+        );
     }
 
     /// 策略重载（config.rs reload 回调）：成功替换；失败保留旧表
@@ -172,9 +226,21 @@ impl EngineState {
                 p.apps.len(),
                 p.revision
             );
+            self.events.push_system(
+                EvLevel::Report,
+                EvAction::Policy,
+                Some("reloaded"),
+                Some(&format!("enabled={} apps={} rev={}", p.enabled, p.apps.len(), p.revision)),
+            );
             self.policy = p;
         } else {
             logw!("L3 策略重载失败（保留旧表 revision={}）", self.policy.revision);
+            self.events.push_system(
+                EvLevel::Error,
+                EvAction::Policy,
+                Some("reload_failed"),
+                None,
+            );
         }
     }
 
@@ -193,6 +259,12 @@ impl EngineState {
                     }
                 }
                 logi!("L3 策略关闭，解冻 {} 个包", pkgs.len());
+                self.events.push_system(
+                    EvLevel::Info,
+                    EvAction::Unfreeze,
+                    Some("policy_disabled"),
+                    Some(&format!("unfroze {} pkgs", pkgs.len())),
+                );
             }
             self.frozen.clear();
             self.grace.clear();
@@ -234,6 +306,13 @@ impl EngineState {
                         "L3 tick豁免跳过（fg={} media={}）: {}",
                         fl.fg_service, fl.media, pkg
                     );
+                    self.events.push_app(
+                        EvLevel::Info,
+                        EvAction::Exempt,
+                        &pkg,
+                        Some("tick_exempt"),
+                        None,
+                    );
                     self.grace.remove(&pkg);
                     continue;
                 }
@@ -259,6 +338,13 @@ impl EngineState {
         for p in dead {
             self.frozen.remove(&p);
             logw!("L3 冻结记录清理（uid 无进程）: {}", p);
+            self.events.push_app(
+                EvLevel::Warn,
+                EvAction::Unfreeze,
+                &p,
+                Some("no_procs"),
+                None,
+            );
         }
     }
 
@@ -288,6 +374,13 @@ impl EngineState {
         if let Some(ap) = app_policy {
             if ap.mode == AppMode::Exempt {
                 logi!("L3 per-app 豁免（mode=exempt）: {}", pkg);
+                self.events.push_app(
+                    EvLevel::Info,
+                    EvAction::Exempt,
+                    pkg,
+                    Some("per_app_exempt"),
+                    None,
+                );
                 return;
             }
         }
@@ -296,6 +389,13 @@ impl EngineState {
         if let Some(fl) = self.exempt.get(pkg) {
             if (keep_fg && fl.fg_service) || (keep_media && fl.media) {
                 logi!("L3 豁免（fg={} media={}）: {}", fl.fg_service, fl.media, pkg);
+                self.events.push_app(
+                    EvLevel::Info,
+                    EvAction::Exempt,
+                    pkg,
+                    Some("exempt_action"),
+                    None,
+                );
                 return;
             }
         }
@@ -319,6 +419,13 @@ impl EngineState {
             pkg,
             grace_dur
         );
+        self.events.push_app(
+            EvLevel::Timer,
+            EvAction::Delay,
+            pkg,
+            Some("grace"),
+            Some(&format!("{}s", grace_dur)),
+        );
     }
 
     /// 执行冻结（uid 级，经 packages.list 查 uid）
@@ -327,6 +434,13 @@ impl EngineState {
         match freezer::pkg_uid(pkg) {
             Some(uid) if !freezer::uid_has_procs(uid) => {
                 logw!("L3 冻结跳过（uid 无进程）: {}", pkg);
+                self.events.push_app(
+                    EvLevel::Warn,
+                    EvAction::Freeze,
+                    pkg,
+                    Some("no_procs"),
+                    None,
+                );
                 return;
             }
             _ => {}
@@ -335,8 +449,22 @@ impl EngineState {
             self.frozen.insert(pkg.to_string(), now);
             self.freeze_ops += 1;
             logi!("L3 冻结: {}（冻结累计 {}）", pkg, self.freeze_ops);
+            self.events.push_app(
+                EvLevel::Success,
+                EvAction::Freeze,
+                pkg,
+                Some("grace_expired"),
+                None,
+            );
         } else {
             logw!("L3 冻结执行失败（不加入冻结表）: {}", pkg);
+            self.events.push_app(
+                EvLevel::Error,
+                EvAction::Freeze,
+                pkg,
+                Some("freeze_failed"),
+                None,
+            );
         }
     }
 

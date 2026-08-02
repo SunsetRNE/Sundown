@@ -18,6 +18,7 @@
 | `apply-update` | — | 【后续交付】激活 staged 守护进程更新 | 3=当前阶段未实现 |
 | `logs` | `[行数=50]` | 输出 boot_watchdog.log 末尾 | 0 |
 | `logs` | `--engine [行数=100]` | 输出 sundownd.log 末尾（引擎事件时间轴：焦点/唤醒/豁免/冻结） | 0 |
+| `events` | `[行数=50]` | 【L3.1】结构化事件时间线（JSON 数组，最旧→最新；字段见 §事件契约） | 0=成功；1=daemon 未连接；2=参数错误 |
 | `policy` | `status` | 【L3】查询冻结策略状态（JSON，经 daemon 管理面 socket） | 0=成功；1=daemon 未连接；2=参数错误 |
 | `policy` | `reload` | 【L3】强制从磁盘重载策略（失败保留旧表） | 同上 |
 | `version` | — | 模块与 daemon 版本 | 0 |
@@ -82,7 +83,35 @@ WebUI 仪表盘依赖以下字段，**任何实现变更必须向后兼容**（�
   `hello-dex <version>` / `fetch-dex` / `push-dex`（L2，dex 握手订阅/字节拉取/管理面推送，
   协议细节与热切换时序见 dex/README.md 与 docs/l2-plan.md）；
   `report-bridge <hash>` / `event <type> k=v...`（L2b，hello-dex 订阅连接上的
-  dex→daemon 上行命令：bridge hash 上报与焦点/唤醒/进程事件上行，见 dex/README.md）
+  dex→daemon 上行命令：bridge hash 上报与焦点/唤醒/进程事件上行，见 dex/README.md）；
+  `events [n]`（L3.1，结构化事件缓冲查询：最近 n 条，最旧→最新，JSON 数组；
+  n 缺省/0 = 全部；管理面与 abstract 面均可读）
+
+## `events` 事件契约（L3.1，只增不改）
+
+daemon 内存环形缓冲（容量 256，覆盖最旧），事件模型参考 AStop/Cerberus 事件时间线：
+
+```json
+[
+  {"ts":1722600000,"level":"success","action":"freeze","subject":"app","pkg":"com.tencent.mm","reason":"grace_expired"},
+  {"ts":1722600010,"level":"event","action":"unfreeze","subject":"app","pkg":"com.tencent.mm","reason":"wakeup"},
+  {"ts":1722600020,"level":"report","action":"system","subject":"system","reason":"daemon_start","msg":"v0.4.9-l3 (release 16)"}
+]
+```
+
+| 字段 | 取值 | 说明 |
+|---|---|---|
+| `ts` | 整数 | epoch 秒（排序键） |
+| `level` | `info`/`event`/`success`/`warn`/`error`/`timer`/`report` | 事件性质（参考 Cerberus log_level_*） |
+| `action` | `open`/`close`/`freeze`/`unfreeze`/`delay`/`exempt`/`policy`/`system` | 动作（参考 Cerberus log_level_action_*） |
+| `subject` | `app`/`system` | 主体（参考 Cerberus log_subject_*） |
+| `pkg` | 字符串（可选） | 应用包名；subject=app 时必有 |
+| `reason` | 字符串（可选） | 触发原因：`foreground`/`wakeup`/`grace`/`grace_expired`/`force_stop`/`per_app_exempt`/`exempt_action`/`tick_exempt`/`no_procs`/`freeze_failed`/`policy_disabled`/`reloaded`/`reload_failed`/`probe_handshake`/`dex_handshake`/`dex_reregister`/`bridge_report`/`daemon_start`/`daemon_stop` 等 |
+| `msg` | 字符串（可选） | 人类可读补充 |
+
+- 可选字段（pkg/reason/msg）缺省时**省略**（非 null）
+- 唤醒事件按既有节流（每 32 条落一条）入缓冲，防广播风暴刷屏
+- `status --json` 同时追加 `events_count`（缓冲内条数）/ `events_total`（累计产生，单调递增）
 - **双通道**（同一套行协议，daemon 同时监听）：
   - 文件 socket `/data/adb/sundown/sundownd.sock` —— root 管理面（sunctl/WebUI）。
     注意 `/data/adb` 为 `drwx------ root root`，**system_server(uid 1000) 在 DAC 层

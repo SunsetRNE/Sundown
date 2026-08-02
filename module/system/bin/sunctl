@@ -10,7 +10,7 @@ INSTALLED_META="$SUNDOWN_DIR/update/installed.json"
 READY_MARKER="$SUNDOWN_DIR/update/daemon.ready"
 SOCK_PATH="$SUNDOWN_DIR/sundownd.sock"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.4.8-l3"
+VERSION="0.4.9-l3"
 
 # ---------- 工具函数 ----------
 
@@ -300,6 +300,22 @@ cmd_policy() {
     esac
 }
 
+cmd_events() {
+    # L3.1 结构化事件时间线（JSON 数组，最旧→最新；WebUI 日志页数据源升级的前置）
+    #   events [行数=50] -> 最近 N 条（缺省 50；0 = 全部）
+    lines="${1:-50}"
+    case "$lines" in
+        ''|*[!0-9]*) echo "用法: sunctl events [行数]" >&2; return 2 ;;
+    esac
+    resp="$(sock_query "events $lines")"
+    if [ -z "$resp" ]; then
+        echo "❌ daemon 未连接（socket 不可用），无法读取事件缓冲" >&2
+        return 1
+    fi
+    printf '%s\n' "$resp"
+    return 0
+}
+
 cmd_version() {
     echo "Sundown $VERSION (by SunsetREN)"
     echo "  daemon: $(daemon_version)"
@@ -316,6 +332,7 @@ usage() {
   reload-probe           [L2] 热更新探针 dex
   policy status          [L3] 查询冻结策略状态（JSON）
   policy reload          [L3] 强制从磁盘重载策略
+  events [行数]          [L3.1] 结构化事件时间线（JSON；焦点/唤醒/冻结/豁免/握手）
   apply-update           [后续] 激活 staged 守护进程更新
   logs [行数]            查看启动看门狗日志
   logs --engine [行数]   查看引擎事件日志（焦点/唤醒/冻结时间轴）
@@ -333,6 +350,7 @@ case "$1" in
     restart-runtime) shift; cmd_restart_runtime "$@" ;;
     reload-probe)    cmd_reload_probe ;;
     policy)          shift; cmd_policy "$@" ;;
+    events)          shift; cmd_events "$@" ;;
     apply-update)    cmd_apply_update ;;
     logs)            shift; cmd_logs "$@" ;;
     version|--version|-v) cmd_version ;;

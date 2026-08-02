@@ -37,6 +37,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::events::{EvAction, EvLevel};
 use crate::state::DaemonState;
 use crate::{loge, logi, logw, paths};
 
@@ -207,6 +208,12 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>, mgmt: bool) -> std::
             arg,
             state.expected_dex_hash().as_deref().unwrap_or("<无 probe.dex.hash>")
         );
+        state.engine.lock().unwrap().events.push_system(
+            EvLevel::Report,
+            EvAction::System,
+            Some("dex_handshake"),
+            Some(&format!("version={}", arg)),
+        );
         let resp = dex_hello_response(&state);
         writer.write_all(resp.as_bytes())?;
         writer.write_all(b"\n")?;
@@ -223,6 +230,12 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>, mgmt: bool) -> std::
     let resp = match cmd {
         "ping" => "{\"ok\":1,\"pong\":1}".to_string(),
         "status" => state.status_json(),
+        "events" => {
+            // L3.1 结构化事件缓冲（只读；管理面 + abstract 面均可查）
+            // events [n]：最近 n 条（最旧→最新）；缺省/0 = 全部
+            let limit = arg.parse::<usize>().unwrap_or(0);
+            state.engine.lock().unwrap().events.to_json(limit)
+        }
         "reload-config" => {
             crate::config::request_reload(&state);
             "{\"ok\":1,\"reloaded\":1}".to_string()
@@ -236,6 +249,12 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>, mgmt: bool) -> std::
                     "探针桩握手: hash={}（期望: {}）",
                     arg,
                     state.expected_hash().as_deref().unwrap_or("<无 probe.hash>")
+                );
+                state.engine.lock().unwrap().events.push_system(
+                    EvLevel::Report,
+                    EvAction::System,
+                    Some("probe_handshake"),
+                    Some(&format!("hash={}", arg)),
                 );
                 probe_response(&state)
             }
@@ -302,6 +321,12 @@ fn dex_subscription_loop(
                 } else {
                     state.record_dex(arg);
                     logi!("dex 重登记: version={}", arg);
+                    state.engine.lock().unwrap().events.push_system(
+                        EvLevel::Report,
+                        EvAction::System,
+                        Some("dex_reregister"),
+                        Some(&format!("version={}", arg)),
+                    );
                     dex_hello_response(state)
                 }
             }
@@ -315,6 +340,12 @@ fn dex_subscription_loop(
                         "hook bridge 上报: hash={}（期望: {}）",
                         arg,
                         state.expected_hook_hash().as_deref().unwrap_or("<无 hook.hash>")
+                    );
+                    state.engine.lock().unwrap().events.push_system(
+                        EvLevel::Report,
+                        EvAction::System,
+                        Some("bridge_report"),
+                        Some(&format!("hash={}", arg)),
                     );
                     bridge_response(state)
                 }
@@ -361,23 +392,44 @@ fn handle_event(state: &DaemonState, arg: &str) -> String {
                     media,
                     state.focus_changes.load(std::sync::atomic::Ordering::Relaxed)
                 );
-                // L3：决策状态机消费
-                state.engine.lock().unwrap().on_focus(&pkg, fg, media);
+                // L3.1 结构化事件：前台切换（open）；与 on_focus 同锁，避免二次加锁
+                {
+                    let mut eng = state.engine.lock().unwrap();
+                    eng.events.push_app(
+                        EvLevel::Event,
+                        EvAction::Open,
+                        &pkg,
+                        Some("focus"),
+                        None,
+                    );
+                    eng.on_focus(&pkg, fg, media);
+                }
                 "{\"ok\":1}".to_string()
             }
             None => "{\"ok\":0,\"error\":\"event focus requires pkg=\"}".to_string(),
         },
         "wakeup" => {
             state.bump_wakeup();
-            // 广播风暴防护：只计数，每 32 条才落一条日志
+            // 广播风暴防护：只计数，每 32 条才落一条日志/事件
             let n = state.wakeup_events.load(std::sync::atomic::Ordering::Relaxed);
             if n % 32 == 1 {
+                let reason = kv("reason").unwrap_or_else(|| "?".to_string());
                 logi!(
                     "唤醒事件: pkg={} reason={}（累计 {} 条）",
                     kv("pkg").unwrap_or_else(|| "?".to_string()),
-                    kv("reason").unwrap_or_else(|| "?".to_string()),
+                    reason,
                     n
                 );
+                // L3.1 结构化事件：唤醒观测（open + reason；节流与日志同频）
+                if let Some(pkg) = kv("pkg") {
+                    state.engine.lock().unwrap().events.push_app(
+                        EvLevel::Event,
+                        EvAction::Open,
+                        &pkg,
+                        Some("wakeup"),
+                        Some(&reason),
+                    );
+                }
             }
             // L3：冻结中 → 解冻 + 冷却（防唤醒失效）
             if let Some(pkg) = kv("pkg") {

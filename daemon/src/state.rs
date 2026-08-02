@@ -282,15 +282,25 @@ impl DaemonState {
         let eng = self.engine.lock().unwrap();
         let frozen_json = json_str_array(&eng.frozen_packages());
         let grace_json = json_str_array(&eng.grace_pending());
-        let (policy_enabled, policy_revision, policy_apps, freeze_ops, unfreeze_ops, wakeup_thaws) =
-            (
-                eng.policy.enabled,
-                eng.policy.revision,
-                eng.policy.apps.len(),
-                eng.freeze_ops,
-                eng.unfreeze_ops,
-                eng.wakeup_thaws,
-            );
+        let (
+            policy_enabled,
+            policy_revision,
+            policy_apps,
+            events_count,
+            events_total,
+            freeze_ops,
+            unfreeze_ops,
+            wakeup_thaws,
+        ) = (
+            eng.policy.enabled,
+            eng.policy.revision,
+            eng.policy.apps.len(),
+            eng.events.len(),
+            eng.events.total,
+            eng.freeze_ops,
+            eng.unfreeze_ops,
+            eng.wakeup_thaws,
+        );
         drop(eng);
         format!(
             concat!(
@@ -314,6 +324,8 @@ impl DaemonState {
                 "\"policy_enabled\":{policy_enabled},",
                 "\"policy_revision\":{policy_revision},",
                 "\"policy_apps\":{policy_apps},",
+                "\"events_count\":{events_count},",
+                "\"events_total\":{events_total},",
                 "\"frozen_packages\":{frozen},",
                 "\"grace_pending\":{grace},",
                 "\"freeze_ops\":{freeze_ops},",
@@ -339,6 +351,8 @@ impl DaemonState {
             policy_enabled = policy_enabled,
             policy_revision = policy_revision,
             policy_apps = policy_apps,
+            events_count = events_count,
+            events_total = events_total,
             frozen = frozen_json,
             grace = grace_json,
             freeze_ops = freeze_ops,
