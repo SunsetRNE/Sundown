@@ -73,6 +73,21 @@ fn write_ready_marker() -> std::io::Result<()> {
     std::fs::write(paths::READY_MARKER, content)
 }
 
+/// 初始化 update/installed.json（仅缺失时，v0.4.20-l3）：
+/// 记录当前 daemon 版本，供 service.sh readiness 校验与 sunctl daemon_version 查询。
+/// staged 更新激活时由 service.sh 原子替换该文件——daemon 绝不覆盖既有文件，
+/// 避免破坏「installed.json(期望) vs daemon.ready(实际)」的回滚判定语义。
+fn write_installed_meta() -> std::io::Result<()> {
+    if std::path::Path::new(paths::INSTALLED_META).exists() {
+        return Ok(());
+    }
+    let content = format!(
+        "{{\"version_name\":\"{}\",\"release_no\":{}}}",
+        paths::VERSION_NAME, paths::RELEASE_NO
+    );
+    std::fs::write(paths::INSTALLED_META, content)
+}
+
 fn remove_ready_marker() {
     let _ = std::fs::remove_file(paths::READY_MARKER);
 }
@@ -87,6 +102,10 @@ fn main() {
     if let Err(e) = ensure_dirs() {
         eprintln!("FATAL: 创建数据目录失败: {}", e);
         std::process::exit(1);
+    }
+    // v0.4.20-l3：installed.json 初始化（仅缺失时写入；staged 激活由 service.sh 管理）
+    if let Err(e) = write_installed_meta() {
+        logw!("installed.json 初始化失败: {}（daemon_version 回落 sunctl VERSION）", e);
     }
 
     logi!("========================================");

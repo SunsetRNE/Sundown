@@ -15,7 +15,7 @@
 | `restart-daemon` | — | 重启 sundownd（杀旧→启动→验证 PID） | 0=成功；1=失败 |
 | `restart-runtime` | `--yes`（必需） | 软重启 zygote（`ctl.restart`）。无 `--yes` 时仅打印警告 | 0=已触发；2=未确认拒绝执行 |
 | `reload-probe` | — | 【L2 已交付】经 daemon 管理面推送 probe.dex，运行中 dex 层 ClassLoader 热切换 | 0=成功（含 notified:0 的静默落地）；1=daemon 未连接/推送失败 |
-| `apply-update` | — | 【后续交付】激活 staged 守护进程更新 | 3=当前阶段未实现 |
+| `apply-update` | `[zip路径\|URL]` / `--activate` | 【v0.4.20-l3 已交付】下载/暂存 daemon 更新：缺省查 GitHub Nightly asset（或指定本地 zip / URL）→ 解压提取 `system/bin/sundownd` → 运行 `--version` 解析版本（防降级：release_no 只增）→ SHA256 + installed.json.new + pending.json(staged_boot_id) 写入 pending 四件套；`--activate` 立即激活（备份 → 替换 → 重启 daemon → 20s+10s readiness 校验 → 失败自动回滚，与 service.sh 同规） | 0=成功；1=下载/解析/激活失败；2=参数错误 |
 | `logs` | `[行数=50]` | 输出 boot_watchdog.log 末尾 | 0 |
 | `logs` | `--engine [行数=100]` | 输出 sundownd.log 末尾（引擎事件时间轴：焦点/唤醒/豁免/冻结） | 0 |
 | `events` | `[行数=50]` | 【L3.1】结构化事件时间线（JSON 数组，最旧→最新；字段见 §事件契约） | 0=成功；1=daemon 未连接；2=参数错误 |

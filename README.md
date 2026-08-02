@@ -83,7 +83,7 @@ Sundown/
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
-## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.19-l3：冻结链路全实测 + 焦点去抖 + 情景预设全链路 + Cerberus 豁免维度扩展与子进程管理）
+## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.20-l3：eBPF 流量数据源适配 Android16 + 定位活动豁免 daemon 侧 + 热更新 staged 命令与 WebUI 入口）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
@@ -141,10 +141,16 @@ Sundown/
   - 定时解冻窗口 `unfreeze_window = "HH:MM-HH:MM"`（per-app）：窗口内退后台不冻结（libc localtime_r 零依赖，不支持跨零点）
   - 子进程管理 `push_policy`/`push_mode = keep|kill`（全局 + per-app）：keep = pid 级选择性冻结（:push/:MSF/:channel/:pull 子进程保留运行，推送通道不断，失败回落 uid 级整冻）；kill = 冻结时连带 SIGKILL :push 类子进程（cgroup.procs 归属核验防 pid 复用误杀）
   - WebUI 策略页新增高网络豁免 + 推送子进程保留开关（v2.1），policy.toml 模板文档化
+- [x] eBPF 流量数据源 + 定位活动豁免 + 热更新 staged 命令（v0.4.20-l3）：
+  - 高网络数据源第三源：AOSP 标准 eBPF map `/sys/fs/bpf/netd_shared/map_netd_app_uid_stats_map`（bpf() syscall 遍历，2s 缓存 TTL；修复 Android16 上 /proc/uid_stat 与 xt_qtaguid 均缺失导致 keep_high_network 失效——OPPO 定制内核实测发现）
+  - 定位活动豁免 `keep_location`（全局 + per-app，缺省 true）：daemon 侧消费 dex 上行 `event exempt loc=1` 的 AppOps 判定，decide_leave/tick 双重豁免链扩展为 fg/media/loc 三重（dex 侧判定实现走 L2 热更新后续交付）
+  - 热更新命令实装：`sunctl apply-update [zip|URL]` 下载 Nightly 模块包 → 提取 sundownd → 运行 `--version` 解析版本 → SHA256 + installed.json.new + pending.json（staged_boot_id）写入 pending 四件套（防降级：release_no 只增）；`sunctl apply-update --activate` 立即激活（备份 → 替换 → 重启 daemon → 20s+10s readiness 校验 → 失败自动回滚，与 service.sh 同规）
+  - installed.json 初始化（daemon 启动仅缺失时写入 version_name/release_no，staged 激活仍由 service.sh 原子替换）
+  - WebUI v2.2：策略页新增定位活动豁免开关 + 更多页「检查并升级（Nightly）」一键暂存按钮（下载后确认重启激活）
 
 ## 待办（后置）
-- [ ] 定位活动豁免（dex 侧 AppOps 判定，走 L2 热更新路线）
-- [ ] 热更新路线（L0 staged 自动激活 + dex push 联动 WebUI 一键升级）
+- [ ] 定位活动豁免 dex 侧 AppOps 判定（ExemptMonitor.java 扩展 loc 字段上报，走 L2 热更新路线）
+- [ ] 完整热更新闭环打磨（WebUI 检测新版 → 下载 → staged → 重启激活 → 回滚的端到端体验）
 - [ ] WebUI 日志页交互打磨（v3 数据面就绪后的分组/时间线视图）
 
 ## 依赖

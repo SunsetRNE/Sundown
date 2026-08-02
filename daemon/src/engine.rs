@@ -24,6 +24,8 @@ use crate::{logi, logw};
 pub struct ExemptFlags {
     pub fg_service: bool,
     pub media: bool,
+    /// 定位活动（dex 侧 AppOps 判定 loc=1，v0.4.20-l3）
+    pub location: bool,
 }
 
 /// 策略引擎状态（由 DaemonState.engine 持有，调用方持锁操作）
@@ -171,20 +173,24 @@ impl EngineState {
         self.grace.remove(pkg);
     }
 
-    /// event exempt pkg=P fg=0|1 media=0|1（dex 豁免判定监视器上行，独立线程 2s 节拍；
+    /// event exempt pkg=P fg=0|1 media=0|1 loc=0|1（dex 豁免判定监视器上行，独立线程 2s 节拍；
     /// dex 侧仅在判定值变化时上报 → 事件频率低，可直接入缓冲）
-    pub fn on_exempt(&mut self, pkg: &str, fg: bool, media: bool) {
+    /// v0.4.20-l3：新增 loc（定位 AppOps 判定）；旧 dex 不携带 loc 字段 → 缺省 false
+    pub fn on_exempt(&mut self, pkg: &str, fg: bool, media: bool, loc: bool) {
         self.exempt.insert(
             pkg.to_string(),
             ExemptFlags {
                 fg_service: fg,
                 media,
+                location: loc,
             },
         );
         let reason = if fg {
             "fg_service"
         } else if media {
             "media"
+        } else if loc {
+            "location"
         } else {
             "none"
         };
@@ -415,11 +421,13 @@ impl EngineState {
             // getServices/播放配置真实判定 fg/media——tick 这里兜底消费，防止
             // 有前台服务/媒体播放的 app 被 focus 噪声误冻。
             let (keep_fg, keep_media) = self.keep_flags(&pkg);
+            let keep_loc = self.keep_loc(&pkg);
             if let Some(fl) = self.exempt.get(&pkg) {
-                if (keep_fg && fl.fg_service) || (keep_media && fl.media) {
+                if (keep_fg && fl.fg_service) || (keep_media && fl.media) || (keep_loc && fl.location)
+                {
                     logi!(
-                        "L3 tick豁免跳过（fg={} media={}）: {}",
-                        fl.fg_service, fl.media, pkg
+                        "L3 tick豁免跳过（fg={} media={} loc={}）: {}",
+                        fl.fg_service, fl.media, fl.location, pkg
                     );
                     self.events.push_app(
                         EvLevel::Info,
@@ -494,6 +502,14 @@ impl EngineState {
         match self.policy.apps.get(pkg) {
             Some(ap) => ap.keep_high_network.unwrap_or(self.policy.keep_high_network),
             None => self.policy.keep_high_network,
+        }
+    }
+
+    /// 定位活动豁免开关（per-app 覆盖优先，缺省回落全局）
+    fn keep_loc(&self, pkg: &str) -> bool {
+        match self.policy.apps.get(pkg) {
+            Some(ap) => ap.keep_location.unwrap_or(self.policy.keep_location),
+            None => self.policy.keep_location,
         }
     }
 
@@ -578,11 +594,15 @@ impl EngineState {
             );
             return;
         }
-        // 豁免动作：最近 focus 判定 fg/media（per-app 开关可覆盖全局）
+        // 豁免动作：最近 focus 判定 fg/media/loc（per-app 开关可覆盖全局）
         let (keep_fg, keep_media) = self.keep_flags(pkg);
+        let keep_loc = self.keep_loc(pkg);
         if let Some(fl) = self.exempt.get(pkg) {
-            if (keep_fg && fl.fg_service) || (keep_media && fl.media) {
-                logi!("L3 豁免（fg={} media={}）: {}", fl.fg_service, fl.media, pkg);
+            if (keep_fg && fl.fg_service) || (keep_media && fl.media) || (keep_loc && fl.location) {
+                logi!(
+                    "L3 豁免（fg={} media={} loc={}）: {}",
+                    fl.fg_service, fl.media, fl.location, pkg
+                );
                 self.events.push_app(
                     EvLevel::Info,
                     EvAction::Exempt,

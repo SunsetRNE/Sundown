@@ -438,12 +438,14 @@ fn handle_event(state: &DaemonState, arg: &str) -> String {
             "{\"ok\":1}".to_string()
         }
         "exempt" => match kv("pkg") {
-            // L3：dex 豁免判定监视器上行（fg/media，独立线程判定，2s 节拍）
+            // L3：dex 豁免判定监视器上行（fg/media/loc，独立线程判定，2s 节拍；
+            // v0.4.20-l3 起新增 loc=定位 AppOps 判定，旧 dex 不携带 → 缺省 false）
             Some(pkg) => {
                 let fg = kv_bool("fg");
                 let media = kv_bool("media");
-                logi!("豁免判定: {}（fg={} media={}）", pkg, fg, media);
-                state.engine.lock().unwrap().on_exempt(&pkg, fg, media);
+                let loc = kv_bool("loc");
+                logi!("豁免判定: {}（fg={} media={} loc={}）", pkg, fg, media, loc);
+                state.engine.lock().unwrap().on_exempt(&pkg, fg, media, loc);
                 "{\"ok\":1}".to_string()
             }
             None => "{\"ok\":0,\"error\":\"event exempt requires pkg=\"}".to_string(),

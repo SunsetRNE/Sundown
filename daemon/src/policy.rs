@@ -64,6 +64,8 @@ pub struct AppPolicy {
     pub keep_fg_service: Option<bool>,
     /// 媒体播放豁免开关（None = 跟随全局 keep_media）
     pub keep_media: Option<bool>,
+    /// 定位活动豁免开关（None = 跟随全局 keep_location；dex 侧 AppOps 判定 loc=1）
+    pub keep_location: Option<bool>,
     /// 高网络负载豁免开关（None = 跟随全局 keep_high_network）
     pub keep_high_network: Option<bool>,
     /// 交互/FCM 唤醒豁免开关（None = 缺省 true：wakeup 事件照常解冻）
@@ -81,6 +83,7 @@ impl Default for AppPolicy {
             grace_override: None,
             keep_fg_service: None,
             keep_media: None,
+            keep_location: None,
             keep_high_network: None,
             keep_wakeup: None,
             push_mode: None,
@@ -124,6 +127,8 @@ pub struct Policy {
     pub keep_fg_service: bool,
     /// 豁免动作：媒体播放持有者不冻（dex 侧判定字段 media=1）
     pub keep_media: bool,
+    /// 豁免动作：定位使用中不冻（dex 侧 AppOps 判定字段 loc=1，v0.4.20-l3）
+    pub keep_location: bool,
     /// 豁免动作：高网络负载不冻（daemon 侧流量采样判定，/proc/uid_stat）
     pub keep_high_network: bool,
     /// 子进程策略（冻结时 :push 类子进程 保留/杀死，缺省 keep）
@@ -146,6 +151,7 @@ impl Default for Policy {
             apps: HashMap::new(),
             keep_fg_service: true,
             keep_media: true,
+            keep_location: true,
             keep_high_network: true,
             push_policy: PushMode::Keep,
             defense_anr: false,
@@ -207,6 +213,7 @@ fn apply_entry(p: &mut Policy, e: &TomlEntry) {
         ("whitelist", "packages") => p.whitelist = str_array_of(val, e),
         ("whitelist", "keep_fg_service") => p.keep_fg_service = bool_of(val, e, true),
         ("whitelist", "keep_media") => p.keep_media = bool_of(val, e, true),
+        ("whitelist", "keep_location") => p.keep_location = bool_of(val, e, true),
         ("whitelist", "keep_high_network") => p.keep_high_network = bool_of(val, e, true),
         ("whitelist", "push_policy") => match str_of(val, e) {
             Some(s) => match PushMode::parse(&s) {
@@ -248,6 +255,7 @@ fn apply_app_entry(p: &mut Policy, pkg: &str, e: &TomlEntry) {
         "grace_seconds" => ap.grace_override = Some(int_of(val, e, 8).max(0) as u64),
         "keep_fg_service" => ap.keep_fg_service = Some(bool_of(val, e, true)),
         "keep_media" => ap.keep_media = Some(bool_of(val, e, true)),
+        "keep_location" => ap.keep_location = Some(bool_of(val, e, true)),
         "keep_high_network" => ap.keep_high_network = Some(bool_of(val, e, true)),
         "keep_wakeup" => ap.keep_wakeup = Some(bool_of(val, e, true)),
         "push_mode" => match str_of(val, e) {
@@ -492,6 +500,27 @@ unfreeze_window = "22:30-23:45"
         // 合法窗口
         let night = p.apps.get("com.example.night").unwrap();
         assert_eq!(night.unfreeze_window, Some((22 * 60 + 30, 23 * 60 + 45)));
+    }
+
+    #[test]
+    fn parse_location_dimension_v0420() {
+        // v0.4.20-l3：定位活动豁免维度（全局 + per-app）
+        let src = r#"
+[whitelist]
+keep_location = false
+
+[apps."com.example.navi"]
+keep_location = true
+
+[apps."com.example.bad"]
+keep_location = 1
+"#;
+        let p = Policy::from_toml(src, 10).unwrap();
+        assert!(!p.keep_location); // 全局关闭
+        assert_eq!(p.apps["com.example.navi"].keep_location, Some(true)); // per-app 覆盖
+        assert_eq!(p.apps["com.example.bad"].keep_location, Some(true)); // 类型错误回落默认 true（失败安全）
+        // 缺省（未配置）回落全局语义由引擎 keep_loc 方法处理：None → 全局
+        assert_eq!(Policy::default().keep_location, true);
     }
 
     #[test]

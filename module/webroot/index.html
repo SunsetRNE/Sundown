@@ -368,6 +368,10 @@
         <div class="switch" id="p-km"></div>
       </div>
       <div class="field">
+        <label>定位活动豁免<span class="desc">keep_location：正在使用定位不冻结（v0.4.20-l3，dex 侧 AppOps 判定）</span></label>
+        <div class="switch" id="p-kl"></div>
+      </div>
+      <div class="field">
         <label>高网络豁免<span class="desc">keep_high_network：高速传输不冻结（v0.4.19-l3）</span></label>
         <div class="switch" id="p-khn"></div>
       </div>
@@ -376,7 +380,6 @@
         <div class="switch" id="p-pp"></div>
       </div>
     </div>
-
     <div class="card">
       <h2>🛡️ 白名单（永不冻结）<span class="cnt" id="wl-cnt"></span></h2>
       <div id="wl-list"></div>
@@ -471,6 +474,7 @@
         <button class="btn" id="btn-reload-probe">🚀 热更新探针</button>
         <button class="btn" id="btn-restart-daemon">♻️ 重启守护进程</button>
         <button class="btn danger" id="btn-restart-runtime">⚡ 软重启运行时</button>
+        <button class="btn primary" id="btn-check-update">⬆️ 检查并升级（Nightly）</button>
       </div>
     </div>
 
@@ -539,9 +543,11 @@ async function fetchToml() {
   const m1 = RAW_TOML.match(/^keep_fg_service\s*=\s*(true|false)/m);
   const m2 = RAW_TOML.match(/^keep_media\s*=\s*(true|false)/m);
   const m3 = RAW_TOML.match(/^keep_high_network\s*=\s*(true|false)/m);
+  const m5 = RAW_TOML.match(/^keep_location\s*=\s*(true|false)/m);
   const m4 = RAW_TOML.match(/^push_policy\s*=\s*"(keep|kill)"/m);
   TOML.keep_fg_service = m1 ? m1[1] === "true" : true;
   TOML.keep_media = m2 ? m2[1] === "true" : true;
+  TOML.keep_location = m5 ? m5[1] === "true" : true;
   TOML.keep_high_network = m3 ? m3[1] === "true" : true;
   TOML.push_policy = m4 ? m4[1] : "keep";
   return TOML;
@@ -714,6 +720,7 @@ async function refreshPolicyForm() {
   setSwitch($("p-enabled"), P.enabled === 1);
   setSwitch($("p-kfg"), TOML.keep_fg_service);
   setSwitch($("p-km"), TOML.keep_media);
+  setSwitch($("p-kl"), TOML.keep_location);
   setSwitch($("p-khn"), TOML.keep_high_network);
   setSwitch($("p-pp"), TOML.push_policy === "keep");
   wlDraft = (P.whitelist || []).slice();
@@ -756,6 +763,7 @@ function buildToml() {
   const en = $("p-enabled").dataset.on === "1";
   const kfg = $("p-kfg").dataset.on === "1";
   const km = $("p-km").dataset.on === "1";
+  const kl = $("p-kl").dataset.on === "1";
   const khn = $("p-khn").dataset.on === "1";
   const pp = $("p-pp").dataset.on === "1" ? "keep" : "kill";
   return "# Sundown L3 冻结策略（conf/policy.toml）— 由 WebUI v2.1 保存\n"
@@ -770,6 +778,7 @@ function buildToml() {
     + "packages = " + tomlList(wlDraft) + "\n"
     + "keep_fg_service = " + kfg + "\n"
     + "keep_media = " + km + "\n"
+    + "keep_location = " + kl + "\n"
     + "keep_high_network = " + khn + "\n"
     + "push_policy = \"" + pp + "\"\n\n"
     + "[defense]\n"
@@ -1169,6 +1178,20 @@ function init() {
     const r = await exec(SUNCTL + " restart-daemon");
     toast(r.errno === 0 ? "✅ 守护进程已重启" : "重启失败: " + (r.stderr || ""));
     setTimeout(() => { refreshDash(); refreshMore(); }, 1500);
+  };
+  $("btn-check-update").onclick = async () => {
+    if (!confirm("将下载最新 Nightly 模块包并暂存（staged）。\n重启设备后自动激活，失败自动回滚。\n\n确认下载？")) return;
+    toast("正在检查并下载 Nightly 更新…（需网络）");
+    const r = await exec(SUNCTL + " apply-update");
+    const out = ((r.stdout || "") + (r.stderr || "")).trim();
+    if (r.errno === 0 && /✅|已暂存|staged/.test(out)) {
+      toast("✅ 新版本已暂存");
+      if (confirm((out.split("\n")[0] || "新版本已下载") + "\n\n立即重启设备激活？")) {
+        await exec("reboot");
+      }
+    } else {
+      toast("❌ 升级失败: " + (out || "未知错误"));
+    }
   };
   $("btn-restart-runtime").onclick = async () => {
     if (!confirm("⚠️ 软重启将结束所有应用进程（状态由系统保存，通常不丢数据）。\n屏幕会黑屏几秒后回到锁屏界面。\n\n确认继续？")) return;
