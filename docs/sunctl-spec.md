@@ -17,6 +17,9 @@
 | `reload-probe` | — | 【L2 已交付】经 daemon 管理面推送 probe.dex，运行中 dex 层 ClassLoader 热切换 | 0=成功（含 notified:0 的静默落地）；1=daemon 未连接/推送失败 |
 | `apply-update` | — | 【后续交付】激活 staged 守护进程更新 | 3=当前阶段未实现 |
 | `logs` | `[行数=50]` | 输出 boot_watchdog.log 末尾 | 0 |
+| `logs` | `--engine [行数=100]` | 输出 sundownd.log 末尾（引擎事件时间轴：焦点/唤醒/豁免/冻结） | 0 |
+| `policy` | `status` | 【L3】查询冻结策略状态（JSON，经 daemon 管理面 socket） | 0=成功；1=daemon 未连接；2=参数错误 |
+| `policy` | `reload` | 【L3】强制从磁盘重载策略（失败保留旧表） | 同上 |
 | `version` | — | 模块与 daemon 版本 | 0 |
 | （无参数/未知） | — | 用法说明 | 2 |
 

@@ -2,13 +2,14 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Sundown · 日落而息</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
     --bg: #14101e;
     --card: #1f1830;
+    --card2: #251c3a;
     --accent: #ff9a5a;      /* 日落橙 */
     --accent2: #c96dd8;     /* 暮紫 */
     --text: #f0eaf8;
@@ -16,94 +17,349 @@
     --ok: #6ddb8f;
     --warn: #ffd166;
     --err: #ff6b6b;
+    --focus: #5aa7ff;       /* 焦点事件 */
+    --wake: #c96dd8;        /* 唤醒事件 */
+    --exempt: #6ddb8f;      /* 豁免判定 */
+    --freeze: #ff9a5a;      /* 冻结动作 */
   }
+  html, body { height: 100%; }
   body {
     font-family: system-ui, -apple-system, sans-serif;
     background: linear-gradient(180deg, #1a1030 0%, #14101e 60%);
     color: var(--text);
     min-height: 100vh;
-    padding: 20px 16px calc(20px + var(--window-inset-bottom, 0px));
-    padding-top: calc(20px + var(--window-inset-top, 0px));
+    padding: 16px 14px calc(92px + var(--window-inset-bottom, 0px));
+    padding-top: calc(16px + var(--window-inset-top, 0px));
+    -webkit-tap-highlight-color: transparent;
   }
-  header { text-align: center; margin-bottom: 24px; }
-  header h1 {
-    font-size: 1.8rem;
+  /* ---- 顶部 ---- */
+  header.top { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+  header.top .logo {
+    font-size: 1.35rem; font-weight: 800;
     background: linear-gradient(90deg, var(--accent), var(--accent2));
-    -webkit-background-clip: text;
-    background-clip: text;
+    -webkit-background-clip: text; background-clip: text;
     -webkit-text-fill-color: transparent;
   }
-  header p { color: var(--dim); font-size: 0.85rem; margin-top: 4px; }
+  header.top .sub { color: var(--dim); font-size: 0.78rem; flex: 1; text-align: right; }
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 0.72rem; background: #2c2344; color: var(--dim); margin-left: 6px; }
+  .badge.ok { background: rgba(109,219,143,0.14); color: var(--ok); }
+  .badge.warn { background: rgba(255,209,102,0.14); color: var(--warn); }
+  .badge.err { background: rgba(255,107,107,0.14); color: var(--err); }
+
+  /* ---- 页面与导航 ---- */
+  .page { display: none; animation: fadein .18s ease; }
+  .page.active { display: block; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
+  nav.tabbar {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    display: flex; z-index: 50;
+    background: rgba(20,16,30,0.96);
+    border-top: 1px solid rgba(255,255,255,0.07);
+    padding: 6px 4px calc(6px + var(--window-inset-bottom, 0px));
+    backdrop-filter: blur(12px);
+  }
+  nav.tabbar .tab {
+    flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+    background: none; border: none; color: var(--dim); font-size: 0.68rem;
+    padding: 6px 0; cursor: pointer; border-radius: 10px;
+  }
+  nav.tabbar .tab .ico { font-size: 1.25rem; line-height: 1.2; filter: grayscale(.6); opacity: .75; }
+  nav.tabbar .tab.active { color: var(--accent); }
+  nav.tabbar .tab.active .ico { filter: none; opacity: 1; }
+
+  /* ---- 卡片 ---- */
   .card {
     background: var(--card);
     border-radius: 14px;
-    padding: 16px;
-    margin-bottom: 14px;
+    padding: 14px;
+    margin-bottom: 12px;
     border: 1px solid rgba(255,255,255,0.06);
   }
-  .card h2 { font-size: 0.95rem; color: var(--dim); margin-bottom: 12px; font-weight: 600; }
-  .row { display: flex; justify-content: space-between; padding: 7px 0; font-size: 0.92rem; }
+  .card h2 { font-size: 0.82rem; color: var(--dim); margin-bottom: 10px; font-weight: 700; letter-spacing: .04em; display: flex; align-items: center; gap: 6px; }
+  .card h2 .cnt { margin-left: auto; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid2 .card { margin-bottom: 12px; }
+  .row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 0.86rem; gap: 8px; }
   .row + .row { border-top: 1px dashed rgba(255,255,255,0.07); }
   .row .k { color: var(--dim); }
-  .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
-  button {
-    width: 100%; padding: 13px; border: none; border-radius: 10px;
-    font-size: 0.95rem; font-weight: 600; margin-top: 8px; cursor: pointer;
+  .row .v { text-align: right; word-break: break-all; }
+  .mono { font-family: ui-monospace, monospace; font-size: 0.8em; }
+
+  /* ---- Hero ---- */
+  .hero { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .hero-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .hero-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; background: var(--warn); box-shadow: 0 0 8px currentColor; }
+  .hero-dot.run { background: var(--ok); color: var(--ok); }
+  .hero-dot.stop { background: var(--err); color: var(--err); }
+  .hero-title { font-size: 1.02rem; font-weight: 700; }
+  .hero-sub { font-size: 0.74rem; color: var(--dim); margin-top: 2px; }
+  .switch {
+    position: relative; width: 52px; height: 30px; border-radius: 20px;
+    background: #3a3052; border: 1px solid rgba(255,255,255,0.1);
+    cursor: pointer; transition: background .2s; flex-shrink: 0;
+  }
+  .switch::after {
+    content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px;
+    border-radius: 50%; background: #cfc6e4; transition: transform .2s;
+  }
+  .switch.on { background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+  .switch.on::after { transform: translateX(22px); background: #fff; }
+
+  /* ---- 应用状态 ---- */
+  .app-list { display: flex; flex-direction: column; gap: 6px; }
+  .app-item {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    background: var(--card2); border-radius: 10px; font-size: 0.84rem;
+  }
+  .app-item .pkg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace; font-size: 0.78em; }
+  .chip { padding: 2px 8px; border-radius: 20px; font-size: 0.68rem; white-space: nowrap; }
+  .chip.fg    { background: rgba(90,167,255,.16); color: var(--focus); }
+  .chip.grace { background: rgba(255,209,102,.16); color: var(--warn); }
+  .chip.froz  { background: rgba(90,167,255,.28); color: #9cc8ff; }
+  .chip.force { background: rgba(255,107,107,.16); color: var(--err); }
+  .chip.wl    { background: rgba(109,219,143,.14); color: var(--ok); }
+  .empty { color: var(--dim); font-size: 0.8rem; text-align: center; padding: 10px 0; }
+
+  /* ---- 表单 ---- */
+  .field { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; }
+  .field + .field { border-top: 1px dashed rgba(255,255,255,0.07); }
+  .field label { font-size: 0.86rem; color: var(--text); flex: 1; }
+  .field .desc { font-size: 0.72rem; color: var(--dim); display: block; margin-top: 2px; }
+  input[type=number], input[type=text] {
+    background: #100c1a; border: 1px solid rgba(255,255,255,0.12); color: var(--text);
+    border-radius: 8px; padding: 8px 10px; font-size: 0.88rem; width: 110px; text-align: right;
+  }
+  input[type=text] { width: 100%; text-align: left; }
+  .mini-btn {
+    background: #2c2344; color: var(--text); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 8px; padding: 7px 12px; font-size: 0.8rem; cursor: pointer; flex-shrink: 0;
+  }
+  .mini-btn:active { opacity: .7; }
+  .mini-btn.danger { color: var(--err); border-color: rgba(255,107,107,.4); }
+  .pkg-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+  .pkg-row .pkg { flex: 1; font-family: ui-monospace, monospace; font-size: 0.78em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .add-row { display: flex; gap: 8px; margin-top: 10px; }
+  .add-row input { flex: 1; }
+  button.btn {
+    width: 100%; padding: 12px; border: none; border-radius: 10px;
+    font-size: 0.92rem; font-weight: 700; margin-top: 8px; cursor: pointer;
     background: #2c2344; color: var(--text);
   }
-  button.primary { background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #1a1030; }
-  button.danger { background: #3d2030; color: var(--err); border: 1px solid var(--err); }
-  button:disabled { opacity: 0.45; }
-  #log-box {
-    font-family: monospace; font-size: 0.72rem; white-space: pre-wrap;
-    max-height: 220px; overflow-y: auto; color: var(--dim);
-    background: #100c1a; border-radius: 8px; padding: 10px;
+  button.btn.primary { background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #1a1030; }
+  button.btn.danger { background: #3d2030; color: var(--err); border: 1px solid var(--err); }
+  button.btn:disabled { opacity: 0.45; }
+
+  /* ---- 日志 ---- */
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  .chip-btn {
+    border: 1px solid rgba(255,255,255,0.12); background: #2c2344; color: var(--dim);
+    border-radius: 20px; padding: 4px 12px; font-size: 0.74rem; cursor: pointer;
   }
-  .badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 0.75rem; background: #2c2344; color: var(--dim); margin-left: 6px; }
+  .chip-btn.on { background: var(--accent); color: #1a1030; border-color: var(--accent); font-weight: 700; }
+  .log-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .log-bar select {
+    background: #100c1a; border: 1px solid rgba(255,255,255,0.12); color: var(--text);
+    border-radius: 8px; padding: 6px 8px; font-size: 0.78rem;
+  }
+  .auto-refresh { font-size: 0.76rem; color: var(--dim); display: flex; align-items: center; gap: 6px; margin-left: auto; cursor: pointer; user-select: none; }
+  #log-box {
+    font-family: ui-monospace, monospace; font-size: 0.7rem; line-height: 1.55;
+    white-space: pre-wrap; word-break: break-all;
+    max-height: 56vh; overflow-y: auto; color: var(--dim);
+    background: #100c1a; border-radius: 10px; padding: 10px;
+  }
+  #log-box .ln { display: block; border-radius: 4px; padding: 1px 4px; }
+  #log-box .ln.focus { color: var(--focus); }
+  #log-box .ln.wake  { color: var(--wake); }
+  #log-box .ln.exempt{ color: var(--exempt); }
+  #log-box .ln.freeze{ color: var(--freeze); }
+  #log-box .ln.err   { color: var(--err); font-weight: 700; }
+  #log-box .ln.warn  { color: var(--warn); }
+
+  /* ---- 更多 ---- */
+  .kv { display: flex; gap: 8px; padding: 6px 0; font-size: 0.84rem; }
+  .kv + .kv { border-top: 1px dashed rgba(255,255,255,0.07); }
+  .kv .k { color: var(--dim); width: 96px; flex-shrink: 0; }
+  .kv .v { flex: 1; word-break: break-all; }
+  .btn-group { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .btn-group .btn { margin-top: 0; }
+  pre.env {
+    font-family: ui-monospace, monospace; font-size: 0.72rem; line-height: 1.6;
+    white-space: pre-wrap; word-break: break-all; color: var(--dim);
+    background: #100c1a; border-radius: 10px; padding: 10px; max-height: 34vh; overflow-y: auto;
+  }
+  .foot-note { text-align: center; color: var(--dim); font-size: 0.7rem; margin-top: 18px; }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
 
-<header>
-  <h1>🌇 Sundown</h1>
-  <p>日落而息 · 墓碑调度 <span class="badge" id="ver-badge">L0</span></p>
+<header class="top">
+  <div class="logo">🌇 Sundown</div>
+  <div class="sub">日落而息 · 墓碑调度 <span class="badge" id="ver-badge">-</span></div>
 </header>
 
-<div class="card">
-  <h2>运行状态</h2>
-  <div class="row"><span class="k">守护进程 sundownd</span><span id="st-daemon">查询中…</span></div>
-  <div class="row"><span class="k">模块版本</span><span id="st-version">-</span></div>
-  <div class="row"><span class="k">Zygisk 提供方</span><span id="st-zygisk">-</span></div>
-  <div class="row"><span class="k">L1 探针桩</span><span id="st-stub">未交付（L1 阶段）</span></div>
-  <div class="row"><span class="k">L2 探针 dex</span><span id="st-dex">未交付（L2 阶段）</span></div>
-  <div class="row"><span class="k">L2b hook 桥</span><span id="st-bridge">未交付（L2b 阶段）</span></div>
-  <div class="row"><span class="k">前台焦点</span><span id="st-focus">-</span></div>
-  <div class="row"><span class="k">唤醒事件</span><span id="st-wakeup">-</span></div>
-</div>
+<main>
+  <!-- ============ Tab 1 仪表盘 ============ -->
+  <section id="page-dash" class="page active">
+    <div class="card hero">
+      <div class="hero-main">
+        <div class="hero-dot" id="hero-dot"></div>
+        <div style="min-width:0">
+          <div class="hero-title" id="hero-title">查询中…</div>
+          <div class="hero-sub" id="hero-sub"></div>
+        </div>
+      </div>
+      <div class="switch" id="hero-switch" title="策略总开关"></div>
+    </div>
 
-<div class="card">
-  <h2>守护进程控制</h2>
-  <button class="primary" id="btn-refresh">🔄 刷新状态</button>
-  <button id="btn-restart-daemon">♻️ 重启守护进程</button>
-</div>
+    <div class="grid2">
+      <div class="card">
+        <h2>🛡️ 注入闭环</h2>
+        <div class="row"><span class="k">守护进程</span><span class="v" id="d-daemon">-</span></div>
+        <div class="row"><span class="k">Zygisk</span><span class="v" id="d-zygisk">-</span></div>
+        <div class="row"><span class="k">L1 探针桩</span><span class="v" id="d-stub">-</span></div>
+        <div class="row"><span class="k">L2 探针 dex</span><span class="v" id="d-dex">-</span></div>
+        <div class="row"><span class="k">L2b hook 桥</span><span class="v" id="d-bridge">-</span></div>
+      </div>
+      <div class="card">
+        <h2>📊 事件统计</h2>
+        <div class="row"><span class="k">前台焦点</span><span class="v" id="d-focus">-</span></div>
+        <div class="row"><span class="k">焦点切换</span><span class="v" id="d-fchanges">-</span></div>
+        <div class="row"><span class="k">唤醒事件</span><span class="v" id="d-wakeup">-</span></div>
+        <div class="row"><span class="k">冻结 / 解冻</span><span class="v" id="d-ops">-</span></div>
+        <div class="row"><span class="k">策略修订</span><span class="v" id="d-rev">-</span></div>
+      </div>
+    </div>
 
-<div class="card">
-  <h2>探针（L2）</h2>
-  <button id="btn-reload-probe">🚀 热更新探针 dex</button>
-</div>
+    <div class="card">
+      <h2>📱 受管应用 <span class="cnt" id="app-cnt"></span></h2>
+      <div class="app-list" id="app-list"><div class="empty">加载中…</div></div>
+    </div>
+  </section>
 
-<div class="card">
-  <h2>运行时</h2>
-  <button class="danger" id="btn-restart-runtime">⚡ 软重启运行时（zygote）</button>
-</div>
+  <!-- ============ Tab 2 策略 ============ -->
+  <section id="page-policy" class="page">
+    <div class="card">
+      <h2>⚙️ 全局策略</h2>
+      <div class="field">
+        <label>启用冻结引擎<span class="desc">开启后按规则冻结后台应用（强副作用，谨慎）</span></label>
+        <div class="switch" id="p-enabled"></div>
+      </div>
+      <div class="field">
+        <label>退后台宽限（秒）<span class="desc">grace：失焦后等待多久开始冻结</span></label>
+        <input type="number" id="p-grace" min="5" max="600" step="5">
+      </div>
+      <div class="field">
+        <label>解冻冷却（秒）<span class="desc">cooldown：解冻后多久内不再次冻结</span></label>
+        <input type="number" id="p-cool" min="10" max="3600" step="10">
+      </div>
+      <div class="field">
+        <label>前台服务豁免<span class="desc">keep_fg_service：有前台服务不冻结</span></label>
+        <div class="switch" id="p-kfg"></div>
+      </div>
+      <div class="field">
+        <label>媒体播放豁免<span class="desc">keep_media：正在播放媒体不冻结</span></label>
+        <div class="switch" id="p-km"></div>
+      </div>
+    </div>
 
-<div class="card">
-  <h2>日志（boot_watchdog）</h2>
-  <div id="log-box">尚未加载</div>
-</div>
+    <div class="card">
+      <h2>🛡️ 白名单（永不冻结）<span class="cnt" id="wl-cnt"></span></h2>
+      <div id="wl-list"></div>
+      <div class="add-row">
+        <input type="text" id="wl-input" placeholder="输入包名，如 com.example.app">
+        <button class="mini-btn" id="wl-add">添加</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>⏩ 立即冻结（force）<span class="cnt" id="force-cnt"></span></h2>
+      <div id="force-list"></div>
+      <div class="add-row">
+        <input type="text" id="force-input" placeholder="输入包名，退后台立即冻结">
+        <button class="mini-btn" id="force-add">添加</button>
+      </div>
+    </div>
+
+    <button class="btn primary" id="btn-save-policy">💾 保存策略（热加载生效）</button>
+    <button class="btn" id="btn-reload-policy">🔄 放弃修改，重新载入</button>
+  </section>
+
+  <!-- ============ Tab 3 日志 ============ -->
+  <section id="page-logs" class="page">
+    <div class="card">
+      <h2>📜 引擎事件时间轴</h2>
+      <div class="chips" id="log-chips">
+        <button class="chip-btn on" data-f="all">全部</button>
+        <button class="chip-btn" data-f="focus">焦点</button>
+        <button class="chip-btn" data-f="wake">唤醒</button>
+        <button class="chip-btn" data-f="exempt">豁免</button>
+        <button class="chip-btn" data-f="freeze">冻结</button>
+        <button class="chip-btn" data-f="err">异常</button>
+      </div>
+      <div class="log-bar">
+        <select id="log-lines">
+          <option value="50">50 行</option>
+          <option value="100" selected>100 行</option>
+          <option value="300">300 行</option>
+          <option value="600">600 行</option>
+        </select>
+        <button class="mini-btn" id="log-refresh">🔄 刷新</button>
+        <label class="auto-refresh"><input type="checkbox" id="log-auto" checked> 自动</label>
+      </div>
+      <div id="log-box"><span class="empty">加载中…</span></div>
+    </div>
+  </section>
+
+  <!-- ============ Tab 4 更多 ============ -->
+  <section id="page-more" class="page">
+    <div class="card">
+      <h2>ℹ️ 关于</h2>
+      <div class="kv"><span class="k">模块版本</span><span class="v" id="m-version">-</span></div>
+      <div class="kv"><span class="k">守护进程</span><span class="v" id="m-daemon">-</span></div>
+      <div class="kv"><span class="k">数据目录</span><span class="v mono">/data/adb/sundown</span></div>
+      <div class="kv"><span class="k">架构</span><span class="v">L0 daemon · L1 桩 · L2 dex · L2b 桥 · L3 策略</span></div>
+      <div class="kv"><span class="k">上游参考</span><span class="v">Cerberus / AStop（UI 设计参考）</span></div>
+    </div>
+
+    <div class="card">
+      <h2>🔬 环境自检</h2>
+      <pre class="env" id="env-out">执行 sunctl env-check …</pre>
+      <button class="btn" id="btn-env">🔍 重新自检</button>
+    </div>
+
+    <div class="card">
+      <h2>🎛️ 控制台</h2>
+      <div class="btn-group">
+        <button class="btn" id="btn-refresh">🔄 刷新状态</button>
+        <button class="btn" id="btn-reload-probe">🚀 热更新探针</button>
+        <button class="btn" id="btn-restart-daemon">♻️ 重启守护进程</button>
+        <button class="btn danger" id="btn-restart-runtime">⚡ 软重启运行时</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>🧩 版本闭环</h2>
+      <div class="kv"><span class="k">L1 桩 hash</span><span class="v mono" id="m-stub-hash">-</span></div>
+      <div class="kv"><span class="k">L2 dex build</span><span class="v mono" id="m-dex-hash">-</span></div>
+      <div class="kv"><span class="k">L2b 桥 hash</span><span class="v mono" id="m-bridge-hash">-</span></div>
+    </div>
+
+    <div class="foot-note">Sundown by SunsetREN · WebUI v2.0</div>
+  </section>
+</main>
+
+<nav class="tabbar">
+  <button class="tab active" data-page="dash"><span class="ico">🌇</span><span>仪表盘</span></button>
+  <button class="tab" data-page="policy"><span class="ico">⚙️</span><span>策略</span></button>
+  <button class="tab" data-page="logs"><span class="ico">📜</span><span>日志</span></button>
+  <button class="tab" data-page="more"><span class="ico">🧩</span><span>更多</span></button>
+</nav>
 
 <script>
-// ---- KernelSU WebUI 桥（参考 ReZygisk webroot/js/kernelsu.js）----
+"use strict";
+/* ================= KernelSU WebUI 桥 ================= */
 function exec(command) {
   return new Promise((resolve, reject) => {
     if (typeof ksu === "undefined") { resolve({ errno: -1, stdout: "", stderr: "dev-preview" }); return; }
@@ -115,86 +371,339 @@ function exec(command) {
 function toast(msg) { (typeof ksu !== "undefined") ? ksu.toast(msg) : console.log("toast:", msg); }
 
 const SUNCTL = "/data/adb/modules/sundown/system/bin/sunctl";
+const CONF = "/data/adb/sundown/conf/policy.toml";
 const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const isDev = () => typeof ksu === "undefined";
 
-async function refreshStatus() {
+/* ================= 状态缓存 ================= */
+let ST = null;          // sunctl status --json
+let POL = null;         // sunctl policy status
+let RAW_TOML = "";      // 磁盘 policy.toml 原文
+let TOML = null;        // 解析后的键值
+let curPage = "dash";
+let logFilter = "all";
+let logTimer = null;
+
+/* ================= 数据获取 ================= */
+async function fetchStatus() {
   const r = await exec(SUNCTL + " status --json");
-  let s = null;
-  try { s = JSON.parse(r.stdout); } catch (e) {}
-  if (!s) {
-    $("st-daemon").innerHTML = '<span class="err">sunctl 不可用</span>';
-    $("st-daemon").innerHTML += '<br><small style="color:var(--dim)">' + (r.stderr || "请确认模块已安装并重启") + '</small>';
-    return;
+  try { ST = JSON.parse(r.stdout); } catch (e) { ST = null; }
+  return ST;
+}
+async function fetchPolicy() {
+  const r = await exec(SUNCTL + " policy status");
+  try { POL = JSON.parse(r.stdout); } catch (e) { POL = null; }
+  return POL;
+}
+async function fetchToml() {
+  const r = await exec("cat " + CONF);
+  RAW_TOML = r.stdout || "";
+  TOML = {};
+  const m1 = RAW_TOML.match(/^keep_fg_service\s*=\s*(true|false)/m);
+  const m2 = RAW_TOML.match(/^keep_media\s*=\s*(true|false)/m);
+  TOML.keep_fg_service = m1 ? m1[1] === "true" : true;
+  TOML.keep_media = m2 ? m2[1] === "true" : true;
+  return TOML;
+}
+const fmtUptime = s => {
+  s = s || 0;
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+  return h > 0 ? h + "h" + m + "m" : (m > 0 ? m + "m" + sec + "s" : sec + "s");
+};
+
+/* ================= Tab 切换 ================= */
+function showTab(page) {
+  curPage = page;
+  document.querySelectorAll(".page").forEach(el => el.classList.toggle("active", el.id === "page-" + page));
+  document.querySelectorAll(".tab").forEach(el => el.classList.toggle("active", el.dataset.page === page));
+  if (page === "dash") { refreshDash(); }
+  if (page === "policy") { refreshPolicyForm(); }
+  if (page === "logs") { refreshLogs(); startLogAuto(); }
+  if (page === "more") { refreshMore(); }
+  if (page !== "logs") stopLogAuto();
+}
+
+/* ================= 仪表盘 ================= */
+async function refreshDash() {
+  await Promise.all([fetchStatus(), fetchPolicy()]);
+  renderHero();
+  renderDashCards();
+  renderApps();
+}
+function renderHero() {
+  const run = ST && ST.daemon_running === 1;
+  const dot = $("hero-dot");
+  dot.className = "hero-dot " + (run ? "run" : "stop");
+  $("hero-title").textContent = run ? "守护进程运行中" : "守护进程未运行";
+  const parts = [];
+  if (ST) {
+    if (ST.version) parts.push("v" + ST.version);
+    if (ST.daemon_pid) parts.push("PID " + ST.daemon_pid);
+    if (ST.uptime_s != null) parts.push("已运行 " + fmtUptime(ST.uptime_s));
+    $("ver-badge").textContent = ST.version || "-";
   }
-  $("ver-badge").textContent = s.version || "L0";
-  $("st-version").textContent = s.version || "-";
-  $("st-daemon").innerHTML = s.daemon_running
-    ? '<span class="ok">✅ 运行中 (PID ' + s.daemon_pid + (s.daemon_ready ? ", ready" : ", 未就绪") + ')</span>'
+  $("hero-sub").textContent = parts.join(" · ") || "查询失败（sunctl 不可用）";
+  // 策略开关（读运行态 enabled）
+  const en = POL ? POL.enabled === 1 : null;
+  const sw = $("hero-switch");
+  sw.className = "switch" + (en ? " on" : "");
+  sw.onclick = () => { if (en != null) togglePolicyEnabled(!en); };
+}
+async function togglePolicyEnabled(now) {
+  const val = now ? "true" : "false";
+  toast(now ? "正在开启冻结引擎…" : "正在关闭冻结引擎…");
+  // 只替换 enabled 行，保留其余配置（轻量热切换）
+  const cmd = "sed -i 's/^enabled = .*/enabled = " + val + "/' " + CONF;
+  const r = await exec(cmd);
+  if (r.errno !== 0) { toast("写入失败: " + (r.stderr || "")); return; }
+  await exec(SUNCTL + " policy reload");
+  await sleep(400);
+  await refreshDash();
+  toast(now ? "✅ 冻结引擎已开启" : "✅ 冻结引擎已关闭（观望模式）");
+}
+function renderDashCards() {
+  const S = ST || {};
+  // 注入闭环
+  const daemonEl = $("d-daemon");
+  daemonEl.innerHTML = S.daemon_running === 1
+    ? '<span class="ok">✅ 运行中' + (S.daemon_ready ? "" : ' <span class="warn">未就绪</span>') + "</span>"
     : '<span class="err">❌ 未运行</span>';
-  const zp = { rezygisk: "ReZygisk ✅", zygisknext: "ZygiskNext ✅", "magisk-zygisk": "Magisk Zygisk", none: '<span class="warn">⚠️ 未检测到</span>' };
-  $("st-zygisk").innerHTML = zp[s.zygisk_provider] || s.zygisk_provider;
-  // L1 探针桩 / L2 dex：daemon status 真实字段驱动（原硬编码占位会误导）
-  $("st-stub").innerHTML = s.probe_stub_loaded
-    ? '<span class="ok">✅ 已注入 system_server (hash: ' + (s.probe_stub_build_hash || "?") + ')</span>'
-    : '<span class="warn">⏳ 待重启后激活</span>';
-  if (s.probe_dex_version) {
-    $("st-dex").innerHTML = (s.probe_dex_hash_match === 0)
-      ? '<span class="warn">⚠️ ' + s.probe_dex_version + '（与期望版本不符，可点下方热更新）</span>'
-      : '<span class="ok">✅ ' + s.probe_dex_version + '</span>';
+  const zp = { rezygisk: "ReZygisk ✅", zygisknext: "ZygiskNext ✅", "magisk-zygisk": "Magisk Zygisk", none: '<span class="warn">⚠️ 无</span>' };
+  $("d-zygisk").innerHTML = zp[S.zygisk_provider] || esc(S.zygisk_provider);
+  $("d-stub").innerHTML = S.probe_stub_loaded
+    ? '<span class="ok">✅ <span class="mono">' + esc(S.probe_stub_build_hash || "?") + "</span></span>"
+    : '<span class="warn">⏳ 待重启激活</span>';
+  if (S.probe_dex_version) {
+    $("d-dex").innerHTML = (S.probe_dex_hash_match === 0)
+      ? '<span class="warn">⚠️ <span class="mono">' + esc(S.probe_dex_version) + "</span></span>"
+      : '<span class="ok">✅ <span class="mono">' + esc(S.probe_dex_version) + "</span></span>";
   } else {
-    // 桩在线但 dex 未上报 = 冷启动加载失败（桩加载桥一次性，不重试）；
-    // 桩不在线 = 待重启后随桩注入加载。两种状态文案分开，避免误导（v0.3.1-l2 修正）
-    $("st-dex").innerHTML = s.probe_stub_loaded
-      ? '<span class="warn">⚠️ 桩已在线但 dex 未接管（软重启运行时重试；查 logcat SundownProbe/SundownDex）</span>'
-      : '<span style="color:var(--dim)">⏸ 待重启后随桩注入加载（冷启动/断线自愈）</span>';
+    $("d-dex").innerHTML = '<span style="color:var(--dim)">⏸ 未上报</span>';
   }
-  // L2b hook 桥 + 焦点/唤醒观测面（daemon status 新字段，契约只增不改）
-  if (s.probe_hook_bridge_hash) {
-    $("st-bridge").innerHTML = (s.probe_hook_bridge_hash_match === 0)
-      ? '<span class="warn">⚠️ ' + s.probe_hook_bridge_hash + '（与期望不符，刷入一致版本后软重启）</span>'
-      : '<span class="ok">✅ ' + s.probe_hook_bridge_hash + '</span>';
+  if (S.probe_hook_bridge_hash) {
+    $("d-bridge").innerHTML = (S.probe_hook_bridge_hash_match === 0)
+      ? '<span class="warn">⚠️ <span class="mono">' + esc(S.probe_hook_bridge_hash) + "</span></span>"
+      : '<span class="ok">✅ <span class="mono">' + esc(S.probe_hook_bridge_hash) + "</span></span>";
   } else {
-    $("st-bridge").innerHTML = '<span style="color:var(--dim)">⏸ 未上线（bridge.dex/伴生库未交付或引导中）</span>';
+    $("d-bridge").innerHTML = '<span style="color:var(--dim)">⏸ 未上线</span>';
   }
-  $("st-focus").textContent = (s.focus_pkg || "未知") + "（切换 " + (s.focus_changes || 0) + " 次）";
-  $("st-wakeup").textContent = (s.wakeup_events || 0) + " 条";
+  // 事件统计
+  $("d-focus").textContent = S.focus_pkg ? esc(S.focus_pkg) : "未知";
+  $("d-fchanges").textContent = (S.focus_changes || 0) + " 次";
+  $("d-wakeup").textContent = (S.wakeup_events || 0) + " 条";
+  const ops = POL || {};
+  $("d-ops").textContent = (ops.freeze_ops || 0) + " / " + (ops.unfreeze_ops || 0);
+  $("d-rev").innerHTML = "#" + (ops.revision ?? "-") + (ops.enabled === 1 ? ' <span class="ok">开</span>' : ' <span class="warn">关</span>');
+}
+function renderApps() {
+  const list = $("app-list");
+  const items = [];
+  const seen = new Set();
+  const P = POL || {};
+  const focusPkg = (ST && ST.focus_pkg) || null;
+  if (focusPkg) { items.push({ pkg: focusPkg, chip: "fg", label: "前台运行" }); seen.add(focusPkg); }
+  (P.force || []).forEach(p => { if (!seen.has(p)) { items.push({ pkg: p, chip: "force", label: "立即冻结" }); seen.add(p); } });
+  (P.grace_pending || []).forEach(p => { if (!seen.has(p)) { items.push({ pkg: p, chip: "grace", label: "退后台计时" }); seen.add(p); } });
+  (P.frozen_packages || []).forEach(p => { if (!seen.has(p)) { items.push({ pkg: p, chip: "froz", label: "已冻结" }); seen.add(p); } });
+  (P.whitelist || []).forEach(p => { if (!seen.has(p)) { items.push({ pkg: p, chip: "wl", label: "白名单" }); seen.add(p); } });
+  $("app-cnt").textContent = items.length ? items.length + " 个" : "";
+  if (!items.length) { list.innerHTML = '<div class="empty">暂无受管应用（策略未启用或无活动）</div>'; return; }
+  list.innerHTML = items.map(it =>
+    '<div class="app-item"><span class="pkg">' + esc(it.pkg) + '</span><span class="chip ' + it.chip + '">' + it.label + "</span></div>"
+  ).join("");
 }
 
-async function loadLogs() {
-  const r = await exec(SUNCTL + " logs 60");
-  $("log-box").textContent = (r.stdout || "").trim() || (r.stderr || "暂无日志");
+/* ================= 策略页 ================= */
+let wlDraft = [], forceDraft = [];
+async function refreshPolicyForm() {
+  await Promise.all([fetchPolicy(), fetchToml()]);
+  const P = POL || {};
+  $("p-grace").value = P.grace_seconds ?? 30;
+  $("p-cool").value = P.cooldown_seconds ?? 60;
+  setSwitch($("p-enabled"), P.enabled === 1);
+  setSwitch($("p-kfg"), TOML.keep_fg_service);
+  setSwitch($("p-km"), TOML.keep_media);
+  wlDraft = (P.whitelist || []).slice();
+  forceDraft = (P.force || []).slice();
+  renderWl();
+  renderForce();
+}
+function setSwitch(el, on) { el.className = "switch" + (on ? " on" : ""); el.dataset.on = on ? "1" : "0"; }
+function bindSwitch(el) { el.onclick = () => setSwitch(el, el.dataset.on !== "1"); }
+function renderWl() {
+  $("wl-cnt").textContent = wlDraft.length + " 个";
+  $("wl-list").innerHTML = wlDraft.length
+    ? wlDraft.map((p, i) =>
+        '<div class="pkg-row"><span class="pkg">' + esc(p) + '</span><button class="mini-btn danger" data-i="' + i + '" data-act="wl-del">移除</button></div>'
+      ).join("")
+    : '<div class="empty">白名单为空（系统应用将不受保护）</div>';
+}
+function renderForce() {
+  $("force-cnt").textContent = forceDraft.length + " 个";
+  $("force-list").innerHTML = forceDraft.length
+    ? forceDraft.map((p, i) =>
+        '<div class="pkg-row"><span class="pkg">' + esc(p) + '</span><button class="mini-btn danger" data-i="' + i + '" data-act="force-del">移除</button></div>'
+      ).join("")
+    : '<div class="empty">force 列表为空</div>';
+}
+function addPkg(list, inputId, render) {
+  const v = $(inputId).value.trim();
+  if (!v) { toast("请输入包名"); return; }
+  if (!/^[A-Za-z0-9._]+$/.test(v)) { toast("包名格式不正确（字母/数字/._）"); return; }
+  if (list.includes(v)) { toast("已存在"); return; }
+  list.push(v);
+  $(inputId).value = "";
+  render();
+}
+function tomlList(arr) { return "[" + arr.map(p => '"' + p + '"').join(", ") + "]"; }
+function buildToml() {
+  const grace = Math.max(5, Math.min(600, parseInt($("p-grace").value) || 30));
+  const cool = Math.max(10, Math.min(3600, parseInt($("p-cool").value) || 60));
+  const en = $("p-enabled").dataset.on === "1";
+  const kfg = $("p-kfg").dataset.on === "1";
+  const km = $("p-km").dataset.on === "1";
+  return "# Sundown L3 冻结策略（conf/policy.toml）— 由 WebUI v2.0 保存\n"
+    + "# inotify 热加载：保存即生效；语法错误时 daemon 保留旧表\n\n"
+    + "[general]\n"
+    + "enabled = " + en + "\n"
+    + "grace_seconds = " + grace + "\n"
+    + "cooldown_seconds = " + cool + "\n\n"
+    + "[freeze]\n"
+    + "force = " + tomlList(forceDraft) + "\n\n"
+    + "[whitelist]\n"
+    + "packages = " + tomlList(wlDraft) + "\n"
+    + "keep_fg_service = " + kfg + "\n"
+    + "keep_media = " + km + "\n\n"
+    + "[defense]\n"
+    + "anr_protect = false\n"
+    + "cached_app_optimizer = false\n";
+}
+async function savePolicy() {
+  const toml = buildToml();
+  // base64 传输避免 shell 转义问题（toybox base64 -d 可用）
+  const b64 = btoa(unescape(encodeURIComponent(toml)));
+  toast("正在写入策略…");
+  const r = await exec("echo '" + b64 + "' | base64 -d > " + CONF + " && chmod 644 " + CONF);
+  if (r.errno !== 0) { toast("写入失败: " + (r.stderr || "")); return; }
+  await exec(SUNCTL + " policy reload");
+  await sleep(400);
+  await Promise.all([fetchPolicy(), fetchToml()]);
+  toast("✅ 策略已保存并热加载（修订 #" + (POL && POL.revision != null ? POL.revision : "?") + "）");
+  refreshDash();
 }
 
-$("btn-refresh").onclick = () => { refreshStatus(); loadLogs(); };
+/* ================= 日志页 ================= */
+function clsOf(line) {
+  if (line.includes("焦点切换")) return "focus";
+  if (line.includes("唤醒事件")) return "wake";
+  if (line.includes("豁免判定")) return "exempt";
+  if (line.includes("退后台计时") || line.includes("冻结") || line.includes("解冻") || line.includes("冷却") || line.includes("跳过")) return "freeze";
+  if (line.includes("ERROR") || line.includes("FATAL")) return "err";
+  if (line.includes("WARN")) return "warn";
+  return "dim";
+}
+function fmtTime(line) {
+  const m = line.match(/^\[([^\]]+)\]/);
+  return m ? m[1].replace("Z", "") : "";
+}
+async function refreshLogs() {
+  const lines = $("log-lines").value;
+  const r = await exec(SUNCTL + " logs --engine " + lines);
+  const raw = (r.stdout || "").trim() || (r.stderr || "暂无日志");
+  const box = $("log-box");
+  const out = raw.split("\n").map(l => {
+    const c = clsOf(l);
+    if (logFilter !== "all" && c !== logFilter && !(logFilter === "err" && (c === "err" || c === "warn"))) return null;
+    const t = fmtTime(l);
+    const body = t ? l.replace(/^\[[^\]]+\]\s*/, "") : l;
+    return '<span class="ln ' + c + '">' + esc(t ? "[" + t + "] " + body : body) + "</span>";
+  }).filter(Boolean).join("");
+  box.innerHTML = out || '<span class="empty">（当前过滤条件下无匹配事件）</span>';
+  box.scrollTop = box.scrollHeight;
+}
+function startLogAuto() {
+  stopLogAuto();
+  if (!$("log-auto").checked) return;
+  logTimer = setInterval(() => { if (curPage === "logs") refreshLogs(); }, 3000);
+}
+function stopLogAuto() { if (logTimer) { clearInterval(logTimer); logTimer = null; } }
 
-$("btn-restart-daemon").onclick = async () => {
-  const r = await exec(SUNCTL + " restart-daemon");
-  toast(r.errno === 0 ? "守护进程已重启" : ("重启失败: " + (r.stderr || "")));
-  setTimeout(refreshStatus, 1200);
-};
+/* ================= 更多页 ================= */
+async function refreshMore() {
+  await fetchStatus();
+  const S = ST || {};
+  $("m-version").textContent = S.version || "-";
+  $("m-daemon").innerHTML = S.daemon_running === 1
+    ? '<span class="ok">✅ PID ' + (S.daemon_pid || "?") + " · " + fmtUptime(S.uptime_s) + "</span>"
+    : '<span class="err">❌ 未运行</span>';
+  $("m-stub-hash").textContent = S.probe_stub_build_hash || "未上报";
+  $("m-dex-hash").textContent = (S.probe_dex_version || "未上报") + (S.probe_dex_hash_match === 1 ? " ✅" : S.probe_dex_hash_match === 0 ? " ⚠️" : "");
+  $("m-bridge-hash").textContent = (S.probe_hook_bridge_hash || "未上线") + (S.probe_hook_bridge_hash_match === 1 ? " ✅" : S.probe_hook_bridge_hash_match === 0 ? " ⚠️" : "");
+}
+async function refreshEnv() {
+  $("env-out").textContent = "执行 sunctl env-check …";
+  const r = await exec(SUNCTL + " env-check");
+  $("env-out").textContent = (r.stdout || "").trim() || (r.stderr || "无输出");
+}
 
-$("btn-reload-probe").onclick = async () => {
-  toast("正在推送 probe.dex …");
-  const r = await exec(SUNCTL + " reload-probe");
-  const firstLine = (r.stdout || "").split("\n")[0];
-  if (r.errno === 0) {
-    toast(firstLine || "✅ 已推送");
-  } else {
-    toast("❌ " + ((r.stderr || "").trim() || "推送失败"));
-  }
-  setTimeout(refreshStatus, 2000);
-};
+/* ================= 事件绑定 ================= */
+function init() {
+  // Tab 导航
+  document.querySelectorAll(".tab").forEach(el => el.onclick = () => showTab(el.dataset.page));
+  // 策略页开关
+  bindSwitch($("p-enabled")); bindSwitch($("p-kfg")); bindSwitch($("p-km"));
+  // 白名单 / force
+  $("wl-add").onclick = () => addPkg(wlDraft, "wl-input", renderWl);
+  $("force-add").onclick = () => addPkg(forceDraft, "force-input", renderForce);
+  $("wl-list").onclick = e => { const b = e.target.closest("[data-act=wl-del]"); if (b) { wlDraft.splice(+b.dataset.i, 1); renderWl(); } };
+  $("force-list").onclick = e => { const b = e.target.closest("[data-act=force-del]"); if (b) { forceDraft.splice(+b.dataset.i, 1); renderForce(); } };
+  $("wl-input").onkeydown = e => { if (e.key === "Enter") $("wl-add").click(); };
+  $("force-input").onkeydown = e => { if (e.key === "Enter") $("force-add").click(); };
+  $("btn-save-policy").onclick = savePolicy;
+  $("btn-reload-policy").onclick = () => { refreshPolicyForm(); toast("已重新载入"); };
+  // 日志
+  $("log-chips").onclick = e => {
+    const b = e.target.closest(".chip-btn");
+    if (!b) return;
+    logFilter = b.dataset.f;
+    document.querySelectorAll(".chip-btn").forEach(x => x.classList.toggle("on", x === b));
+    refreshLogs();
+  };
+  $("log-lines").onchange = refreshLogs;
+  $("log-refresh").onclick = refreshLogs;
+  $("log-auto").onchange = () => { $("log-auto").checked ? startLogAuto() : stopLogAuto(); };
+  // 更多
+  $("btn-env").onclick = refreshEnv;
+  $("btn-refresh").onclick = () => { refreshDash(); toast("已刷新"); };
+  $("btn-reload-probe").onclick = async () => {
+    toast("正在推送 probe.dex …");
+    const r = await exec(SUNCTL + " reload-probe");
+    const firstLine = (r.stdout || "").split("\n")[0];
+    if (r.errno === 0) toast(firstLine || "✅ 已推送"); else toast("❌ " + ((r.stderr || "").trim() || "推送失败"));
+    setTimeout(() => { refreshDash(); refreshMore(); }, 2000);
+  };
+  $("btn-restart-daemon").onclick = async () => {
+    if (!confirm("重启 sundownd 守护进程？约 3 秒内恢复。")) return;
+    const r = await exec(SUNCTL + " restart-daemon");
+    toast(r.errno === 0 ? "✅ 守护进程已重启" : "重启失败: " + (r.stderr || ""));
+    setTimeout(() => { refreshDash(); refreshMore(); }, 1500);
+  };
+  $("btn-restart-runtime").onclick = async () => {
+    if (!confirm("⚠️ 软重启将结束所有应用进程（状态由系统保存，通常不丢数据）。\n屏幕会黑屏几秒后回到锁屏界面。\n\n确认继续？")) return;
+    if (!confirm("最后确认：现在重启 Android 运行时？")) return;
+    toast("正在软重启运行时…");
+    await exec(SUNCTL + " restart-runtime --yes");
+  };
+  // 初始加载
+  refreshDash();
+  refreshLogs();
+  startLogAuto();
+  if (isDev()) toast("dev-preview：未检测到 KernelSU 桥，仅展示占位数据");
+}
 
-$("btn-restart-runtime").onclick = async () => {
-  // 二次确认（边界要求）
-  if (!confirm("⚠️ 软重启将结束所有应用进程（状态由系统保存，通常不丢数据）。\n屏幕会黑屏几秒后回到锁屏界面。\n\n确认继续？")) return;
-  if (!confirm("最后确认：现在重启 Android 运行时？")) return;
-  const r = await exec(SUNCTL + " restart-runtime --yes");
-  if (r.errno !== 0) toast("执行失败: " + (r.stderr || ""));
-};
-
-refreshStatus();
-loadLogs();
+document.addEventListener("DOMContentLoaded", init);
 </script>
 </body>
 </html>

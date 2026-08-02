@@ -10,7 +10,7 @@ INSTALLED_META="$SUNDOWN_DIR/update/installed.json"
 READY_MARKER="$SUNDOWN_DIR/update/daemon.ready"
 SOCK_PATH="$SUNDOWN_DIR/sundownd.sock"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.4.1-l3"
+VERSION="0.4.2-l3"
 
 # ---------- 工具函数 ----------
 
@@ -267,8 +267,37 @@ cmd_env_check() {
 }
 
 cmd_logs() {
+    # logs [行数]           -> boot_watchdog.log 末尾（兼容旧调用）
+    # logs --engine [行数]  -> sundownd.log 末尾（引擎事件时间轴，WebUI 日志页使用）
+    src="$LOG_DIR/boot_watchdog.log"
     lines="${1:-50}"
-    [ -f "$LOG_DIR/boot_watchdog.log" ] && tail -n "$lines" "$LOG_DIR/boot_watchdog.log" || echo "暂无日志"
+    if [ "$1" = "--engine" ]; then
+        src="$LOG_DIR/sundownd.log"
+        lines="${2:-100}"
+    fi
+    [ -f "$src" ] && tail -n "$lines" "$src" || echo "暂无日志"
+}
+
+cmd_policy() {
+    # L3 策略管理（WebUI 配置页后端；经 daemon 管理面 socket，收敛单一入口）
+    #   policy status -> 策略状态 JSON（enabled/grace/cooldown/白名单/force/冻结表/计数）
+    #   policy reload -> 强制从磁盘重载（失败保留旧表）
+    sub="${1:-status}"
+    case "$sub" in
+        status|reload)
+            resp="$(sock_query "policy $sub")"
+            if [ -z "$resp" ]; then
+                echo "❌ daemon 未连接（socket 不可用），无法执行 policy $sub" >&2
+                return 1
+            fi
+            printf '%s\n' "$resp"
+            return 0
+            ;;
+        *)
+            echo "用法: sunctl policy status|reload" >&2
+            return 2
+            ;;
+    esac
 }
 
 cmd_version() {
@@ -285,8 +314,11 @@ usage() {
   restart-daemon         重启 sundownd 守护进程
   restart-runtime --yes  软重启 Android 运行时（zygote，不丢数据）
   reload-probe           [L2] 热更新探针 dex
+  policy status          [L3] 查询冻结策略状态（JSON）
+  policy reload          [L3] 强制从磁盘重载策略
   apply-update           [后续] 激活 staged 守护进程更新
   logs [行数]            查看启动看门狗日志
+  logs --engine [行数]   查看引擎事件日志（焦点/唤醒/冻结时间轴）
   version                版本信息
 EOF
     return 2
@@ -300,6 +332,7 @@ case "$1" in
     restart-daemon)  cmd_restart_daemon ;;
     restart-runtime) shift; cmd_restart_runtime "$@" ;;
     reload-probe)    cmd_reload_probe ;;
+    policy)          shift; cmd_policy "$@" ;;
     apply-update)    cmd_apply_update ;;
     logs)            shift; cmd_logs "$@" ;;
     version|--version|-v) cmd_version ;;
