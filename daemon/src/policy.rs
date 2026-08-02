@@ -4,6 +4,68 @@
 
 use crate::toml::{parse, TomlEntry, TomlValue};
 use crate::{logw, paths};
+use std::collections::HashMap;
+
+/// per-app 策略模式（[apps."pkg"] mode=...，参考 Cerberus 四策略分级）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppMode {
+    /// 豁免：退后台永不冻结（等价 whitelist，但允许携带 per-app 豁免开关）
+    Exempt,
+    /// 标准：按全局 grace_seconds（可被 grace_override 覆盖）
+    Standard,
+    /// 严格：失焦后短 grace 冻结（默认 8s，可被 grace_override 覆盖）
+    Strict,
+}
+
+impl AppMode {
+    fn parse(s: &str) -> Option<AppMode> {
+        match s {
+            "exempt" => Some(AppMode::Exempt),
+            "standard" => Some(AppMode::Standard),
+            "strict" => Some(AppMode::Strict),
+            _ => None,
+        }
+    }
+}
+
+/// per-app 策略条目（[apps."com.xxx"] 段）
+#[derive(Debug, Clone)]
+pub struct AppPolicy {
+    pub mode: AppMode,
+    /// grace 覆盖秒数（None = 跟随模式默认/全局）
+    pub grace_override: Option<u64>,
+    /// 前台服务豁免开关（None = 跟随全局 keep_fg_service）
+    pub keep_fg_service: Option<bool>,
+    /// 媒体播放豁免开关（None = 跟随全局 keep_media）
+    pub keep_media: Option<bool>,
+}
+
+impl Default for AppPolicy {
+    fn default() -> Self {
+        Self {
+            mode: AppMode::Standard,
+            grace_override: None,
+            keep_fg_service: None,
+            keep_media: None,
+        }
+    }
+}
+
+impl AppPolicy {
+    /// strict 模式缺省 grace（参考 Cerberus 严格档 5~8s）
+    pub const STRICT_DEFAULT_GRACE: u64 = 8;
+
+    /// 该 app 生效的 grace 秒数（strict 缺省 8；其余缺省回落全局）
+    pub fn effective_grace(&self, global: u64) -> u64 {
+        match self.grace_override {
+            Some(g) => g,
+            None => match self.mode {
+                AppMode::Strict => Self::STRICT_DEFAULT_GRACE,
+                _ => global,
+            },
+        }
+    }
+}
 
 /// 策略默认值（policy.toml 缺失/解析失败时的兜底：策略关闭，观测优先）
 #[derive(Debug, Clone)]
@@ -18,6 +80,8 @@ pub struct Policy {
     pub force: Vec<String>,
     /// 永不冻结白名单
     pub whitelist: Vec<String>,
+    /// per-app 策略表（[apps."pkg"]；缺失回落全局规则）
+    pub apps: HashMap<String, AppPolicy>,
     /// 豁免动作：前台服务持有者不冻（dex 侧判定字段 fg=1）
     pub keep_fg_service: bool,
     /// 豁免动作：媒体播放持有者不冻（dex 侧判定字段 media=1）
@@ -37,6 +101,7 @@ impl Default for Policy {
             cooldown_seconds: 60,
             force: Vec::new(),
             whitelist: Vec::new(),
+            apps: HashMap::new(),
             keep_fg_service: true,
             keep_media: true,
             defense_anr: false,
@@ -100,12 +165,47 @@ fn apply_entry(p: &mut Policy, e: &TomlEntry) {
         ("whitelist", "keep_media") => p.keep_media = bool_of(val, e, true),
         ("defense", "anr_protect") => p.defense_anr = bool_of(val, e, false),
         ("defense", "cached_app_optimizer") => p.defense_cached_optimizer = bool_of(val, e, false),
+        (s, _k) if s.starts_with("apps.") => apply_app_entry(p, &s[5..], e),
         (s, k) => {
             if !s.is_empty() {
                 logw!("策略未知键（忽略）: [{}] {} = {}", s, k, debug_val(val));
             } else {
                 logw!("策略未知顶层键（忽略）: {} = {}", k, debug_val(val));
             }
+        }
+    }
+}
+
+/// per-app 策略段解析：[apps."pkg"] mode/grace_seconds/keep_fg_service/keep_media
+/// 未知键 → 警告不致命（前向兼容）；空 pkg（[apps] 裸段）→ 忽略
+fn apply_app_entry(p: &mut Policy, pkg: &str, e: &TomlEntry) {
+    if pkg.is_empty() {
+        logw!("策略 [apps] 裸段（缺包名）忽略: {} = {}", e.key, debug_val(&e.value));
+        return;
+    }
+    let ap = p.apps.entry(pkg.to_string()).or_insert_with(AppPolicy::default);
+    let val = &e.value;
+    match e.key.as_str() {
+        "mode" => match str_of(val, e) {
+            Some(s) => match AppMode::parse(&s) {
+                Some(m) => ap.mode = m,
+                None => logw!("策略 [apps.{}] mode 未知（忽略，用 standard）: {}", pkg, s),
+            },
+            None => logw!("策略 [apps.{}] mode 类型错误（忽略）", pkg),
+        },
+        "grace_seconds" => ap.grace_override = Some(int_of(val, e, 8).max(0) as u64),
+        "keep_fg_service" => ap.keep_fg_service = Some(bool_of(val, e, true)),
+        "keep_media" => ap.keep_media = Some(bool_of(val, e, true)),
+        k => logw!("策略 [apps.{}] 未知键（忽略）: {} = {}", pkg, k, debug_val(val)),
+    }
+}
+
+fn str_of(v: &TomlValue, e: &TomlEntry) -> Option<String> {
+    match v {
+        TomlValue::Str(s) => Some(s.clone()),
+        _ => {
+            logw!("策略键类型错误（期望字符串）: {} = {}", e.key, debug_val(v));
+            None
         }
     }
 }
@@ -197,5 +297,59 @@ anr_protect = true
     fn unknown_key_ignored() {
         let p = Policy::from_toml("[general]\nenabled = true\nfuture_key = 1", 1).unwrap();
         assert!(p.enabled);
+    }
+
+    #[test]
+    fn parse_per_app_policy() {
+        let src = r#"
+[general]
+enabled = true
+grace_seconds = 30
+
+[apps."com.tencent.mm"]
+mode = "strict"
+grace_seconds = 8
+keep_media = false
+
+[apps."com.example.tool"]
+mode = "exempt"
+
+[apps."com.example.normal"]
+mode = "standard"
+grace_seconds = 120
+"#;
+        let p = Policy::from_toml(src, 7).unwrap();
+        assert!(p.enabled);
+        assert_eq!(p.apps.len(), 3);
+
+        // strict：短 grace + per-app 豁免开关覆盖
+        let mm = p.apps.get("com.tencent.mm").unwrap();
+        assert_eq!(mm.mode, AppMode::Strict);
+        assert_eq!(mm.effective_grace(30), 8);
+        assert_eq!(mm.keep_media, Some(false));
+        assert_eq!(mm.keep_fg_service, None);
+
+        // exempt：永不冻结
+        let tool = p.apps.get("com.example.tool").unwrap();
+        assert_eq!(tool.mode, AppMode::Exempt);
+        assert_eq!(tool.effective_grace(30), 30); // exempt 不因 strict 走 8s
+
+        // standard：grace 覆盖生效，未覆盖回落全局
+        let normal = p.apps.get("com.example.normal").unwrap();
+        assert_eq!(normal.mode, AppMode::Standard);
+        assert_eq!(normal.effective_grace(30), 120);
+        assert!(p.apps.get("com.example.missing").is_none());
+
+        // strict 缺省 grace（无 override）
+        let src2 = "[apps.\"com.x.y\"]\nmode = \"strict\"";
+        let p2 = Policy::from_toml(src2, 8).unwrap();
+        assert_eq!(p2.apps["com.x.y"].effective_grace(30), AppPolicy::STRICT_DEFAULT_GRACE);
+    }
+
+    #[test]
+    fn parse_per_app_bad_mode() {
+        // 未知 mode → 回落 standard（不致命）
+        let p = Policy::from_toml("[apps.\"com.x.y\"]\nmode = \"turbo\"", 1).unwrap();
+        assert_eq!(p.apps["com.x.y"].mode, AppMode::Standard);
     }
 }

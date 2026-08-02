@@ -46,11 +46,10 @@ pub fn parse(src: &str) -> Result<Vec<TomlEntry>, (usize, String)> {
                 return Err((lineno, format!("表头未闭合: {}", line)));
             }
             let inner = &line[1..line.len() - 1];
-            table = inner
-                .split('.')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+            // 表头段拆分：引号段优先（包名含点，如 [apps."com.tencent.mm"]），
+            // 引号段整体作为一段（引号内不做转义——包名无转义需求），
+            // 其余按 '.' 切分裸段。
+            table = split_table_header(inner);
             i += 1;
             continue;
         }
@@ -94,6 +93,55 @@ pub fn parse(src: &str) -> Result<Vec<TomlEntry>, (usize, String)> {
         i += 1;
     }
     Ok(out)
+}
+
+/// 表头段拆分：[apps."com.tencent.mm"] → ["apps", "com.tencent.mm"]
+/// 引号段整体为一段（含点）；裸段按 '.' 切分；未闭合引号按裸段宽容处理
+fn split_table_header(inner: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = inner;
+    loop {
+        match rest.find('"') {
+            Some(q) => {
+                // 引号前的裸段
+                for seg in rest[..q]
+                    .split('.')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    out.push(seg.to_string());
+                }
+                match rest[q + 1..].find('"') {
+                    Some(e) => {
+                        out.push(rest[q + 1..q + 1 + e].to_string());
+                        rest = &rest[q + 1 + e + 1..];
+                    }
+                    None => {
+                        // 未闭合引号：余下全部按裸段处理（宽容）
+                        for seg in rest[q..]
+                            .split('.')
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                        {
+                            out.push(seg.to_string());
+                        }
+                        break;
+                    }
+                }
+            }
+            None => {
+                for seg in rest
+                    .split('.')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    out.push(seg.to_string());
+                }
+                break;
+            }
+        }
+    }
+    out
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -251,5 +299,25 @@ keep_fg_service = true
         assert!(parse("k = ").is_err());
         assert!(parse("[a\n").is_err());
         assert!(parse("k = 3.14").is_err());
+    }
+
+    #[test]
+    fn parse_quoted_section() {
+        // per-app 策略表头：[apps."com.tencent.mm"]（包名含点，引号段）
+        let src = r#"
+[apps."com.tencent.mm"]
+mode = "strict"
+grace_seconds = 8
+"#;
+        let entries = parse(src).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].table, vec!["apps", "com.tencent.mm"]);
+        assert_eq!(entries[0].key, "mode");
+        assert_eq!(entries[0].value, TomlValue::Str("strict".to_string()));
+        assert_eq!(entries[1].table, vec!["apps", "com.tencent.mm"]);
+        assert_eq!(entries[1].value, TomlValue::Int(8));
+        // 普通表头不受影响
+        let e2 = parse("[general]\nenabled = true").unwrap();
+        assert_eq!(e2[0].table, vec!["general"]);
     }
 }

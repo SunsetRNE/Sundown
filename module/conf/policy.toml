@@ -8,6 +8,12 @@
 # [general]   enabled 总开关 / grace_seconds 退后台宽限秒数 / cooldown_seconds 解冻后冷却秒数
 # [freeze]    force 立即冻结包（不走 grace）
 # [whitelist] packages 豁免包（退后台不冻结）/ keep_fg_service 前台服务豁免 / keep_media 媒体播放豁免
+# [apps."pkg"] per-app 策略（v0.4.8-l3 新增，参考 Cerberus 四策略分级）：
+#   mode = "exempt"   豁免：退后台永不冻结（等价 whitelist，可携带独立豁免开关）
+#   mode = "standard" 标准：按全局 grace_seconds（可被 grace_seconds 覆盖）
+#   mode = "strict"   严格：失焦后短 grace 冻结（缺省 8s，可被 grace_seconds 覆盖）
+#   grace_seconds = N    覆盖该包 grace（strict 缺省 8s；standard 缺省跟随全局）
+#   keep_fg_service / keep_media = true|false  per-app 豁免开关（缺省跟随全局）
 # [defense]   防御 hook 组（本期仅解析，不启用——L3.1）
 
 [general]
@@ -34,6 +40,23 @@ packages = [
 ]
 keep_fg_service = true
 keep_media = true
+
+# ---- per-app 策略示例（默认全部注释：不配置 = 跟随全局 standard 规则）----
+# 通讯类高频 app：严格模式 + 保留媒体豁免（语音通话/播放中不冻）
+# [apps."com.tencent.mm"]
+# mode = "strict"
+# grace_seconds = 8
+# keep_media = true
+#
+# 游戏类：strict + 关闭媒体豁免（挂机场景也要冻，省电优先）
+# [apps."com.tencent.tmgp.sgame"]
+# mode = "strict"
+# grace_seconds = 5
+# keep_media = false
+#
+# 工具类：完全豁免（后台常驻任务，如下载/同步）
+# [apps."com.example.downloader"]
+# mode = "exempt"
 
 [defense]
 anr_protect = false

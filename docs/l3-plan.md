@@ -82,6 +82,25 @@ force-stop pkg=P → 清冻结记录 + 取消计时
   **副作用观察项**：冻结 app 的 binder 调用会阻塞调用方（最多 500ms binder 超时）——
   观测 wakeup 解冻的响应延迟，必要时缩短 grace/提前解冻
 
+### 0.6 per-app 策略分级（v0.4.8-l3 追加，参考 Cerberus 四策略分级）
+
+- **动机**：全局 grace 一刀切无法表达"微信严格冻 / 下载器豁免 / 游戏挂机也要冻"；
+  参考项目（AStop/Cerberus v1.6.0）按 app 分配 豁免/标准/严格/关键系统 四档
+- **配置**：`[apps."<pkg>"]` 段（TOML 引号表头，包名含点；toml.rs split_table_header
+  引号段优先拆分，2026-08-02 实现 + 测试覆盖）
+
+| 键 | 取值 | 语义 |
+|---|---|---|
+| `mode` | `exempt` \| `standard` \| `strict` | 豁免（永不冻结）/ 标准（全局 grace）/ 严格（短 grace） |
+| `grace_seconds` | 整数 | 覆盖该包 grace（strict 缺省 8s；standard 缺省跟随全局） |
+| `keep_fg_service` / `keep_media` | bool | per-app 豁免开关（缺省跟随全局） |
+
+- **优先级（decide_leave）**：白名单 → per-app exempt → 豁免动作（per-app 开关生效值）→
+  冷却 → force → grace 计时（per-app 时长）
+- **失败安全**：per-app 缺失/未知 mode → 回落 global/standard（测试 parse_per_app_bad_mode）；
+  坏配置保留旧表铁律不变
+- **状态面**：status JSON 新增 `policy_apps`（per-app 条目数，契约只增不改）
+
 ## 1. daemon 改动（Rust，RELEASE_NO 6→7）
 
 ```

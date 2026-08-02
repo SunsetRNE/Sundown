@@ -175,8 +175,6 @@ fn write_freeze(path: &str, val: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn uid_parse() {
         // Uid: 1000 1000 1000 1000

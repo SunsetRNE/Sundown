@@ -83,7 +83,7 @@ Sundown/
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
-## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅（v0.3.3-l2：Android 16 适配链 + bridge 加载修复，待真机回归 V1~V8）
+## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅ 进行中（v0.4.8-l3：per-app 策略分级 exempt/standard/strict，待真机验证）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
@@ -124,6 +124,7 @@ Sundown/
   计划与裁决见 docs/l2b-plan.md，hook 点经 AStop v1.6.0 dex 静态扫描实证萃取
 - [ ] L2b 真机回归：V1~V8 验证清单（docs/l2b-plan.md §5，execmod/hidden API 首要）
 - [ ] L3：策略引擎与情景预设
+- [x] L3 per-app 策略分级（v0.4.8-l3：`[apps."pkg"]` mode=exempt|standard|strict + grace/豁免开关覆盖，daemon 侧 + 单元测试；设计见 docs/l3-plan.md §0.6）
 
 ## 依赖
 

@@ -111,12 +111,13 @@ impl DaemonState {
         let mut e = EngineState::default();
         if let Some((p, _)) = crate::policy::Policy::load() {
             logi!(
-                "L3 策略已加载: enabled={} grace={}s cooldown={}s whitelist={} force={}（revision={}）",
+                "L3 策略已加载: enabled={} grace={}s cooldown={}s whitelist={} force={} apps={}（revision={}）",
                 p.enabled,
                 p.grace_seconds,
                 p.cooldown_seconds,
                 p.whitelist.len(),
                 p.force.len(),
+                p.apps.len(),
                 p.revision
             );
             e.policy = p;
@@ -281,13 +282,15 @@ impl DaemonState {
         let eng = self.engine.lock().unwrap();
         let frozen_json = json_str_array(&eng.frozen_packages());
         let grace_json = json_str_array(&eng.grace_pending());
-        let (policy_enabled, policy_revision, freeze_ops, unfreeze_ops, wakeup_thaws) = (
-            eng.policy.enabled,
-            eng.policy.revision,
-            eng.freeze_ops,
-            eng.unfreeze_ops,
-            eng.wakeup_thaws,
-        );
+        let (policy_enabled, policy_revision, policy_apps, freeze_ops, unfreeze_ops, wakeup_thaws) =
+            (
+                eng.policy.enabled,
+                eng.policy.revision,
+                eng.policy.apps.len(),
+                eng.freeze_ops,
+                eng.unfreeze_ops,
+                eng.wakeup_thaws,
+            );
         drop(eng);
         format!(
             concat!(
@@ -310,6 +313,7 @@ impl DaemonState {
                 "\"wakeup_events\":{wakeup_events},",
                 "\"policy_enabled\":{policy_enabled},",
                 "\"policy_revision\":{policy_revision},",
+                "\"policy_apps\":{policy_apps},",
                 "\"frozen_packages\":{frozen},",
                 "\"grace_pending\":{grace},",
                 "\"freeze_ops\":{freeze_ops},",
@@ -334,6 +338,7 @@ impl DaemonState {
             wakeup_events = self.wakeup_events.load(Ordering::Relaxed),
             policy_enabled = policy_enabled,
             policy_revision = policy_revision,
+            policy_apps = policy_apps,
             frozen = frozen_json,
             grace = grace_json,
             freeze_ops = freeze_ops,

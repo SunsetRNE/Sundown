@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::freezer;
-use crate::policy::Policy;
+use crate::policy::{AppMode, Policy};
 use crate::{logi, logw};
 
 /// 每个包最近一次 focus 事件的豁免判定字段
@@ -28,8 +28,8 @@ pub struct EngineState {
     pub policy: Policy,
     /// pkg → 冻结时刻（当前冻结表）
     pub frozen: HashMap<String, Instant>,
-    /// pkg → grace 开始时刻（等待冻结）
-    pub grace: HashMap<String, Instant>,
+    /// pkg → (grace 开始时刻, 该包 grace 秒数)——per-app 各自时长（strict 8s / 覆盖值）
+    pub grace: HashMap<String, (Instant, u64)>,
     /// pkg → 冷却截止时刻（解冻后免冻窗口）
     pub cooldown: HashMap<String, Instant>,
     /// pkg → 最近一次豁免判定（focus 事件携带）
@@ -163,12 +163,13 @@ impl EngineState {
     pub fn reload_policy(&mut self) {
         if let Some((p, _)) = Policy::load() {
             logi!(
-                "L3 策略已重载: enabled={} grace={}s cooldown={}s whitelist={} force={}（revision={}）",
+                "L3 策略已重载: enabled={} grace={}s cooldown={}s whitelist={} force={} apps={}（revision={}）",
                 p.enabled,
                 p.grace_seconds,
                 p.cooldown_seconds,
                 p.whitelist.len(),
                 p.force.len(),
+                p.apps.len(),
                 p.revision
             );
             self.policy = p;
@@ -200,10 +201,10 @@ impl EngineState {
         }
 
         // grace 到期 → 冻结（收集后执行，避免借用冲突）
+        // 每个包携带自己的 grace 时长（per-app strict/覆盖值；缺省全局）
         let mut to_freeze: Vec<String> = Vec::new();
-        let grace_dur = Duration::from_secs(self.policy.grace_seconds);
-        for (pkg, start) in self.grace.iter() {
-            if now.duration_since(*start) >= grace_dur {
+        for (pkg, (start, dur)) in self.grace.iter() {
+            if now.duration_since(*start) >= Duration::from_secs(*dur) {
                 to_freeze.push(pkg.clone());
             }
         }
@@ -226,10 +227,9 @@ impl EngineState {
             // tick 到期时 last_focus 可能失真；ExemptMonitor 独立线程 2s 节拍以
             // getServices/播放配置真实判定 fg/media——tick 这里兜底消费，防止
             // 有前台服务/媒体播放的 app 被 focus 噪声误冻。
+            let (keep_fg, keep_media) = self.keep_flags(&pkg);
             if let Some(fl) = self.exempt.get(&pkg) {
-                if (self.policy.keep_fg_service && fl.fg_service)
-                    || (self.policy.keep_media && fl.media)
-                {
+                if (keep_fg && fl.fg_service) || (keep_media && fl.media) {
                     logi!(
                         "L3 tick豁免跳过（fg={} media={}）: {}",
                         fl.fg_service, fl.media, pkg
@@ -264,7 +264,18 @@ impl EngineState {
 
     // ---------------- 决策 ----------------
 
-    /// 旧前台离开：豁免判定 → force 立即冻结 / 默认 grace 计时
+    /// 该包生效的豁免开关（per-app 覆盖优先，缺省回落全局）
+    fn keep_flags(&self, pkg: &str) -> (bool, bool) {
+        match self.policy.apps.get(pkg) {
+            Some(ap) => (
+                ap.keep_fg_service.unwrap_or(self.policy.keep_fg_service),
+                ap.keep_media.unwrap_or(self.policy.keep_media),
+            ),
+            None => (self.policy.keep_fg_service, self.policy.keep_media),
+        }
+    }
+
+    /// 旧前台离开：per-app 策略 → 豁免判定 → force 立即冻结 / grace 计时
     fn decide_leave(&mut self, pkg: &str, now: Instant) {
         if !self.policy.enabled {
             return; // 观测模式
@@ -272,11 +283,18 @@ impl EngineState {
         if self.policy.is_whitelisted(pkg) {
             return; // 白名单永不冻结
         }
-        // 豁免动作：最近 focus 判定 fg/media
+        // per-app 策略（[apps."pkg"] mode=exempt|standard|strict）
+        let app_policy = self.policy.apps.get(pkg);
+        if let Some(ap) = app_policy {
+            if ap.mode == AppMode::Exempt {
+                logi!("L3 per-app 豁免（mode=exempt）: {}", pkg);
+                return;
+            }
+        }
+        // 豁免动作：最近 focus 判定 fg/media（per-app 开关可覆盖全局）
+        let (keep_fg, keep_media) = self.keep_flags(pkg);
         if let Some(fl) = self.exempt.get(pkg) {
-            if (self.policy.keep_fg_service && fl.fg_service)
-                || (self.policy.keep_media && fl.media)
-            {
+            if (keep_fg && fl.fg_service) || (keep_media && fl.media) {
                 logi!("L3 豁免（fg={} media={}）: {}", fl.fg_service, fl.media, pkg);
                 return;
             }
@@ -288,13 +306,18 @@ impl EngineState {
             self.freeze_now(pkg, now);
             return;
         }
+        // grace 时长：per-app（strict 缺省 8s / grace_override）→ 全局
+        let grace_dur = match app_policy {
+            Some(ap) => ap.effective_grace(self.policy.grace_seconds),
+            None => self.policy.grace_seconds,
+        };
         // 离开即计时（已在 grace 中也重置到离开时刻——防止"切回再离开"沿用旧
         // 时刻导致刚离开就被到期冻结）
-        self.grace.insert(pkg.to_string(), now);
+        self.grace.insert(pkg.to_string(), (now, grace_dur));
         logi!(
             "L3 退后台计时开始: {}（{}s 后冻结）",
             pkg,
-            self.policy.grace_seconds
+            grace_dur
         );
     }
 
