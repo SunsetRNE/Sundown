@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use crate::events::{EvAction, EvLevel, EventBuffer};
 use crate::freezer;
-use crate::policy::{AppMode, Policy};
+use crate::network::{NetSampler, DEFAULT_THRESHOLD, DEFAULT_WINDOW};
+use crate::policy::{AppMode, Policy, PushMode};
 use crate::preset::{Preset, PresetTable};
 use crate::{logi, logw};
 
@@ -48,6 +49,8 @@ pub struct EngineState {
     pub presets: PresetTable,
     /// 当前生效预设名（None = 磁盘 policy.toml 参数）
     pub active_preset: Option<String>,
+    /// 高网络负载采样器（keep_high_network 豁免判定；uid → 流量基线）
+    pub net: NetSampler,
     pub freeze_ops: u64,
     pub unfreeze_ops: u64,
     pub wakeup_thaws: u64,
@@ -67,6 +70,7 @@ impl Default for EngineState {
             events: EventBuffer::default(),
             presets: PresetTable::default(),
             active_preset: None,
+            net: NetSampler::new(),
             freeze_ops: 0,
             unfreeze_ops: 0,
             wakeup_thaws: 0,
@@ -124,7 +128,20 @@ impl EngineState {
     }
 
     /// event wakeup pkg=P reason=...
+    /// v0.4.19-l3：per-app keep_wakeup=false 时忽略唤醒（不解冻不取消 grace——
+    /// FCM/交互唤醒风暴 app 保持冻结；事件留痕 reason=wakeup_ignored）。
     pub fn on_wakeup(&mut self, pkg: &str) {
+        if !self.keep_wakeup(pkg) {
+            logi!("L3 唤醒忽略（keep_wakeup=false）: {}", pkg);
+            self.events.push_app(
+                EvLevel::Info,
+                EvAction::Exempt,
+                pkg,
+                Some("wakeup_ignored"),
+                None,
+            );
+            return;
+        }
         let now = Instant::now();
         if self.frozen.remove(pkg).is_some() {
             if freezer::unfreeze_pkg(pkg) {
@@ -415,6 +432,19 @@ impl EngineState {
                     continue;
                 }
             }
+            // 高网络负载二次校验（v0.4.19-l3）：grace 到期时仍在高速传输 → 跳过冻结
+            if self.keep_hn(&pkg) && self.net_active(&pkg) {
+                logi!("L3 tick高网络豁免跳过: {}", pkg);
+                self.events.push_app(
+                    EvLevel::Info,
+                    EvAction::Exempt,
+                    &pkg,
+                    Some("tick_high_network"),
+                    None,
+                );
+                self.grace.remove(&pkg);
+                continue;
+            }
             self.freeze_now(&pkg, now, "grace_expired");
             self.grace.remove(&pkg);
         }
@@ -459,6 +489,64 @@ impl EngineState {
         }
     }
 
+    /// 高网络豁免开关（per-app 覆盖优先，缺省回落全局）
+    fn keep_hn(&self, pkg: &str) -> bool {
+        match self.policy.apps.get(pkg) {
+            Some(ap) => ap.keep_high_network.unwrap_or(self.policy.keep_high_network),
+            None => self.policy.keep_high_network,
+        }
+    }
+
+    /// 交互/FCM 唤醒豁免开关（per-app；缺省 true = 照常解冻，保持既有行为）
+    fn keep_wakeup(&self, pkg: &str) -> bool {
+        match self.policy.apps.get(pkg) {
+            Some(ap) => ap.keep_wakeup.unwrap_or(true),
+            None => true,
+        }
+    }
+
+    /// 子进程策略（per-app 覆盖优先，缺省回落全局 push_policy）
+    fn push_mode(&self, pkg: &str) -> PushMode {
+        match self.policy.apps.get(pkg) {
+            Some(ap) => ap.push_mode.unwrap_or(self.policy.push_policy),
+            None => self.policy.push_policy,
+        }
+    }
+
+    /// 定时解冻窗口判定（per-app unfreeze_window；本地时间分钟数 0..=1439）
+    fn in_unfreeze_window(&self, pkg: &str) -> bool {
+        let Some(window) = self.policy.apps.get(pkg).and_then(|ap| ap.unfreeze_window) else {
+            return false;
+        };
+        let Some(min) = Self::now_minutes() else {
+            return false; // 本地时间获取失败 → 不豁免（宁多冻）
+        };
+        crate::policy::in_window(min, Some(window))
+    }
+
+    /// 高网络负载采样判定：uid 窗口内流量增量 ≥ 阈值（数据源不可用 → false）
+    fn net_active(&mut self, pkg: &str) -> bool {
+        let Some(uid) = crate::freezer::pkg_uid(pkg) else {
+            return false;
+        };
+        self.net.is_active(uid, DEFAULT_WINDOW, DEFAULT_THRESHOLD)
+    }
+
+    /// 当前本地时间（分钟数 0..=1439）；失败 None。libc localtime_r（零依赖）。
+    fn now_minutes() -> Option<u32> {
+        unsafe {
+            let t = libc::time(std::ptr::null_mut());
+            if t < 0 {
+                return None;
+            }
+            let mut tm: libc::tm = std::mem::zeroed();
+            if libc::localtime_r(&t, &mut tm).is_null() {
+                return None;
+            }
+            Some(tm.tm_hour as u32 * 60 + tm.tm_min as u32)
+        }
+    }
+
     /// 旧前台离开：per-app 策略 → 豁免判定 → force 立即冻结 / grace 计时
     fn decide_leave(&mut self, pkg: &str, now: Instant) {
         if !self.policy.enabled {
@@ -467,20 +555,28 @@ impl EngineState {
         if self.policy.is_whitelisted(pkg) {
             return; // 白名单永不冻结
         }
+        // 提前提取 per-app 数据（不持引用——后续 net_active 需要 &mut self）
+        let exempt_mode = self
+            .policy
+            .apps
+            .get(pkg)
+            .map(|ap| ap.mode == AppMode::Exempt)
+            .unwrap_or(false);
+        let grace_dur = match self.policy.apps.get(pkg) {
+            Some(ap) => ap.effective_grace(self.policy.grace_seconds),
+            None => self.policy.grace_seconds,
+        };
         // per-app 策略（[apps."pkg"] mode=exempt|standard|strict）
-        let app_policy = self.policy.apps.get(pkg);
-        if let Some(ap) = app_policy {
-            if ap.mode == AppMode::Exempt {
-                logi!("L3 per-app 豁免（mode=exempt）: {}", pkg);
-                self.events.push_app(
-                    EvLevel::Info,
-                    EvAction::Exempt,
-                    pkg,
-                    Some("per_app_exempt"),
-                    None,
-                );
-                return;
-            }
+        if exempt_mode {
+            logi!("L3 per-app 豁免（mode=exempt）: {}", pkg);
+            self.events.push_app(
+                EvLevel::Info,
+                EvAction::Exempt,
+                pkg,
+                Some("per_app_exempt"),
+                None,
+            );
+            return;
         }
         // 豁免动作：最近 focus 判定 fg/media（per-app 开关可覆盖全局）
         let (keep_fg, keep_media) = self.keep_flags(pkg);
@@ -497,6 +593,31 @@ impl EngineState {
                 return;
             }
         }
+        // 定时解冻窗口（v0.4.19-l3）：窗口内退后台不冻结（decide_leave 豁免）
+        // —— 窗口判定在豁免动作之后：显式动作豁免优先于时间窗口（语义收敛）
+        if self.in_unfreeze_window(pkg) {
+            logi!("L3 定时窗口豁免: {}", pkg);
+            self.events.push_app(
+                EvLevel::Info,
+                EvAction::Exempt,
+                pkg,
+                Some("schedule_window"),
+                None,
+            );
+            return;
+        }
+        // 高网络负载豁免（v0.4.19-l3）：daemon 侧流量采样判定（/proc/uid_stat）
+        if self.keep_hn(pkg) && self.net_active(pkg) {
+            logi!("L3 高网络豁免: {}", pkg);
+            self.events.push_app(
+                EvLevel::Info,
+                EvAction::Exempt,
+                pkg,
+                Some("high_network"),
+                None,
+            );
+            return;
+        }
         if self.cooldown.contains_key(pkg) {
             return; // 冷却窗口内免冻
         }
@@ -504,11 +625,6 @@ impl EngineState {
             self.freeze_now(pkg, now, "force");
             return;
         }
-        // grace 时长：per-app（strict 缺省 8s / grace_override）→ 全局
-        let grace_dur = match app_policy {
-            Some(ap) => ap.effective_grace(self.policy.grace_seconds),
-            None => self.policy.grace_seconds,
-        };
         // 离开即计时（已在 grace 中也重置到离开时刻——防止"切回再离开"沿用旧
         // 时刻导致刚离开就被到期冻结）
         self.grace.insert(pkg.to_string(), (now, grace_dur));
@@ -528,6 +644,7 @@ impl EngineState {
 
     /// 执行冻结（uid 级，经 packages.list 查 uid）
     /// reason: "grace_expired"（tick 到期）| "force"（force 列表立即冻结）——事件语义区分
+    /// v0.4.19-l3：push_mode 分派——Keep=选择性冻结（:push 保留）/ Kill=连带杀死 :push
     fn freeze_now(&mut self, pkg: &str, now: Instant, reason: &str) {
         // 冻结前核验：uid 无存活进程 → 跳过（避免无效冻结写与记录混乱）
         match freezer::pkg_uid(pkg) {
@@ -544,7 +661,11 @@ impl EngineState {
             }
             _ => {}
         }
-        if freezer::freeze_pkg(pkg) {
+        let ok = match self.push_mode(pkg) {
+            PushMode::Keep => freezer::freeze_pkg_keep_push(pkg),
+            PushMode::Kill => freezer::freeze_pkg_kill_push(pkg),
+        };
+        if ok {
             self.frozen.insert(pkg.to_string(), now);
             self.freeze_ops += 1;
             logi!("L3 冻结: {}（冻结累计 {}）", pkg, self.freeze_ops);

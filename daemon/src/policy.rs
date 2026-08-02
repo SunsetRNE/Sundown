@@ -28,6 +28,32 @@ impl AppMode {
     }
 }
 
+/// 子进程策略（v0.4.19-l3，参考 Cerberus：微信 :push / QQ MSF 必须处理）：
+/// Keep = 冻结时保留 :push 类子进程（推送通道保持连接，防断网）
+/// Kill = 冻结时连带杀死 :push 类子进程（通讯类 app 彻底休眠）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushMode {
+    Keep,
+    Kill,
+}
+
+impl PushMode {
+    pub fn parse(s: &str) -> Option<PushMode> {
+        match s {
+            "keep" => Some(PushMode::Keep),
+            "kill" => Some(PushMode::Kill),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PushMode::Keep => "keep",
+            PushMode::Kill => "kill",
+        }
+    }
+}
+
 /// per-app 策略条目（[apps."com.xxx"] 段）
 #[derive(Debug, Clone)]
 pub struct AppPolicy {
@@ -38,6 +64,14 @@ pub struct AppPolicy {
     pub keep_fg_service: Option<bool>,
     /// 媒体播放豁免开关（None = 跟随全局 keep_media）
     pub keep_media: Option<bool>,
+    /// 高网络负载豁免开关（None = 跟随全局 keep_high_network）
+    pub keep_high_network: Option<bool>,
+    /// 交互/FCM 唤醒豁免开关（None = 缺省 true：wakeup 事件照常解冻）
+    pub keep_wakeup: Option<bool>,
+    /// 子进程策略（None = 跟随全局 push_policy）
+    pub push_mode: Option<PushMode>,
+    /// 定时解冻窗口（每天 HH:MM-HH:MM，分钟数 0..=1439；None = 无窗口）
+    pub unfreeze_window: Option<(u32, u32)>,
 }
 
 impl Default for AppPolicy {
@@ -47,6 +81,10 @@ impl Default for AppPolicy {
             grace_override: None,
             keep_fg_service: None,
             keep_media: None,
+            keep_high_network: None,
+            keep_wakeup: None,
+            push_mode: None,
+            unfreeze_window: None,
         }
     }
 }
@@ -86,6 +124,10 @@ pub struct Policy {
     pub keep_fg_service: bool,
     /// 豁免动作：媒体播放持有者不冻（dex 侧判定字段 media=1）
     pub keep_media: bool,
+    /// 豁免动作：高网络负载不冻（daemon 侧流量采样判定，/proc/uid_stat）
+    pub keep_high_network: bool,
+    /// 子进程策略（冻结时 :push 类子进程 保留/杀死，缺省 keep）
+    pub push_policy: PushMode,
     /// 防御 hook 组（L3 仅解析+展示，不启用）
     pub defense_anr: bool,
     pub defense_cached_optimizer: bool,
@@ -104,6 +146,8 @@ impl Default for Policy {
             apps: HashMap::new(),
             keep_fg_service: true,
             keep_media: true,
+            keep_high_network: true,
+            push_policy: PushMode::Keep,
             defense_anr: false,
             defense_cached_optimizer: false,
             revision: 0,
@@ -163,6 +207,14 @@ fn apply_entry(p: &mut Policy, e: &TomlEntry) {
         ("whitelist", "packages") => p.whitelist = str_array_of(val, e),
         ("whitelist", "keep_fg_service") => p.keep_fg_service = bool_of(val, e, true),
         ("whitelist", "keep_media") => p.keep_media = bool_of(val, e, true),
+        ("whitelist", "keep_high_network") => p.keep_high_network = bool_of(val, e, true),
+        ("whitelist", "push_policy") => match str_of(val, e) {
+            Some(s) => match PushMode::parse(&s) {
+                Some(m) => p.push_policy = m,
+                None => logw!("策略 push_policy 未知（忽略，用 keep）: {}", s),
+            },
+            None => logw!("策略 push_policy 类型错误（忽略，用 keep）"),
+        },
         ("defense", "anr_protect") => p.defense_anr = bool_of(val, e, false),
         ("defense", "cached_app_optimizer") => p.defense_cached_optimizer = bool_of(val, e, false),
         (s, _k) if s.starts_with("apps.") => apply_app_entry(p, &s[5..], e),
@@ -196,6 +248,22 @@ fn apply_app_entry(p: &mut Policy, pkg: &str, e: &TomlEntry) {
         "grace_seconds" => ap.grace_override = Some(int_of(val, e, 8).max(0) as u64),
         "keep_fg_service" => ap.keep_fg_service = Some(bool_of(val, e, true)),
         "keep_media" => ap.keep_media = Some(bool_of(val, e, true)),
+        "keep_high_network" => ap.keep_high_network = Some(bool_of(val, e, true)),
+        "keep_wakeup" => ap.keep_wakeup = Some(bool_of(val, e, true)),
+        "push_mode" => match str_of(val, e) {
+            Some(s) => match PushMode::parse(&s) {
+                Some(m) => ap.push_mode = Some(m),
+                None => logw!("策略 [apps.{}] push_mode 未知（忽略，跟随全局）: {}", pkg, s),
+            },
+            None => logw!("策略 [apps.{}] push_mode 类型错误（忽略，跟随全局）", pkg),
+        },
+        "unfreeze_window" => match str_of(val, e) {
+            Some(s) => match parse_window(&s) {
+                Some(w) => ap.unfreeze_window = Some(w),
+                None => logw!("策略 [apps.{}] unfreeze_window 格式错误（应为 HH:MM-HH:MM，忽略）: {}", pkg, s),
+            },
+            None => logw!("策略 [apps.{}] unfreeze_window 类型错误（忽略）", pkg),
+        },
         k => logw!("策略 [apps.{}] 未知键（忽略）: {} = {}", pkg, k, debug_val(val)),
     }
 }
@@ -237,6 +305,37 @@ fn str_array_of(v: &TomlValue, e: &TomlEntry) -> Vec<String> {
             logw!("策略键类型错误（用空数组）: {} = {}", e.key, debug_val(v));
             Vec::new()
         }
+    }
+}
+
+/// 解析定时窗口 "HH:MM-HH:MM" → (开始分钟, 结束分钟)，0..=1439，start <= end。
+/// 格式错误 / 跨零点（start > end）→ None（不支持跨零点，文档说明）。
+fn parse_window(s: &str) -> Option<(u32, u32)> {
+    let (a, b) = s.split_once('-')?;
+    let start = parse_hhmm(a.trim())?;
+    let end = parse_hhmm(b.trim())?;
+    if start > end {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn parse_hhmm(s: &str) -> Option<u32> {
+    let (h, m) = s.split_once(':')?;
+    let h: u32 = h.trim().parse().ok()?;
+    let m: u32 = m.trim().parse().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some(h * 60 + m)
+}
+
+/// 分钟数 minute（0..=1439）是否落在 (start, end) 窗口内（含边界；None = 无窗口恒 false）。
+/// 纯函数——单测直接覆盖，引擎侧经本地时间调用。
+pub fn in_window(minute: u32, window: Option<(u32, u32)>) -> bool {
+    match window {
+        Some((s, e)) => minute >= s && minute <= e,
+        None => false,
     }
 }
 
@@ -351,5 +450,81 @@ grace_seconds = 120
         // 未知 mode → 回落 standard（不致命）
         let p = Policy::from_toml("[apps.\"com.x.y\"]\nmode = \"turbo\"", 1).unwrap();
         assert_eq!(p.apps["com.x.y"].mode, AppMode::Standard);
+    }
+
+    #[test]
+    fn parse_exempt_dimensions_v0419() {
+        // v0.4.19-l3：新增豁免维度解析（全局 + per-app）
+        let src = r#"
+[whitelist]
+keep_high_network = false
+push_policy = "kill"
+
+[apps."com.tencent.mm"]
+keep_high_network = true
+keep_wakeup = false
+push_mode = "keep"
+unfreeze_window = "21:00-08:00"
+
+[apps."com.example.bad"]
+push_mode = "turbo"
+unfreeze_window = "25:00-26:00"
+keep_wakeup = 1
+
+[apps."com.example.night"]
+unfreeze_window = "22:30-23:45"
+"#;
+        let p = Policy::from_toml(src, 9).unwrap();
+        // 全局
+        assert!(!p.keep_high_network);
+        assert_eq!(p.push_policy, PushMode::Kill);
+        // per-app 覆盖
+        let mm = p.apps.get("com.tencent.mm").unwrap();
+        assert_eq!(mm.keep_high_network, Some(true));
+        assert_eq!(mm.keep_wakeup, Some(false));
+        assert_eq!(mm.push_mode, Some(PushMode::Keep));
+        assert_eq!(mm.unfreeze_window, None); // 21:00-08:00 跨零点 → 拒绝（不支持跨零点）
+        // 坏值：push_mode 未知 → None（跟随全局 kill）；unfreeze_window 非法 → None；keep_wakeup 类型错 → 回落默认 true
+        let bad = p.apps.get("com.example.bad").unwrap();
+        assert_eq!(bad.push_mode, None);
+        assert_eq!(bad.unfreeze_window, None);
+        assert_eq!(bad.keep_wakeup, Some(true)); // bool_of 类型错误回落默认值（失败安全）
+        // 合法窗口
+        let night = p.apps.get("com.example.night").unwrap();
+        assert_eq!(night.unfreeze_window, Some((22 * 60 + 30, 23 * 60 + 45)));
+    }
+
+    #[test]
+    fn parse_window_ok_and_bad() {
+        // 合法
+        assert_eq!(parse_window("09:00-22:00"), Some((540, 1320)));
+        assert_eq!(parse_window("0:00-23:59"), Some((0, 1439)));
+        assert_eq!(parse_window("22:30-23:45"), Some((1350, 1425)));
+        // 非法：跨零点 / 时间越界 / 缺冒号 / 非数字
+        assert_eq!(parse_window("21:00-08:00"), None);
+        assert_eq!(parse_window("24:00-08:00"), None);
+        assert_eq!(parse_window("09-22"), None);
+        assert_eq!(parse_window("ab:cd-ef:gh"), None);
+        assert_eq!(parse_window(""), None);
+    }
+
+    #[test]
+    fn in_window_bounds() {
+        // 含边界；无窗口恒 false
+        assert!(in_window(540, Some((540, 1320))));
+        assert!(in_window(1320, Some((540, 1320))));
+        assert!(in_window(900, Some((540, 1320))));
+        assert!(!in_window(539, Some((540, 1320))));
+        assert!(!in_window(1321, Some((540, 1320))));
+        assert!(!in_window(900, None));
+    }
+
+    #[test]
+    fn push_mode_parse() {
+        assert_eq!(PushMode::parse("keep"), Some(PushMode::Keep));
+        assert_eq!(PushMode::parse("kill"), Some(PushMode::Kill));
+        assert_eq!(PushMode::parse("nuke"), None);
+        assert_eq!(PushMode::Keep.as_str(), "keep");
+        assert_eq!(PushMode::Kill.as_str(), "kill");
     }
 }

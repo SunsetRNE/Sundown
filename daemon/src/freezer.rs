@@ -145,6 +145,127 @@ pub fn unfreeze_pkg(pkg: &str) -> bool {
     }
 }
 
+// ---------------- 子进程管理（v0.4.19-l3，参考 Cerberus §6.3） ----------------
+//
+// cgroup v2 freezer 支持 pid 级子目录（apps/uid_X/pid_Y/cgroup.freeze），
+// 选择性冻结 = 对除 :push 类外的每个 pid 子 cgroup 写 1（:push 保持运行，推送通道不断）。
+// 解冻仍走 uid 层写 0（父层写 0 递归解冻整棵子树，含保留的 push——push 本就没冻，无副作用）。
+//
+// 风险与回落：Android 系统可能重排 cgroup 层级（AMS 进程管理）或 pid 子目录
+// cgroup.freeze 不可写 → 选择性冻结失败 → 回落 uid 级整冻（宁多冻，保持冻结语义完整）。
+
+/// :push 类子进程判定（cmdline 首参形如 "pkg:push" / "pkg:MSF" / "pkg:channel"）。
+/// 匹配集合：push / msf / channel / pull（大小写不敏感）——微信 :push、QQ :MSF 等。
+pub fn is_push_cmdline(first_arg: &str) -> bool {
+    let Some(idx) = first_arg.rfind(':') else {
+        return false;
+    };
+    let suffix = &first_arg[idx + 1..];
+    let l = suffix.to_ascii_lowercase();
+    l == "push" || l == "msf" || l == "channel" || l == "pull"
+}
+
+fn is_push_proc(pid: u32) -> bool {
+    // cmdline 以 NUL 分隔；首个参数为进程名（可能带 :suffix）
+    let Ok(text) = std::fs::read_to_string(format!("/proc/{}/cmdline", pid)) else {
+        return false;
+    };
+    match text.split('\0').next() {
+        Some(first) => is_push_cmdline(first),
+        None => false,
+    }
+}
+
+/// 选择性冻结：保留 :push 类子进程，冻结其余 pid 子 cgroup。
+/// 无 pid 子目录 / 全部失败 → 回落 uid 级整冻。
+pub fn freeze_pkg_keep_push(pkg: &str) -> bool {
+    let Some(uid) = pkg_uid(pkg) else {
+        logw!("冻结失败：包表未知 pkg={}", pkg);
+        return false;
+    };
+    let base = format!("/sys/fs/cgroup/apps/uid_{}", uid);
+    let rd = match std::fs::read_dir(&base) {
+        Ok(r) => r,
+        Err(_) => return freeze_uid(uid), // 目录不存在 = 无进程（写失败语义）
+    };
+    let mut found = 0usize;
+    let mut frozen_any = false;
+    let mut kept = 0usize;
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("pid_") {
+            continue;
+        }
+        found += 1;
+        let Ok(pid) = name[4..].parse::<u32>() else {
+            continue;
+        };
+        if is_push_proc(pid) {
+            kept += 1;
+            logi!("L3 子进程保留（:push 类）: pid={} pkg={}", pid, pkg);
+            continue;
+        }
+        let path = entry.path().join("cgroup.freeze");
+        if write_freeze(&path.to_string_lossy(), "1") {
+            frozen_any = true;
+        }
+    }
+    if found == 0 {
+        return freeze_uid(uid); // 无 pid 子目录（旧结构）→ 整冻回落
+    }
+    if !frozen_any && kept == 0 {
+        return freeze_uid(uid); // 全部失败 → 整冻回落
+    }
+    if kept > 0 {
+        logi!("L3 选择性冻结: {}（保留 {} 个 :push 子进程）", pkg, kept);
+    }
+    frozen_any
+}
+
+/// 冻结 + 连带杀死 :push 类子进程（kill 模式：通讯类 app 断推送彻底休眠）。
+/// 杀进程用 SIGKILL（libc::kill；仅限该 uid 下的 :push 子进程，不波及其他）。
+pub fn freeze_pkg_kill_push(pkg: &str) -> bool {
+    let Some(uid) = pkg_uid(pkg) else {
+        logw!("冻结失败：包表未知 pkg={}", pkg);
+        return false;
+    };
+    kill_push_procs(uid);
+    freeze_uid(uid)
+}
+
+fn kill_push_procs(uid: u32) {
+    let base = format!("/sys/fs/cgroup/apps/uid_{}", uid);
+    let Ok(rd) = std::fs::read_dir(&base) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("pid_") {
+            continue;
+        }
+        let Ok(pid) = name[4..].parse::<u32>() else {
+            continue;
+        };
+        if is_push_proc(pid) {
+            // 读 cgroup.procs 确认 pid 仍归属该 cgroup（防 pid 复用误杀）
+            let procs = entry.path().join("cgroup.procs");
+            let owned = std::fs::read_to_string(&procs)
+                .map(|s| s.lines().any(|l| l.trim() == pid.to_string()))
+                .unwrap_or(false);
+            if !owned {
+                continue;
+            }
+            let ret = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            logi!(
+                "L3 子进程杀死（:push 类）: pid={} uid={} rc={}",
+                pid,
+                uid,
+                ret
+            );
+        }
+    }
+}
+
 /// 从 /proc/<pid>/status 解析 uid（proc-add 事件未带 uid 时的兜底）
 pub fn pid_uid(pid: u32) -> Option<u32> {
     let text = std::fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
@@ -175,11 +296,27 @@ fn write_freeze(path: &str, val: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn uid_parse() {
         // Uid: 1000 1000 1000 1000
         assert_eq!(pid_parse_uid("Uid:\t1000\t1000\t1000\t1000\n"), Some(1000));
         assert_eq!(pid_parse_uid("Name:\tabc\n"), None);
+    }
+
+    #[test]
+    fn push_cmdline_match() {
+        // 命中：微信 :push / QQ :MSF / 通道 / pull
+        assert!(is_push_cmdline("com.tencent.mm:push"));
+        assert!(is_push_cmdline("com.tencent.mobileqq:MSF"));
+        assert!(is_push_cmdline("com.x.y:channel"));
+        assert!(is_push_cmdline("com.x.y:Pull"));
+        // 未命中：主进程 / 其他子进程 / 无冒号
+        assert!(!is_push_cmdline("com.tencent.mm"));
+        assert!(!is_push_cmdline("com.tencent.mm:remote"));
+        assert!(!is_push_cmdline("com.x.y:pushservice")); // 前缀不是独立 token
+        assert!(!is_push_cmdline(""));
     }
 
     fn pid_parse_uid(text: &str) -> Option<u32> {

@@ -83,7 +83,7 @@ Sundown/
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
-## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.18-l3：冻结链路全实测 + 焦点去抖 + 情景预设全链路）
+## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.19-l3：冻结链路全实测 + 焦点去抖 + 情景预设全链路 + Cerberus 豁免维度扩展与子进程管理）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
@@ -135,9 +135,15 @@ Sundown/
 - [x] L3 conf 模板首次部署（v0.4.16-l3：customize.sh 数据目录 conf 无 .toml/.json 时部署模块模板 policy.toml+action.toml，已存在配置一律保留——用户配置优先；实机验证预设三链路：apply 内存覆盖不动磁盘 / 热加载重放保持 / 解析失败回落磁盘）
 - [x] WebUI 情景预设（v0.4.17-l3：策略页预设区块动态化——preset list 携带参数摘要，WebUI 从 action.toml 实时渲染按钮 + 当前生效高亮 + 清除预设；点击即 `policy preset apply` 内存切换，废弃旧硬编码写磁盘实现）
 - [x] 情景预设启动加载修复（v0.4.18-l3：init_engine 启动即加载 action.toml——此前预设表仅 reload 时刷新，daemon 重启后为空；实机校验发现并修复）
+- [x] Cerberus 豁免维度扩展 + 子进程管理（v0.4.19-l3）：
+  - 高网络负载豁免 `keep_high_network`（全局 + per-app）：daemon 侧 /proc/uid_stat + xt_qtaguid 双源流量采样，30s 窗口增量 ≥256KB 判定活跃 → decide_leave/tick 双重豁免（数据源不可用降级不致命）
+  - 交互/FCM 唤醒开关 `keep_wakeup`（per-app）：false = 唤醒不解冻（防 FCM/唤醒风暴反复解冻），事件留痕 `wakeup_ignored`
+  - 定时解冻窗口 `unfreeze_window = "HH:MM-HH:MM"`（per-app）：窗口内退后台不冻结（libc localtime_r 零依赖，不支持跨零点）
+  - 子进程管理 `push_policy`/`push_mode = keep|kill`（全局 + per-app）：keep = pid 级选择性冻结（:push/:MSF/:channel/:pull 子进程保留运行，推送通道不断，失败回落 uid 级整冻）；kill = 冻结时连带 SIGKILL :push 类子进程（cgroup.procs 归属核验防 pid 复用误杀）
+  - WebUI 策略页新增高网络豁免 + 推送子进程保留开关（v2.1），policy.toml 模板文档化
 
 ## 待办（后置）
-- [ ] Cerberus 其余豁免维度：音频/定位/高网络/FCM/交互唤醒/定时解冻 per-app 开关、子进程管理（:push 保留/杀死）
+- [ ] 定位活动豁免（dex 侧 AppOps 判定，走 L2 热更新路线）
 - [ ] 热更新路线（L0 staged 自动激活 + dex push 联动 WebUI 一键升级）
 - [ ] WebUI 日志页交互打磨（v3 数据面就绪后的分组/时间线视图）
 
