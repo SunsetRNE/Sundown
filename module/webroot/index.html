@@ -190,6 +190,46 @@
   }
   .foot-note { text-align: center; color: var(--dim); font-size: 0.7rem; margin-top: 18px; }
   .hidden { display: none !important; }
+
+  /* ---- v2.1 精细补充：统计与排行 ---- */
+  .stat-row { display: flex; gap: 8px; margin-bottom: 10px; }
+  .stat-cell {
+    flex: 1; background: var(--card2); border-radius: 10px; padding: 8px 6px;
+    text-align: center;
+  }
+  .stat-cell .num { font-size: 1.05rem; font-weight: 800; }
+  .stat-cell .lab { font-size: 0.64rem; color: var(--dim); margin-top: 2px; }
+  .stat-cell.focus .num { color: var(--focus); }
+  .stat-cell.wake .num { color: var(--wake); }
+  .stat-cell.exempt .num { color: var(--exempt); }
+  .stat-cell.freeze .num { color: var(--freeze); }
+  .stat-cell.err .num { color: var(--err); }
+  .rank-list { display: flex; flex-direction: column; gap: 5px; }
+  .rank-item {
+    display: flex; align-items: center; gap: 8px; font-size: 0.8rem;
+    background: var(--card2); border-radius: 8px; padding: 6px 10px;
+  }
+  .rank-item .rank-no { width: 20px; color: var(--dim); font-size: 0.72rem; text-align: center; flex-shrink: 0; }
+  .rank-item .pkg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace; font-size: 0.76em; }
+  .rank-item .n { color: var(--wake); font-weight: 700; }
+  .rank-item .bar-wrap { flex: 1; height: 6px; background: #100c1a; border-radius: 4px; overflow: hidden; min-width: 40px; }
+  .rank-item .bar { height: 100%; background: linear-gradient(90deg, var(--accent2), var(--accent)); border-radius: 4px; }
+  .reason-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .reason-chip { font-size: 0.7rem; background: #2c2344; color: var(--dim); border-radius: 20px; padding: 3px 10px; }
+  .reason-chip b { color: var(--accent); }
+  .preset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .preset-btn {
+    background: var(--card2); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 10px; padding: 10px; text-align: left; cursor: pointer; color: var(--text);
+  }
+  .preset-btn:active { opacity: .75; }
+  .preset-btn .pt { font-size: 0.82rem; font-weight: 700; display: block; }
+  .preset-btn .pd { font-size: 0.68rem; color: var(--dim); margin-top: 3px; line-height: 1.4; display: block; }
+  .preset-btn.danger-pt .pt { color: var(--err); }
+  .focus-recent-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+  .focus-recent-item .pkg { flex: 1; font-family: ui-monospace, monospace; font-size: 0.76em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .focus-recent-item .n { color: var(--dim); font-size: 0.72rem; }
+  .hint { font-size: 0.7rem; color: var(--dim); margin-top: 8px; line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -235,6 +275,19 @@
     <div class="card">
       <h2>📱 受管应用 <span class="cnt" id="app-cnt"></span></h2>
       <div class="app-list" id="app-list"><div class="empty">加载中…</div></div>
+    </div>
+
+    <div class="card">
+      <h2>🔔 唤醒源排行 <span class="cnt" id="wake-rank-note"></span></h2>
+      <div class="reason-chips" id="reason-chips"></div>
+      <div class="rank-list" id="wake-rank" style="margin-top:8px"><div class="empty">解析中…</div></div>
+      <div class="hint">统计自最近 400 条引擎日志；点击「最近焦点」应用可直接加入白名单</div>
+    </div>
+
+    <div class="card">
+      <h2>🕐 最近焦点 <span class="cnt" id="focus-recent-note"></span></h2>
+      <div id="focus-recent"><div class="empty">解析中…</div></div>
+      <div class="hint">⚠️ ColorOS 残留 resume 事件会导致焦点频繁切换（白名单/豁免已兜底）</div>
     </div>
   </section>
 
@@ -282,6 +335,29 @@
       </div>
     </div>
 
+    <div class="card">
+      <h2>⚡ 预设模式</h2>
+      <div class="preset-grid">
+        <button class="preset-btn" data-preset="watch">
+          <span class="pt">👀 观望</span>
+          <span class="pd">引擎关闭 · 纯观测（默认）</span>
+        </button>
+        <button class="preset-btn" data-preset="conservative">
+          <span class="pt">🛡️ 保守</span>
+          <span class="pd">开启 · grace 120s · 冷却 120s</span>
+        </button>
+        <button class="preset-btn" data-preset="standard">
+          <span class="pt">⚖️ 标准</span>
+          <span class="pd">开启 · grace 60s · 冷却 90s</span>
+        </button>
+        <button class="preset-btn danger-pt" data-preset="aggressive">
+          <span class="pt">🔥 激进</span>
+          <span class="pd">开启 · grace 10s · 冷却 60s（高风险）</span>
+        </button>
+      </div>
+      <div class="hint">预设仅调整全局参数与开关，不影响白名单/豁免/force 列表</div>
+    </div>
+
     <button class="btn primary" id="btn-save-policy">💾 保存策略（热加载生效）</button>
     <button class="btn" id="btn-reload-policy">🔄 放弃修改，重新载入</button>
   </section>
@@ -308,6 +384,13 @@
         <button class="mini-btn" id="log-refresh">🔄 刷新</button>
         <label class="auto-refresh"><input type="checkbox" id="log-auto" checked> 自动</label>
       </div>
+      <div class="stat-row" id="log-stats">
+        <div class="stat-cell focus"><div class="num" id="ls-focus">-</div><div class="lab">焦点</div></div>
+        <div class="stat-cell wake"><div class="num" id="ls-wake">-</div><div class="lab">唤醒</div></div>
+        <div class="stat-cell exempt"><div class="num" id="ls-exempt">-</div><div class="lab">豁免</div></div>
+        <div class="stat-cell freeze"><div class="num" id="ls-freeze">-</div><div class="lab">冻结</div></div>
+        <div class="stat-cell err"><div class="num" id="ls-err">-</div><div class="lab">异常</div></div>
+      </div>
       <div id="log-box"><span class="empty">加载中…</span></div>
     </div>
   </section>
@@ -318,6 +401,8 @@
       <h2>ℹ️ 关于</h2>
       <div class="kv"><span class="k">模块版本</span><span class="v" id="m-version">-</span></div>
       <div class="kv"><span class="k">守护进程</span><span class="v" id="m-daemon">-</span></div>
+      <div class="kv"><span class="k">发布号</span><span class="v" id="m-release">-</span></div>
+      <div class="kv"><span class="k">热加载 / 连接</span><span class="v" id="m-metrics">-</span></div>
       <div class="kv"><span class="k">数据目录</span><span class="v mono">/data/adb/sundown</span></div>
       <div class="kv"><span class="k">架构</span><span class="v">L0 daemon · L1 桩 · L2 dex · L2b 桥 · L3 策略</span></div>
       <div class="kv"><span class="k">上游参考</span><span class="v">Cerberus / AStop（UI 设计参考）</span></div>
@@ -431,6 +516,7 @@ async function refreshDash() {
   renderHero();
   renderDashCards();
   renderApps();
+  fetchLogStats();
 }
 function renderHero() {
   const run = ST && ST.daemon_running === 1;
@@ -514,6 +600,46 @@ function renderApps() {
     '<div class="app-item"><span class="pkg">' + esc(it.pkg) + '</span><span class="chip ' + it.chip + '">' + it.label + "</span></div>"
   ).join("");
 }
+let DASH_STATS = null;
+async function fetchLogStats() {
+  const r = await exec(SUNCTL + " logs --engine 400");
+  DASH_STATS = analyzeLogs(r.stdout || "");
+  renderWakeRank();
+  renderFocusRecent();
+}
+function renderWakeRank() {
+  const st = DASH_STATS || { wake: {}, reason: {} };
+  const entries = Object.entries(st.wake).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const total = Object.values(st.wake).reduce((a, b) => a + b, 0);
+  $("wake-rank-note").textContent = entries.length ? "Top " + entries.length : "";
+  // reason 分布 chips
+  const rc = $("reason-chips");
+  const reasons = Object.entries(st.reason).sort((a, b) => b[1] - a[1]);
+  rc.innerHTML = reasons.length
+    ? reasons.map(([k, v]) => '<span class="reason-chip">' + esc(REASON_CN[k] || k) + " <b>" + v + "</b></span>").join("")
+    : "";
+  const box = $("wake-rank");
+  if (!entries.length) { box.innerHTML = '<div class="empty">暂无唤醒数据</div>'; return; }
+  const max = entries[0][1];
+  box.innerHTML = entries.map(([pkg, n], i) =>
+    '<div class="rank-item"><span class="rank-no">#' + (i + 1) + '</span>' +
+    '<span class="pkg">' + esc(pkg) + '</span>' +
+    '<span class="bar-wrap"><span class="bar" style="width:' + Math.round(n / max * 100) + '%"></span></span>' +
+    '<span class="n">' + n + "</span></div>"
+  ).join("") + '<div class="hint">唤醒共 ' + total + " 次（近 400 条日志）</div>";
+}
+function renderFocusRecent() {
+  const st = DASH_STATS || { focus: {} };
+  const entries = Object.entries(st.focus).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  $("focus-recent-note").textContent = entries.length ? entries.length + " 个" : "";
+  const box = $("focus-recent");
+  if (!entries.length) { box.innerHTML = '<div class="empty">暂无焦点数据</div>'; return; }
+  box.innerHTML = entries.map(([pkg, n]) =>
+    '<div class="focus-recent-item"><span class="pkg">' + esc(pkg) + '</span>' +
+    '<span class="n">' + n + " 次</span>" +
+    '<button class="mini-btn" data-addwl="' + esc(pkg) + '">+ 白名单</button></div>'
+  ).join("");
+}
 
 /* ================= 策略页 ================= */
 let wlDraft = [], forceDraft = [];
@@ -593,6 +719,28 @@ async function savePolicy() {
   toast("✅ 策略已保存并热加载（修订 #" + (POL && POL.revision != null ? POL.revision : "?") + "）");
   refreshDash();
 }
+function applyPreset(name) {
+  const presets = {
+    watch:        { en: false, grace: 30,  cool: 60 },
+    conservative: { en: true,  grace: 120, cool: 120 },
+    standard:     { en: true,  grace: 60,  cool: 90 },
+    aggressive:   { en: true,  grace: 10,  cool: 60 }
+  };
+  const p = presets[name];
+  if (!p) return;
+  setSwitch($("p-enabled"), p.en);
+  $("p-grace").value = p.grace;
+  $("p-cool").value = p.cool;
+  toast("预设已填入表单，点「💾 保存策略」生效");
+}
+async function quickAddWhitelist(pkg) {
+  await refreshPolicyForm();
+  if (wlDraft.includes(pkg)) { toast(pkg + " 已在白名单"); return; }
+  wlDraft.push(pkg);
+  renderWl();
+  toast("已将 " + pkg + " 加入白名单并保存…");
+  await savePolicy();
+}
 
 /* ================= 日志页 ================= */
 function clsOf(line) {
@@ -608,10 +756,13 @@ function fmtTime(line) {
   const m = line.match(/^\[([^\]]+)\]/);
   return m ? m[1].replace("Z", "") : "";
 }
+let LOGS_RAW = "";
 async function refreshLogs() {
   const lines = $("log-lines").value;
   const r = await exec(SUNCTL + " logs --engine " + lines);
   const raw = (r.stdout || "").trim() || (r.stderr || "暂无日志");
+  LOGS_RAW = raw;
+  renderLogStats(raw);
   const box = $("log-box");
   const out = raw.split("\n").map(l => {
     const c = clsOf(l);
@@ -622,6 +773,35 @@ async function refreshLogs() {
   }).filter(Boolean).join("");
   box.innerHTML = out || '<span class="empty">（当前过滤条件下无匹配事件）</span>';
   box.scrollTop = box.scrollHeight;
+}
+function analyzeLogs(raw) {
+  const st = { focus: {}, wake: {}, reason: {}, total: { focus: 0, wake: 0, exempt: 0, freeze: 0, err: 0 } };
+  (raw || "").split("\n").forEach(l => {
+    let m;
+    if ((m = l.match(/焦点切换: ([^\s（(]+)/))) {
+      st.focus[m[1]] = (st.focus[m[1]] || 0) + 1; st.total.focus++;
+    } else if ((m = l.match(/唤醒事件: pkg=(\S+) reason=(\w+)/))) {
+      const pkg = m[1] === "?" ? "未知" : m[1];
+      st.wake[pkg] = (st.wake[pkg] || 0) + 1;
+      st.reason[m[2]] = (st.reason[m[2]] || 0) + 1; st.total.wake++;
+    } else if (/豁免判定: /.test(l)) {
+      st.total.exempt++;
+    } else if (/冻结|解冻|退后台|冷却|跳过/.test(l)) {
+      st.total.freeze++;
+    } else if (/ERROR|FATAL/.test(l)) {
+      st.total.err++;
+    }
+  });
+  return st;
+}
+const REASON_CN = { broadcast: "广播", pendingintent: "待定意图", service: "服务", alarm: "闹钟", "signal": "信号" };
+function renderLogStats(raw) {
+  const st = analyzeLogs(raw);
+  $("ls-focus").textContent = st.total.focus;
+  $("ls-wake").textContent = st.total.wake;
+  $("ls-exempt").textContent = st.total.exempt;
+  $("ls-freeze").textContent = st.total.freeze;
+  $("ls-err").textContent = st.total.err;
 }
 function startLogAuto() {
   stopLogAuto();
@@ -638,6 +818,8 @@ async function refreshMore() {
   $("m-daemon").innerHTML = S.daemon_running === 1
     ? '<span class="ok">✅ PID ' + (S.daemon_pid || "?") + " · " + fmtUptime(S.uptime_s) + "</span>"
     : '<span class="err">❌ 未运行</span>';
+  $("m-release").textContent = S.release_no != null ? "RELEASE #" + S.release_no : "-";
+  $("m-metrics").textContent = (S.config_reloads || 0) + " 次热加载 / " + (S.connections_served || 0) + " 连接";
   $("m-stub-hash").textContent = S.probe_stub_build_hash || "未上报";
   $("m-dex-hash").textContent = (S.probe_dex_version || "未上报") + (S.probe_dex_hash_match === 1 ? " ✅" : S.probe_dex_hash_match === 0 ? " ⚠️" : "");
   $("m-bridge-hash").textContent = (S.probe_hook_bridge_hash || "未上线") + (S.probe_hook_bridge_hash_match === 1 ? " ✅" : S.probe_hook_bridge_hash_match === 0 ? " ⚠️" : "");
@@ -654,6 +836,13 @@ function init() {
   document.querySelectorAll(".tab").forEach(el => el.onclick = () => showTab(el.dataset.page));
   // 策略页开关
   bindSwitch($("p-enabled")); bindSwitch($("p-kfg")); bindSwitch($("p-km"));
+  // 预设模式
+  document.querySelectorAll(".preset-btn").forEach(el => el.onclick = () => applyPreset(el.dataset.preset));
+  // 最近焦点 -> 快捷加白名单
+  $("focus-recent").onclick = e => {
+    const b = e.target.closest("[data-addwl]");
+    if (b) quickAddWhitelist(b.dataset.addwl);
+  };
   // 白名单 / force
   $("wl-add").onclick = () => addPkg(wlDraft, "wl-input", renderWl);
   $("force-add").onclick = () => addPkg(forceDraft, "force-input", renderForce);
