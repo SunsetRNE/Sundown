@@ -21,7 +21,7 @@
 | `events` | `[行数=50]` | 【L3.1】结构化事件时间线（JSON 数组，最旧→最新；字段见 §事件契约） | 0=成功；1=daemon 未连接；2=参数错误 |
 | `policy` | `status` | 【L3】查询冻结策略状态（JSON，经 daemon 管理面 socket） | 0=成功；1=daemon 未连接；2=参数错误 |
 | `policy` | `reload` | 【L3】强制从磁盘重载策略（失败保留旧表） | 同上 |
-| `policy` | `preset list` | 【L3】情景预设列表 + 当前生效（JSON，action.toml） | 同上 |
+| `policy` | `preset list` | 【L3】情景预设列表 + 当前生效（JSON；v0.4.17-l3 起 presets 元素为对象：`{name,enabled,grace_seconds,cooldown_seconds,keep_fg_service,keep_media}`，WebUI 动态渲染用） | 同上 |
 | `policy` | `preset apply <name>` | 【L3】应用预设（内存覆盖 [general]，不动磁盘 policy.toml） | 同上 |
 | `policy` | `preset clear` | 【L3】清除预设（回落磁盘 policy.toml 参数） | 同上 |
 | `version` | — | 模块与 daemon 版本 | 0 |

@@ -83,7 +83,7 @@ Sundown/
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
-## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.16-l3：冻结链路全实测 + 焦点去抖 + 情景预设）
+## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.17-l3：冻结链路全实测 + 焦点去抖 + 情景预设 WebUI 化）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
@@ -133,6 +133,7 @@ Sundown/
 - [x] 焦点去抖（v0.4.14-l3：hook focus 降级为线索，ExemptMonitor 权威 topActivity 2s 节拍为唯一决策源 + 10s 失效自动恢复 hook 兜底——根治 OPPO ROM resume 残留导致的 force 抖动解冻）
 - [x] L3 情景预设（v0.4.15-l3：conf/action.toml `[presets."name"]` 参数组，`policy preset apply <name>`/`clear`/`list` 内存切换不动磁盘 policy.toml；预设只覆盖 [general] 五参数，白名单/force/per-app 始终以磁盘为准；action.toml 缺失/解析失败降级空表不致命；reload 时预设表随热加载刷新、生效中预设重放覆盖、已删除回落磁盘）
 - [x] L3 conf 模板首次部署（v0.4.16-l3：customize.sh 数据目录 conf 无 .toml/.json 时部署模块模板 policy.toml+action.toml，已存在配置一律保留——用户配置优先；实机验证预设三链路：apply 内存覆盖不动磁盘 / 热加载重放保持 / 解析失败回落磁盘）
+- [x] WebUI 情景预设（v0.4.17-l3：策略页预设区块动态化——preset list 携带参数摘要，WebUI 从 action.toml 实时渲染按钮 + 当前生效高亮 + 清除预设；点击即 `policy preset apply` 内存切换，废弃旧硬编码写磁盘实现）
 
 ## 待办（后置）
 - [ ] Cerberus 其余豁免维度：音频/定位/高网络/FCM/交互唤醒/定时解冻 per-app 开关、子进程管理（:push 保留/杀死）

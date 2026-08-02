@@ -569,7 +569,7 @@ fn handle_policy(state: &DaemonState, arg: &str) -> String {
 }
 
 /// policy preset 子命令（仅 root 管理面）：
-///   preset list          -> {"ok":1,"presets":[...],"active":"...","revision":N}
+///   preset list          -> {"ok":1,"presets":[{name,enabled,grace_seconds,...}],"active":"...","revision":N}
 ///   preset apply <name>  -> 应用预设（内存覆盖 [general]；未知预设返回 ok:0）
 ///   preset clear         -> 清除预设（回落磁盘 policy.toml 参数）
 fn handle_preset(state: &DaemonState, arg: &str) -> String {
@@ -579,15 +579,37 @@ fn handle_preset(state: &DaemonState, arg: &str) -> String {
     match sub {
         "list" => {
             let eng = state.engine.lock().unwrap();
-            let names = eng.presets.names();
             let active = eng.active_preset.clone().unwrap_or_default();
+            // v0.4.17-l3 起携带参数摘要（WebUI 动态渲染；CLI 可读参数明细）
+            let items: Vec<String> = eng
+                .presets
+                .names()
+                .iter()
+                .map(|n| {
+                    let p = &eng.presets.presets[n];
+                    format!(
+                        concat!(
+                            "{{",
+                            "\"name\":\"{}\",",
+                            "\"enabled\":{},",
+                            "\"grace_seconds\":{},",
+                            "\"cooldown_seconds\":{},",
+                            "\"keep_fg_service\":{},",
+                            "\"keep_media\":{}",
+                            "}}"
+                        ),
+                        n,
+                        p.enabled,
+                        p.grace_seconds,
+                        p.cooldown_seconds,
+                        p.keep_fg_service,
+                        p.keep_media
+                    )
+                })
+                .collect();
             format!(
                 "{{\"ok\":1,\"presets\":[{}],\"active\":\"{}\",\"revision\":{}}}",
-                names
-                    .iter()
-                    .map(|s| format!("\"{}\"", s))
-                    .collect::<Vec<_>>()
-                    .join(","),
+                items.join(","),
                 active,
                 eng.presets.revision
             )

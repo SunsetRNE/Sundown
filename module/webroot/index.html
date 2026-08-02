@@ -273,6 +273,8 @@
     border-radius: 10px; padding: 10px; text-align: left; cursor: pointer; color: var(--text);
   }
   .preset-btn:active { opacity: .75; }
+  .preset-btn.active { border-color: var(--accent); background: rgba(255,154,90,0.1); }
+  .preset-btn.active .pt::after { content: " ✓"; color: var(--ok); font-weight: 700; }
   .preset-btn .pt { font-size: 0.82rem; font-weight: 700; display: block; }
   .preset-btn .pd { font-size: 0.68rem; color: var(--dim); margin-top: 3px; line-height: 1.4; display: block; }
   .preset-btn.danger-pt .pt { color: var(--err); }
@@ -386,26 +388,12 @@
     </div>
 
     <div class="card">
-      <h2>⚡ 预设模式</h2>
-      <div class="preset-grid">
-        <button class="preset-btn" data-preset="watch">
-          <span class="pt">👀 观望</span>
-          <span class="pd">引擎关闭 · 纯观测（默认）</span>
-        </button>
-        <button class="preset-btn" data-preset="conservative">
-          <span class="pt">🛡️ 保守</span>
-          <span class="pd">开启 · grace 120s · 冷却 120s</span>
-        </button>
-        <button class="preset-btn" data-preset="standard">
-          <span class="pt">⚖️ 标准</span>
-          <span class="pd">开启 · grace 60s · 冷却 90s</span>
-        </button>
-        <button class="preset-btn danger-pt" data-preset="aggressive">
-          <span class="pt">🔥 激进</span>
-          <span class="pd">开启 · grace 10s · 冷却 60s（高风险）</span>
-        </button>
+      <h2>⚡ 情景预设 <span class="cnt" id="preset-note"></span></h2>
+      <div class="preset-grid" id="preset-grid"><div class="empty">加载中…</div></div>
+      <div class="hidden" id="preset-active-row" style="margin-top:8px">
+        <button class="btn" id="btn-preset-clear" style="margin-top:0">↩️ 清除预设（回落磁盘参数）</button>
       </div>
-      <div class="hint">预设仅调整全局参数与开关，不影响白名单/豁免/force 列表</div>
+      <div class="hint">预设 = 内存切换参数组（conf/action.toml，点击即生效），不影响磁盘 policy.toml、白名单、force 与 per-app 策略</div>
     </div>
 
     <button class="btn primary" id="btn-save-policy">💾 保存策略（热加载生效）</button>
@@ -707,7 +695,7 @@ function renderFocusRecent() {
 /* ================= 策略页 ================= */
 let wlDraft = [], forceDraft = [];
 async function refreshPolicyForm() {
-  await Promise.all([fetchPolicy(), fetchToml()]);
+  await Promise.all([fetchPolicy(), fetchToml(), fetchPresets()]);
   const P = POL || {};
   $("p-grace").value = P.grace_seconds ?? 30;
   $("p-cool").value = P.cooldown_seconds ?? 60;
@@ -718,6 +706,7 @@ async function refreshPolicyForm() {
   forceDraft = (P.force || []).slice();
   renderWl();
   renderForce();
+  renderPresets();
 }
 function setSwitch(el, on) { el.className = "switch" + (on ? " on" : ""); el.dataset.on = on ? "1" : "0"; }
 function bindSwitch(el) { el.onclick = () => setSwitch(el, el.dataset.on !== "1"); }
@@ -782,19 +771,52 @@ async function savePolicy() {
   toast("✅ 策略已保存并热加载（修订 #" + (POL && POL.revision != null ? POL.revision : "?") + "）");
   refreshDash();
 }
-function applyPreset(name) {
-  const presets = {
-    watch:        { en: false, grace: 30,  cool: 60 },
-    conservative: { en: true,  grace: 120, cool: 120 },
-    standard:     { en: true,  grace: 60,  cool: 90 },
-    aggressive:   { en: true,  grace: 10,  cool: 60 }
-  };
-  const p = presets[name];
-  if (!p) return;
-  setSwitch($("p-enabled"), p.en);
-  $("p-grace").value = p.grace;
-  $("p-cool").value = p.cool;
-  toast("预设已填入表单，点「💾 保存策略」生效");
+/* ---- 情景预设（v0.4.17-l3：对接 action.toml 内存切换，不再写磁盘） ---- */
+let PRESETS = { presets: [], active: "" };   // sunctl policy preset list
+async function fetchPresets() {
+  const r = await exec(SUNCTL + " policy preset list");
+  try { PRESETS = JSON.parse(r.stdout) || PRESETS; } catch (e) { /* 老 daemon 无 preset 命令 → 保持空 */ }
+  return PRESETS;
+}
+function renderPresets() {
+  const grid = $("preset-grid");
+  const note = $("preset-note");
+  const list = PRESETS.presets || [];
+  if (!list.length) {
+    grid.innerHTML = '<div class="empty">无预设（conf/action.toml 缺失或为空）</div>';
+    note.textContent = "";
+    $("preset-active-row").classList.add("hidden");
+    return;
+  }
+  note.textContent = list.length + " 个";
+  const active = PRESETS.active || "";
+  grid.innerHTML = list.map(p =>
+    '<button class="preset-btn' + (p.name === active ? " active" : "") + (p.enabled ? "" : "") + '" data-preset="' + esc(p.name) + '">' +
+    '<span class="pt">' + esc(p.name) + "</span>" +
+    '<span class="pd">' + (p.enabled ? "开启" : "关闭") + " · grace " + p.grace_seconds + "s · 冷却 " + p.cooldown_seconds + "s" +
+    (p.keep_media ? " · 媒体豁免" : "") + "</span>" +
+    "</button>"
+  ).join("");
+  $("preset-active-row").classList.toggle("hidden", !active);
+}
+async function applyPreset(name) {
+  if (!name) return;
+  toast("正在应用预设 " + name + "…");
+  const r = await exec(SUNCTL + " policy preset apply " + name);
+  let j = null;
+  try { j = JSON.parse(r.stdout); } catch (e) { j = null; }
+  if (!j || j.ok !== 1) { toast("❌ 预设应用失败: " + ((j && j.error) || r.stderr || "未知")); return; }
+  await refreshPolicyForm();
+  toast("✅ 预设 " + name + " 已生效（内存切换，未改动磁盘配置）");
+}
+async function clearPreset() {
+  toast("正在清除预设…");
+  const r = await exec(SUNCTL + " policy preset clear");
+  let j = null;
+  try { j = JSON.parse(r.stdout); } catch (e) { j = null; }
+  if (!j || j.ok !== 1) { toast("❌ 清除预设失败: " + ((j && j.error) || r.stderr || "未知")); return; }
+  await refreshPolicyForm();
+  toast("✅ 预设已清除，回落磁盘参数");
 }
 async function quickAddWhitelist(pkg) {
   await refreshPolicyForm();
@@ -1074,8 +1096,12 @@ function init() {
   document.querySelectorAll(".tab").forEach(el => el.onclick = () => showTab(el.dataset.page));
   // 策略页开关
   bindSwitch($("p-enabled")); bindSwitch($("p-kfg")); bindSwitch($("p-km"));
-  // 预设模式
-  document.querySelectorAll(".preset-btn").forEach(el => el.onclick = () => applyPreset(el.dataset.preset));
+  // 情景预设（动态渲染，事件委托）
+  $("preset-grid").onclick = e => {
+    const b = e.target.closest(".preset-btn");
+    if (b) applyPreset(b.dataset.preset);
+  };
+  $("btn-preset-clear").onclick = clearPreset;
   // 最近焦点 -> 快捷加白名单
   $("focus-recent").onclick = e => {
     const b = e.target.closest("[data-addwl]");
