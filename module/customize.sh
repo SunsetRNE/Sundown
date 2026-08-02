@@ -76,6 +76,20 @@ else
     ui_print "- 已存在属性备份，跳过。"
 fi
 
+# ========== L3 conf 模板首次部署（v0.4.16-l3 起） ==========
+# 数据目录 conf/ 无任何 .toml/.json 配置时，从模块模板部署默认配置
+# （policy.toml 观望模式 + action.toml 情景预设示例）；
+# 已存在配置（含用户手工写入/旧版遗留）一律保留——用户配置优先是铁律。
+CONF_DIR="$SUNDOWN_DIR/conf"
+mkdir -p "$CONF_DIR"
+if ! find "$CONF_DIR" -maxdepth 1 \( -name '*.toml' -o -name '*.json' \) 2>/dev/null | grep -q .; then
+    ui_print "- 首次部署 L3 conf 模板（观望模式 + 情景预设示例）..."
+    cp "$MODPATH/conf/"*.toml "$CONF_DIR/" 2>/dev/null
+    chmod 0644 "$CONF_DIR/"*.toml 2>/dev/null
+else
+    ui_print "- conf 已存在配置，保留（用户配置优先）。"
+fi
+
 rm -f "$MI_PROP_FILE" "$OPLUS_PROP_FILE" "$QTI_PROP_FILE"
 
 ui_print " "
