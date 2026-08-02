@@ -10,7 +10,7 @@ INSTALLED_META="$SUNDOWN_DIR/update/installed.json"
 READY_MARKER="$SUNDOWN_DIR/update/daemon.ready"
 SOCK_PATH="$SUNDOWN_DIR/sundownd.sock"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.4.9-l3"
+VERSION="0.4.10-l3"
 
 # ---------- 工具函数 ----------
 
@@ -35,7 +35,7 @@ sock_query() {
     command -v nc >/dev/null 2>&1 || return 1
     resp="$(printf '%s\n' "$1" | nc -U -w 2 "$SOCK_PATH" 2>/dev/null | head -n 1)"
     case "$resp" in
-        \{*\}) printf '%s' "$resp"; return 0 ;;
+        \{*\}|\[*\]) printf '%s' "$resp"; return 0 ;;
         *)     return 1 ;;
     esac
 }
