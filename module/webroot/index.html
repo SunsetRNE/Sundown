@@ -656,8 +656,17 @@ function renderApps() {
 }
 let DASH_STATS = null;
 async function fetchLogStats() {
-  const r = await exec(SUNCTL + " logs --engine 400");
-  DASH_STATS = analyzeLogs(r.stdout || "");
+  // v3：结构化事件缓冲（400 条上限，环形 256 内为全量）
+  const r = await exec(SUNCTL + " events 400");
+  let evs = null;
+  try { evs = JSON.parse(r.stdout); } catch (e) { evs = null; }
+  if (Array.isArray(evs)) {
+    DASH_STATS = analyzeLogs(evs);
+  } else {
+    // 降级：老 daemon → 文本日志统计
+    const r2 = await exec(SUNCTL + " logs --engine 400");
+    DASH_STATS = analyzeLogs(r2.stdout || "");
+  }
   renderWakeRank();
   renderFocusRecent();
 }
@@ -821,7 +830,54 @@ async function copyText(text) {
   }
 }
 
-/* ================= 日志页 ================= */
+/* ================= 日志页 v3（结构化事件流，L3.1） ================= */
+// 结构化事件 → 卡片模型：type/icon 由 level/action/reason 推导，UI 结构沿用 v2.2
+const REASON_CN = { broadcast: "广播", pendingintent: "待定意图", service: "服务", alarm: "闹钟", signal: "信号" };
+const ACT_CN = { open: "打开", close: "关闭", freeze: "冻结", unfreeze: "解冻", delay: "退后台计时", exempt: "豁免", policy: "策略", system: "系统" };
+const RSN_CN_EXT = Object.assign({
+  focus: "焦点", wakeup: "唤醒", grace: "宽限中", grace_expired: "宽限到期", force: "立即冻结",
+  foreground: "回到前台", per_app_exempt: "per-app 豁免", exempt_action: "豁免动作", tick_exempt: "tick 豁免",
+  no_procs: "无进程", freeze_failed: "冻结失败", foreground_failed: "解冻失败", wakeup_failed: "唤醒解冻失败",
+  policy_disabled: "策略关闭", reloaded: "已重载", reload_failed: "重载失败",
+  probe_handshake: "探针握手", dex_handshake: "dex 握手", dex_reregister: "dex 重登记", bridge_report: "bridge 上报",
+  daemon_start: "守护启动", daemon_stop: "守护停止"
+}, REASON_CN);
+const WAKE_ICON = { broadcast: "📡", service: "🛎️", pendingintent: "⏰", alarm: "⏰", signal: "📶" };
+function fmtTs(ts) {
+  const d = new Date((ts || 0) * 1000);
+  const p = n => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate())
+    + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+}
+function parseEvent(ev) {
+  const lvl = ev.level || "", act = ev.action || "", rsn = ev.reason || "", pkg = ev.pkg || "";
+  const out = { type: "sys", icon: "ℹ️", ts: ev.ts, time: fmtTs(ev.ts), raw: JSON.stringify(ev),
+    title: pkg || (ev.msg || act), sub: "", pkg: pkg || null, badges: [], dwell: null };
+  // 级别优先：error/warn 覆盖动作归类
+  if (lvl === "error") { out.type = "err"; out.icon = "⛔"; }
+  else if (lvl === "warn") { out.type = "warn"; out.icon = "⚠️"; }
+  else if (act === "open") {
+    if (rsn === "wakeup") { out.type = "wake"; out.icon = WAKE_ICON[ev.msg] || "🔔"; }
+    else { out.type = "focus"; out.icon = "🎯"; }
+  } else if (act === "exempt") { out.type = "exempt"; out.icon = "🛡️"; }
+  else if (act === "freeze") { out.type = "freeze"; out.icon = "❄️"; }
+  else if (act === "unfreeze") { out.type = "freeze"; out.icon = "🌤️"; }
+  else if (act === "delay") { out.type = "freeze"; out.icon = "⏳"; }
+  else if (act === "policy" || act === "system") { out.type = "sys"; out.icon = "📦"; }
+  // 副标题：动作 · 原因 · 补充
+  const parts = [ACT_CN[act] || act];
+  if (rsn && RSN_CN_EXT[rsn]) parts.push(RSN_CN_EXT[rsn]);
+  if (ev.msg && !(act === "open" && rsn === "wakeup")) parts.push(String(ev.msg));
+  out.sub = parts.join(" · ");
+  // badges
+  if (lvl === "success") out.badges.push({ cls: "ok", txt: "成功" });
+  if (rsn === "force") out.badges.push({ cls: "force", txt: "force" });
+  if (rsn === "grace") out.badges.push({ cls: "timer", txt: "计时中" });
+  if (rsn === "grace_expired") out.badges.push({ cls: "timer", txt: "到期" });
+  if (rsn.indexOf("exempt") >= 0) out.badges.push({ cls: "exempt", txt: "豁免" });
+  if (!pkg && ev.subject === "system") out.badges.push({ cls: "sys", txt: "系统" });
+  return out;
+}
 function parseLogLine(line) {
   const m = line.match(/^\[([^\]]+)\]\s*\[(\w+)\]\s*(.*)$/);
   if (!m) return null;
@@ -866,13 +922,38 @@ const fmtDur = ms => {
   return s < 60 ? s + "s" : Math.floor(s / 60) + "m" + (s % 60) + "s";
 };
 let LOGS_RAW = "";
+let LOG_MODE = "events"; // events=结构化主路径（v3）; text=降级文本解析（老 daemon）
 async function refreshLogs() {
   const lines = $("log-lines").value;
-  const r = await exec(SUNCTL + " logs --engine " + lines);
-  const raw = (r.stdout || "").trim() || (r.stderr || "暂无日志");
+  // v3 主路径：结构化事件缓冲（JSON 数组）
+  const r = await exec(SUNCTL + " events " + lines);
+  let evs = null;
+  try { evs = JSON.parse(r.stdout); } catch (e) { evs = null; }
+  if (Array.isArray(evs)) {
+    LOG_MODE = "events";
+    LOGS_RAW = JSON.stringify(evs, null, 2);
+    renderLogStats(evs);
+    const parsed = evs.map(parseEvent);
+    // 焦点停留时长（相邻 focus 事件 ts 秒差）
+    let prevFocus = null;
+    parsed.forEach(p => {
+      if (p.type === "focus" && p.ts) {
+        if (prevFocus != null && p.ts > prevFocus) {
+          const d = (p.ts - prevFocus) * 1000;
+          if (d > 1000 && d < 3600000) p.dwell = d;
+        }
+        prevFocus = p.ts;
+      }
+    });
+    renderLogCards(parsed);
+    return;
+  }
+  // 降级：老 daemon（无 events 命令）→ 文本日志正则解析
+  LOG_MODE = "text";
+  const r2 = await exec(SUNCTL + " logs --engine " + lines);
+  const raw = (r2.stdout || "").trim() || (r2.stderr || "暂无日志");
   LOGS_RAW = raw;
   renderLogStats(raw);
-  // 解析 + 焦点停留时长（相邻焦点事件时间差）
   const parsed = raw.split("\n").map(parseLogLine).filter(Boolean);
   let prevFocus = null;
   parsed.forEach(p => {
@@ -885,6 +966,10 @@ async function refreshLogs() {
       prevFocus = t;
     }
   });
+  renderLogCards(parsed);
+}
+// 公共卡片渲染（过滤 chips + 搜索 + 卡片流；v2.2 交互不变）
+function renderLogCards(parsed) {
   const kw = ($("log-search").value || "").trim().toLowerCase();
   const cards = parsed.filter(p => {
     if (logFilter !== "all" && p.type !== logFilter && !(logFilter === "err" && (p.type === "err" || p.type === "warn"))) return false;
@@ -909,9 +994,28 @@ async function refreshLogs() {
     : '<span class="empty">（当前过滤条件下无匹配事件）</span>';
   box.scrollTop = box.scrollHeight;
 }
-function analyzeLogs(raw) {
+function analyzeLogs(src) {
   const st = { focus: {}, wake: {}, reason: {}, total: { focus: 0, wake: 0, exempt: 0, freeze: 0, err: 0 } };
-  (raw || "").split("\n").forEach(l => {
+  // v3 结构化模式：事件数组
+  if (Array.isArray(src)) {
+    src.forEach(ev => {
+      const act = ev.action || "", rsn = ev.reason || "", lvl = ev.level || "", pkg = ev.pkg || "未知";
+      if (act === "open" && rsn === "focus") {
+        st.focus[pkg] = (st.focus[pkg] || 0) + 1; st.total.focus++;
+      } else if (act === "open" && rsn === "wakeup") {
+        st.wake[pkg] = (st.wake[pkg] || 0) + 1;
+        st.reason[ev.msg || "?"] = (st.reason[ev.msg || "?"] || 0) + 1; st.total.wake++;
+      } else if (act === "exempt") {
+        st.total.exempt++;
+      } else if (act === "freeze" || act === "unfreeze" || act === "delay") {
+        st.total.freeze++;
+      }
+      if (lvl === "error" || lvl === "warn") st.total.err++;
+    });
+    return st;
+  }
+  // 降级文本模式（老 daemon）
+  (src || "").split("\n").forEach(l => {
     let m;
     if ((m = l.match(/焦点切换: ([^\s（(]+)/))) {
       st.focus[m[1]] = (st.focus[m[1]] || 0) + 1; st.total.focus++;
@@ -929,7 +1033,6 @@ function analyzeLogs(raw) {
   });
   return st;
 }
-const REASON_CN = { broadcast: "广播", pendingintent: "待定意图", service: "服务", alarm: "闹钟", "signal": "信号" };
 function renderLogStats(raw) {
   const st = analyzeLogs(raw);
   $("ls-focus").textContent = st.total.focus;
