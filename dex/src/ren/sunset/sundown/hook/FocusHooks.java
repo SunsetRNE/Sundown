@@ -9,6 +9,7 @@ import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
 
+import ren.sunset.sundown.ExemptMonitor;
 import ren.sunset.sundown.hook.NativeBridge.Hooker;
 import ren.sunset.sundown.hook.NativeBridge.MethodCallback;
 
@@ -32,10 +33,13 @@ final class FocusHooks implements HookEngine {
     private static final String ATMS = "com.android.server.wm.ActivityTaskManagerService";
 
     private final LsPlantBridge.EventDispatcher dispatcher;
+    /** L3 豁免判定监视器（独立线程；focus 回调仅登记，零锁内开销） */
+    private final ExemptMonitor monitor;
     private final List<Hooker> hookers = new ArrayList<>();
 
-    FocusHooks(LsPlantBridge.EventDispatcher dispatcher) {
+    FocusHooks(LsPlantBridge.EventDispatcher dispatcher, ExemptMonitor monitor) {
         this.dispatcher = dispatcher;
+        this.monitor = monitor;
     }
 
     @Override
@@ -84,6 +88,10 @@ final class FocusHooks implements HookEngine {
             }
             if (pkg != null) {
                 dispatcher.dispatch("event focus pkg=" + pkg);
+                // L3：登记最近焦点（ExemptMonitor 独立线程做 fg/media 豁免判定）
+                if (monitor != null) {
+                    monitor.observe(pkg);
+                }
             }
         } catch (Throwable t) {
             Log.w(TAG, "焦点事件提取失败: " + t);
@@ -120,13 +128,26 @@ final class FocusHooks implements HookEngine {
 
     // ---------------- 工具 ----------------
 
-    /** 从实参提取 pid：Integer 直取，否则反射 ProcessRecord.pid（低频事件，逐次反射可接受） */
+    /** 从实参提取 pid：Integer 直取，否则反射 ProcessRecord.pid（低频事件，逐次反射可接受）；
+     *  proc-add 附加 pkg/uid（ProcessRecord.processName/uid 纯字段读，AMS 锁内安全），
+     *  缺失时 daemon 从 /proc/<pid>/status 兜底 */
     private void reportPid(MethodCallback cb, String kind) {
         try {
             for (Object a : cb.args) {
                 Integer pid = extractPid(a);
                 if (pid != null) {
-                    dispatcher.dispatch("event " + kind + " pid=" + pid);
+                    String line = "event " + kind + " pid=" + pid;
+                    if ("proc-add".equals(kind)) {
+                        String pkg = extractProcessName(a);
+                        Integer uid = extractUid(a);
+                        if (pkg != null) {
+                            line += " pkg=" + pkg;
+                        }
+                        if (uid != null) {
+                            line += " uid=" + uid;
+                        }
+                    }
+                    dispatcher.dispatch(line);
                     return;
                 }
             }
@@ -142,6 +163,37 @@ final class FocusHooks implements HookEngine {
             Field f = arg.getClass().getDeclaredField("pid");
             f.setAccessible(true);
             return f.getInt(arg);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** ProcessRecord.processName → 主包名（截冒号前缀；无冒号原样返回） */
+    private static String extractProcessName(Object arg) {
+        if (arg == null) return null;
+        try {
+            Field f = arg.getClass().getDeclaredField("processName");
+            f.setAccessible(true);
+            Object v = f.get(arg);
+            if (v instanceof String) {
+                String s = (String) v;
+                int c = s.indexOf(':');
+                return (c > 0) ? s.substring(0, c) : s;
+            }
+        } catch (Throwable ignored) {
+            // 字段缺失/类型漂移 → 交给 daemon 兜底
+        }
+        return null;
+    }
+
+    /** ProcessRecord.uid（有效 uid）；无效值返回 null */
+    private static Integer extractUid(Object arg) {
+        if (arg == null) return null;
+        try {
+            Field f = arg.getClass().getDeclaredField("uid");
+            f.setAccessible(true);
+            int v = f.getInt(arg);
+            return (v >= 0) ? Integer.valueOf(v) : null;
         } catch (Throwable ignored) {
             return null;
         }

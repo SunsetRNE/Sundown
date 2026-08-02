@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import dalvik.system.DexClassLoader;
+import ren.sunset.sundown.ExemptMonitor;
 
 /**
  * LSPlant 引擎装配（L2b）：bridge.dex 父链 + 伴生库加载 + hook 组编排。
@@ -91,12 +92,12 @@ public final class LsPlantBridge {
     }
 
     /** 装配引擎：伴生库不可用 → no-op 降级（dev/旧模块/引导代场景不阻塞闭环） */
-    public static HookEngine create(EventDispatcher dispatcher) {
+    public static HookEngine create(EventDispatcher dispatcher, ExemptMonitor monitor) {
         if (!loadNative()) {
             return new NoopEngine();
         }
         List<HookEngine> engines = new ArrayList<>();
-        engines.add(new FocusHooks(dispatcher));
+        engines.add(new FocusHooks(dispatcher, monitor));
         engines.add(new WakeupHooks(dispatcher));
         return new CompositeEngine(engines);
     }

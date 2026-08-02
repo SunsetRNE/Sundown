@@ -1,6 +1,9 @@
 # Rust 构建产物
 daemon/target/
 target/
+# 本机 arm64 交叉编译配置（NDK x86_64 prebuilt 在 arm64 宿主不可执行，见 docs/l3-plan.md §6；
+# 路径为本机 /opt/android-ndk-r29，提交会污染 CI 标准 cargo-ndk 流程）
+daemon/.cargo/
 
 # C++ 探针桩构建产物
 probe/build/

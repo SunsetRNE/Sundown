@@ -1,0 +1,40 @@
+# Sundown L3 冻结策略（conf/policy.toml）— inotify 热加载，修改保存即生效
+# 失败安全铁律：语法错误 → 保留旧表 + 日志留痕；未知键/段 → 警告不致命
+#
+# ⚠️ 发布默认 enabled=false（观望模式）：冻结是强副作用操作，确认无异常后再开启。
+# 实测教训（2026-08-02）：grace=10s + 无豁免字段会误冻高频 app（含 AI 助手自身）→
+# binder 阻塞 ANR/闪退；启用前请先完善白名单并观察 grace_pending 列表。
+#
+# [general]   enabled 总开关 / grace_seconds 退后台宽限秒数 / cooldown_seconds 解冻后冷却秒数
+# [freeze]    force 立即冻结包（不走 grace）
+# [whitelist] packages 豁免包（退后台不冻结）/ keep_fg_service 前台服务豁免 / keep_media 媒体播放豁免
+# [defense]   防御 hook 组（本期仅解析，不启用——L3.1）
+
+[general]
+enabled = false
+grace_seconds = 30
+cooldown_seconds = 60
+
+[freeze]
+force = []
+
+[whitelist]
+packages = [
+    "com.android.systemui",
+    "com.android.settings",
+    "com.android.phone",
+    "com.android.launcher3",
+    "com.android.launcher",
+    "com.oplus.launcher",
+    "com.coloros.launcher",
+    "com.google.android.gms",
+    "com.google.android.gsf",
+    "com.ai.assistance.operit",
+    "com.resukisu.resukisu",
+]
+keep_fg_service = true
+keep_media = true
+
+[defense]
+anr_protect = false
+cached_app_optimizer = false

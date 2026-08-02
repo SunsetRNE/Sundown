@@ -75,8 +75,9 @@ daemon 重启/断线：dex 侧每 2s 重连重握手（对齐 L1 桩哲学）。
 |---|---|---|
 | `report-bridge <hash>` | 伴生库（libsundownhook）build hash 上报（hello-dex 后紧随） | `{"ok":1,"bridge_hash_match":1\|0\|-1}` |
 | `event focus pkg=<pkg>` | 前台焦点切换（AMS#updateActivityUsageStats 实证点位） | `{"ok":1}` |
+| `event exempt pkg=<pkg> fg=0\|1 media=0\|1` | 【L3】豁免判定监视器上行（独立线程 2s 节拍：前台服务 / 媒体播放，判定变化才发；daemon 决策消费） | `{"ok":1}` |
 | `event wakeup pkg=<pkg> reason=<broadcast\|service\|pendingintent>` | 唤醒入口命中 | `{"ok":1}` |
-| `event proc-add/proc-remove/force-stop ...` | 进程生命周期（L3 进程表接入点） | `{"ok":1}` |
+| `event proc-add pid=<n> pkg=<pkg> [uid=<n>] / proc-remove pid=<n> / force-stop pkg=<pkg>` | 进程生命周期（L3 进程表接入点；proc-add 附 pkg/uid，缺失时 daemon 从 /proc/<pid>/status 兜底） | `{"ok":1}` |
 
 - 未知 event 子类型容错 `{"ok":1,"ignored":1}`（新旧版本滚动不炸）
 - 事件由 hook 回调经 `EventQueue` 非阻塞投递（回调可能持有 AMS 锁，绝不阻塞），

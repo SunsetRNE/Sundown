@@ -10,10 +10,14 @@
 //!   sundownd --version  打印版本（含 release_no，供 staged 更新元数据生成）
 
 mod config;
+mod engine;
+mod freezer;
 mod logging;
 mod paths;
+mod policy;
 mod sock;
 mod state;
+mod toml;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -111,21 +115,28 @@ fn main() {
     };
 
     // 等待 socket 就绪（最多 2 秒）后写 ready 标记
+    // 单实例守护：若 serve 让位/失败（SHUTDOWN 已置位）→ 不写 ready，也不动活跃实例的标记
     let mut waited = 0;
     while waited < 20 && !std::path::Path::new(paths::SOCKET_PATH).exists() {
         std::thread::sleep(std::time::Duration::from_millis(100));
         waited += 1;
     }
-    match write_ready_marker() {
-        Ok(_) => logi!("ready 标记已写入: {}", paths::READY_MARKER),
-        Err(e) => loge!("ready 标记写入失败: {}（service.sh readiness 校验将失败并回滚）", e),
+    if SHUTDOWN.load(Ordering::Relaxed) {
+        logw!("socket 服务未就绪（已有实例/异常），跳过 ready 标记");
+    } else {
+        match write_ready_marker() {
+            Ok(_) => logi!("ready 标记已写入: {}", paths::READY_MARKER),
+            Err(e) => loge!("ready 标记写入失败: {}（service.sh readiness 校验将失败并回滚）", e),
+        }
     }
 
-    // 主循环：响应退出标志（信号 / socket stop 命令）
+    // 主循环：响应退出标志（信号 / socket stop 命令）+ L3 策略引擎定时推进
     loop {
         if SHUTDOWN.load(Ordering::Relaxed) {
             break;
         }
+        // L3：grace 到期冻结 / 冷却清理 / 策略关闭全量解冻（300ms 节拍）
+        state.engine.lock().unwrap().tick();
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
 

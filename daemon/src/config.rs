@@ -17,7 +17,8 @@ pub fn request_reload(state: &Arc<DaemonState>) {
         "配置重载触发（手动），累计 {} 次",
         state.config_reloads.load(std::sync::atomic::Ordering::Relaxed)
     );
-    // TODO(L3): 解析 conf/*.toml，重建策略表，失败保留旧表
+    // L3：重建策略表（解析失败保留旧表——engine.reload_policy 内部保证）
+    state.engine.lock().unwrap().reload_policy();
 }
 
 /// inotify 监听线程入口（阻塞循环，由 main 起线程运行）。
@@ -73,7 +74,8 @@ pub fn watch_conf(state: Arc<DaemonState>) {
                             ev.mask,
                             state.config_reloads.load(std::sync::atomic::Ordering::Relaxed)
                         );
-                        // TODO(L3): 增量重载该文件
+                        // L3：策略热加载（解析失败保留旧表——engine.reload_policy 内部保证）
+                        state.engine.lock().unwrap().reload_policy();
                     } else {
                         logw!("忽略非策略文件变更: {}", name);
                     }

@@ -80,8 +80,52 @@ fn bind_abstract(name: &str) -> std::io::Result<UnixListener> {
     }
 }
 
+/// 尝试连接 abstract socket：成功 = 已有活跃 daemon 实例（单实例守护探测）。
+/// abstract 是 daemon 的存活标志（文件 socket 可能因异常退出残留死文件）。
+fn abstract_connect(name: &str) -> std::io::Result<()> {
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = name.as_bytes();
+        if bytes.len() > addr.sun_path.len() - 1 {
+            libc::close(fd);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "abstract socket 名过长",
+            ));
+        }
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr() as *const libc::c_char,
+            addr.sun_path.as_mut_ptr().add(1),
+            bytes.len(),
+        );
+        let len = (std::mem::size_of::<libc::sa_family_t>() + 1 + bytes.len()) as libc::socklen_t;
+        let r = libc::connect(fd, &addr as *const _ as *const libc::sockaddr, len);
+        libc::close(fd);
+        if r < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 pub fn serve(state: Arc<DaemonState>, shutdown: Arc<AtomicBool>) -> std::io::Result<()> {
-    // 清理陈旧 socket 文件
+    // 单实例守护：已有活跃 daemon（abstract 探针 socket 被监听）→ 本进程让位退出，
+    // 绝不 remove/bind 抢占其 socket 路径（修复双实例互踩：watchdog 兜底拉起与
+    // restart-daemon 竞争时，后启动者必须退出而非破坏活跃实例）
+    if abstract_connect(paths::PROBE_ABSTRACT_SOCK).is_ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "已有 sundownd 实例在运行（abstract 探测命中），本实例让位退出",
+        ));
+    }
+
+    // 到这里才允许清理陈旧 socket 文件（探测失败 = 无活跃实例，残留必为死文件）
     let _ = std::fs::remove_file(paths::SOCKET_PATH);
 
     let listener = UnixListener::bind(paths::SOCKET_PATH)?;
@@ -95,7 +139,15 @@ pub fn serve(state: Arc<DaemonState>, shutdown: Arc<AtomicBool>) -> std::io::Res
     logi!("控制 socket 已监听: {}", paths::SOCKET_PATH);
 
     // L1 桩 / L2 dex 通道：abstract namespace socket（无文件路径，system_server 可直连）
-    let probe_listener = bind_abstract(paths::PROBE_ABSTRACT_SOCK)?;
+    let probe_listener = match bind_abstract(paths::PROBE_ABSTRACT_SOCK) {
+        Ok(l) => l,
+        Err(e) => {
+            // 竞态窗口内 abstract 被抢占（极小概率）→ 让位：清理自己刚 bind 的文件
+            // socket 路径后退出（活跃实例随后会重新 bind 文件 socket 路径）
+            let _ = std::fs::remove_file(paths::SOCKET_PATH);
+            return Err(e);
+        }
+    };
     probe_listener.set_nonblocking(true)?;
     logi!("探针 socket 已监听（abstract）: @{}", paths::PROBE_ABSTRACT_SOCK);
 
@@ -201,6 +253,14 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>, mgmt: bool) -> std::
                 push_dex(&state, arg)
             }
         }
+        "policy" => {
+            // L3 策略管理（仅 root 管理面；abstract 面仅桩/dex 消费）
+            if !mgmt {
+                "{\"ok\":0,\"error\":\"policy is management-channel only\"}".to_string()
+            } else {
+                handle_policy(&state, arg)
+            }
+        }
         "stop" => {
             logi!("收到 stop 命令，优雅退出");
             writer.write_all(b"{\"ok\":1,\"stopping\":1}\n")?;
@@ -271,7 +331,7 @@ fn dex_subscription_loop(
     }
 }
 
-/// L2b 事件分发（观测模式：只记录/计数，不做任何动作）。
+/// L2b/L3 事件分发：观测记录 + L3 策略引擎消费。
 /// 未知子类型容错 {"ok":1,"ignored":1}——新旧版本滚动期间协议单向兼容。
 fn handle_event(state: &DaemonState, arg: &str) -> String {
     let mut parts = arg.split_whitespace();
@@ -282,15 +342,27 @@ fn handle_event(state: &DaemonState, arg: &str) -> String {
         rest.iter()
             .find_map(|t| t.strip_prefix(prefix.as_str()).map(|v| v.to_string()))
     };
+    let kv_u32 = |key: &str| -> Option<u32> {
+        kv(key).and_then(|v| v.parse::<u32>().ok())
+    };
+    let kv_bool = |key: &str| -> bool {
+        kv(key).map(|v| v == "1").unwrap_or(false)
+    };
     match kind {
         "focus" => match kv("pkg") {
             Some(pkg) => {
                 state.record_focus(&pkg);
+                let fg = kv_bool("fg");
+                let media = kv_bool("media");
                 logi!(
-                    "焦点切换: {}（累计 {} 次）",
+                    "焦点切换: {}（fg={} media={}，累计 {} 次）",
                     pkg,
+                    fg,
+                    media,
                     state.focus_changes.load(std::sync::atomic::Ordering::Relaxed)
                 );
+                // L3：决策状态机消费
+                state.engine.lock().unwrap().on_focus(&pkg, fg, media);
                 "{\"ok\":1}".to_string()
             }
             None => "{\"ok\":0,\"error\":\"event focus requires pkg=\"}".to_string(),
@@ -307,13 +379,133 @@ fn handle_event(state: &DaemonState, arg: &str) -> String {
                     n
                 );
             }
+            // L3：冻结中 → 解冻 + 冷却（防唤醒失效）
+            if let Some(pkg) = kv("pkg") {
+                state.engine.lock().unwrap().on_wakeup(&pkg);
+            }
             "{\"ok\":1}".to_string()
         }
-        "proc-add" | "proc-remove" | "force-stop" => {
-            // L2b 观测面暂只应答（进程表随 L3 策略引擎接入）
-            "{\"ok\":1}".to_string()
+        "exempt" => match kv("pkg") {
+            // L3：dex 豁免判定监视器上行（fg/media，独立线程判定，2s 节拍）
+            Some(pkg) => {
+                let fg = kv_bool("fg");
+                let media = kv_bool("media");
+                logi!("豁免判定: {}（fg={} media={}）", pkg, fg, media);
+                state.engine.lock().unwrap().on_exempt(&pkg, fg, media);
+                "{\"ok\":1}".to_string()
+            }
+            None => "{\"ok\":0,\"error\":\"event exempt requires pkg=\"}".to_string(),
+        },
+        "proc-add" => {
+            // L3 进程表：pid→pkg 索引（uid 缺失时经 /proc/<pid>/status 兜底）
+            match (kv_u32("pid"), kv("pkg")) {
+                (Some(pid), Some(pkg)) => {
+                    let uid = kv_u32("uid").or_else(|| crate::freezer::pid_uid(pid));
+                    state.engine.lock().unwrap().on_proc_add(pid, &pkg, uid);
+                    "{\"ok\":1}".to_string()
+                }
+                _ => "{\"ok\":0,\"error\":\"event proc-add requires pid= and pkg=\"}".to_string(),
+            }
         }
+        "proc-remove" => match kv_u32("pid") {
+            Some(pid) => {
+                state.engine.lock().unwrap().on_proc_remove(pid);
+                "{\"ok\":1}".to_string()
+            }
+            None => "{\"ok\":0,\"error\":\"event proc-remove requires pid=\"}".to_string(),
+        },
+        "force-stop" => match kv("pkg") {
+            Some(pkg) => {
+                state.engine.lock().unwrap().on_force_stop(&pkg);
+                "{\"ok\":1}".to_string()
+            }
+            None => "{\"ok\":0,\"error\":\"event force-stop requires pkg=\"}".to_string(),
+        },
         _ => format!("{{\"ok\":1,\"ignored\":1,\"kind\":\"{}\"}}", kind),
+    }
+}
+
+/// policy 管理命令（仅 root 管理面）：
+///   policy status  -> 策略状态 JSON（enabled/revision/冻结表/grace/计数）
+///   policy reload  -> 强制从磁盘重载（失败保留旧表）
+fn handle_policy(state: &DaemonState, arg: &str) -> String {
+    match arg {
+        "status" => {
+            let eng = state.engine.lock().unwrap();
+            let frozen = eng.frozen_packages();
+            let grace = eng.grace_pending();
+            let frozen_json = format!(
+                "[{}]",
+                frozen.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(",")
+            );
+            let grace_json = format!(
+                "[{}]",
+                grace.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(",")
+            );
+            format!(
+                concat!(
+                    "{{",
+                    "\"ok\":1,",
+                    "\"enabled\":{enabled},",
+                    "\"revision\":{rev},",
+                    "\"grace_seconds\":{grace_s},",
+                    "\"cooldown_seconds\":{cool_s},",
+                    "\"whitelist\":{wl},",
+                    "\"force\":{force},",
+                    "\"frozen_packages\":{frozen},",
+                    "\"grace_pending\":{grace},",
+                    "\"freeze_ops\":{freeze_ops},",
+                    "\"unfreeze_ops\":{unfreeze_ops},",
+                    "\"wakeup_thaws\":{thaws},",
+                    "\"last_focus\":{focus}",
+                    "}}"
+                ),
+                enabled = eng.policy.enabled,
+                rev = eng.policy.revision,
+                grace_s = eng.policy.grace_seconds,
+                cool_s = eng.policy.cooldown_seconds,
+                wl = format!(
+                    "[{}]",
+                    eng.policy
+                        .whitelist
+                        .iter()
+                        .map(|s| format!("\"{}\"", s))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                force = format!(
+                    "[{}]",
+                    eng.policy
+                        .force
+                        .iter()
+                        .map(|s| format!("\"{}\"", s))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                frozen = frozen_json,
+                grace = grace_json,
+                freeze_ops = eng.freeze_ops,
+                unfreeze_ops = eng.unfreeze_ops,
+                thaws = eng.wakeup_thaws,
+                focus = eng
+                    .last_focus
+                    .as_ref()
+                    .map(|p| format!("\"{}\"", p))
+                    .unwrap_or_else(|| "null".to_string()),
+            )
+        }
+        "reload" => {
+            let mut eng = state.engine.lock().unwrap();
+            eng.reload_policy();
+            format!(
+                "{{\"ok\":1,\"enabled\":{},\"revision\":{}}}",
+                eng.policy.enabled, eng.policy.revision
+            )
+        }
+        other => format!(
+            "{{\"ok\":0,\"error\":\"policy: unknown subcommand: {}\"}}",
+            other
+        ),
     }
 }
 

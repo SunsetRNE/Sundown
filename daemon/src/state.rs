@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::paths;
+use crate::engine::EngineState;
+use crate::{logi, logw, paths};
 
 /// L1 探针桩的 hello-probe 上报记录
 pub struct ProbeReport {
@@ -56,6 +57,8 @@ pub struct DaemonState {
     pub focus_changes: AtomicU64,
     /// 唤醒入口命中累计次数（event wakeup 上行）
     pub wakeup_events: AtomicU64,
+    /// L3 策略引擎（策略表 + 冻结表 + 决策状态机）
+    pub engine: Mutex<EngineState>,
 }
 
 /// 从模块目录读取期望 hash（启动 / reload-config 时调用）
@@ -99,7 +102,28 @@ impl DaemonState {
             last_focus_pkg: Mutex::new(None),
             focus_changes: AtomicU64::new(0),
             wakeup_events: AtomicU64::new(0),
+            engine: Mutex::new(Self::init_engine()),
         }
+    }
+
+    /// 初始策略：读 conf/policy.toml，失败用默认（策略关闭，观测优先）
+    fn init_engine() -> EngineState {
+        let mut e = EngineState::default();
+        if let Some((p, _)) = crate::policy::Policy::load() {
+            logi!(
+                "L3 策略已加载: enabled={} grace={}s cooldown={}s whitelist={} force={}（revision={}）",
+                p.enabled,
+                p.grace_seconds,
+                p.cooldown_seconds,
+                p.whitelist.len(),
+                p.force.len(),
+                p.revision
+            );
+            e.policy = p;
+        } else {
+            logw!("L3 初始策略缺失/解析失败（策略关闭，观测模式）: {}", paths::POLICY_FILE);
+        }
+        e
     }
 
     pub fn uptime_secs(&self) -> u64 {
@@ -253,6 +277,18 @@ impl DaemonState {
             Some(p) => format!("\"{}\"", p),
             None => "null".to_string(),
         };
+        // L3 策略引擎快照（契约只增不改）
+        let eng = self.engine.lock().unwrap();
+        let frozen_json = json_str_array(&eng.frozen_packages());
+        let grace_json = json_str_array(&eng.grace_pending());
+        let (policy_enabled, policy_revision, freeze_ops, unfreeze_ops, wakeup_thaws) = (
+            eng.policy.enabled,
+            eng.policy.revision,
+            eng.freeze_ops,
+            eng.unfreeze_ops,
+            eng.wakeup_thaws,
+        );
+        drop(eng);
         format!(
             concat!(
                 "{{",
@@ -272,6 +308,13 @@ impl DaemonState {
                 "\"focus_pkg\":{focus_pkg},",
                 "\"focus_changes\":{focus_changes},",
                 "\"wakeup_events\":{wakeup_events},",
+                "\"policy_enabled\":{policy_enabled},",
+                "\"policy_revision\":{policy_revision},",
+                "\"frozen_packages\":{frozen},",
+                "\"grace_pending\":{grace},",
+                "\"freeze_ops\":{freeze_ops},",
+                "\"unfreeze_ops\":{unfreeze_ops},",
+                "\"wakeup_thaws\":{wakeup_thaws},",
                 "\"uptime_s\":{uptime},",
                 "\"config_reloads\":{reloads},",
                 "\"connections_served\":{conns}",
@@ -289,9 +332,22 @@ impl DaemonState {
             focus_pkg = focus_pkg_json,
             focus_changes = self.focus_changes.load(Ordering::Relaxed),
             wakeup_events = self.wakeup_events.load(Ordering::Relaxed),
+            policy_enabled = policy_enabled,
+            policy_revision = policy_revision,
+            frozen = frozen_json,
+            grace = grace_json,
+            freeze_ops = freeze_ops,
+            unfreeze_ops = unfreeze_ops,
+            wakeup_thaws = wakeup_thaws,
             uptime = self.uptime_secs(),
             reloads = self.config_reloads.load(Ordering::Relaxed),
             conns = self.connections_served.load(Ordering::Relaxed),
         )
     }
+}
+
+/// 字符串数组 → JSON 数组字面量
+fn json_str_array(v: &[String]) -> String {
+    let inner: Vec<String> = v.iter().map(|s| format!("\"{}\"", s)).collect();
+    format!("[{}]", inner.join(","))
 }

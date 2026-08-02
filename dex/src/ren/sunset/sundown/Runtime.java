@@ -6,7 +6,6 @@ import org.json.JSONObject;
 
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
-
 import dalvik.system.InMemoryDexClassLoader;
 import ren.sunset.sundown.hook.HookEngine;
 import ren.sunset.sundown.hook.LsPlantBridge;
@@ -38,6 +37,8 @@ final class Runtime {
     /** L2b：hook 事件缓冲（回调非阻塞投递，发送线程串行 drain） */
     private final EventQueue events = new EventQueue();
     private final Thread senderThread;
+    /** L3：豁免判定监视器（独立线程，fg/media 上行） */
+    private final ExemptMonitor exemptMonitor;
 
     private volatile boolean stopped;
     private volatile boolean swapping;   // 同代内切换去重（窗口期重复事件防护）
@@ -47,12 +48,19 @@ final class Runtime {
     private Runtime(String socketName, String stubHash) {
         this.socketName = socketName;
         this.stubHash = stubHash;
+        // L3：豁免判定监视器（独立线程，需 dispatcher 上行）
+        this.exemptMonitor = new ExemptMonitor(new LsPlantBridge.EventDispatcher() {
+            @Override
+            public void dispatch(String line) {
+                events.offer(line);
+            }
+        });
         this.hooks = LsPlantBridge.create(new LsPlantBridge.EventDispatcher() {
             @Override
             public void dispatch(String line) {
                 events.offer(line); // 非阻塞（hook 回调可能在 AMS 锁内线程）
             }
-        });
+        }, this.exemptMonitor);
         // 注意：禁止 lambda/方法引用——javac -source 8 + -bootclasspath android.jar 时
         // lambda 的 invokedynamic 需在 bootclasspath 解析 LambdaMetafactory.metafactory，
         // 而 android.jar 无此符号（编译期 fatal）。匿名类由 d8 原样保留，无 desugar 依赖。
@@ -82,6 +90,7 @@ final class Runtime {
         active = r;
         r.eventThread.start();
         r.senderThread.start();
+        r.exemptMonitor.start();
         Log.i(TAG, "L2 dex 冷启动 (v" + r.version + ", stub=" + stubHash + ")");
     }
 
@@ -99,6 +108,7 @@ final class Runtime {
         active = r;
         r.eventThread.start();
         r.senderThread.start();
+        r.exemptMonitor.start();
         Log.i(TAG, "L2 dex 热切换上线 (v" + prevVersion + " → v" + r.version + ")");
         return true;
     }
