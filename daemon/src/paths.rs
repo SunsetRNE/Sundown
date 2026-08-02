@@ -44,11 +44,13 @@ pub const PROBE_ABSTRACT_SOCK: &str = "sundown_probe";
 // ---- L3 策略引擎相关 ----
 /// 策略文件（TOML；inotify 热加载，失败保留旧表）
 pub const POLICY_FILE: &str = "/data/adb/sundown/conf/policy.toml";
+/// 情景预设文件（action.toml；[presets."name"] 参数组，policy preset apply 内存切换）
+pub const ACTION_FILE: &str = "/data/adb/sundown/conf/action.toml";
 /// 包→uid 映射表（root 可读，`pkg uid ...` 行式；冻结执行 uid 定位用）
 pub const PACKAGES_LIST: &str = "/data/system/packages.list";
 
 /// 守护进程版本（与 module.prop version 同步，策略见主 README「版本号策略」）
-pub const VERSION_NAME: &str = "0.4.14-l3";
+pub const VERSION_NAME: &str = "0.4.15-l3";
 /// 单调递增的发布号：service.sh readiness 校验依据（installed.json vs daemon.ready）
 /// daemon 二进制任何变更必须 +1（只加不改）
-pub const RELEASE_NO: u32 = 21;
+pub const RELEASE_NO: u32 = 22;

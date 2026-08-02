@@ -478,10 +478,17 @@ fn handle_event(state: &DaemonState, arg: &str) -> String {
 }
 
 /// policy 管理命令（仅 root 管理面）：
-///   policy status  -> 策略状态 JSON（enabled/revision/冻结表/grace/计数）
-///   policy reload  -> 强制从磁盘重载（失败保留旧表）
+///   policy status        -> 策略状态 JSON（enabled/revision/冻结表/grace/计数）
+///   policy reload        -> 强制从磁盘重载（失败保留旧表）
+///   policy preset list   -> 情景预设列表 + 当前生效
+///   policy preset apply <name> -> 应用预设（内存覆盖 [general]，不动磁盘 policy.toml）
+///   policy preset clear  -> 清除预设（重新加载磁盘 policy.toml 参数）
 fn handle_policy(state: &DaemonState, arg: &str) -> String {
-    match arg {
+    let mut parts = arg.splitn(2, ' ');
+    let sub = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
+    match sub {
+        "preset" => handle_preset(state, rest),
         "status" => {
             let eng = state.engine.lock().unwrap();
             let frozen = eng.frozen_packages();
@@ -558,6 +565,73 @@ fn handle_policy(state: &DaemonState, arg: &str) -> String {
             "{{\"ok\":0,\"error\":\"policy: unknown subcommand: {}\"}}",
             other
         ),
+    }
+}
+
+/// policy preset 子命令（仅 root 管理面）：
+///   preset list          -> {"ok":1,"presets":[...],"active":"...","revision":N}
+///   preset apply <name>  -> 应用预设（内存覆盖 [general]；未知预设返回 ok:0）
+///   preset clear         -> 清除预设（回落磁盘 policy.toml 参数）
+fn handle_preset(state: &DaemonState, arg: &str) -> String {
+    let mut parts = arg.splitn(2, ' ');
+    let sub = parts.next().unwrap_or("");
+    let name = parts.next().unwrap_or("").trim();
+    match sub {
+        "list" => {
+            let eng = state.engine.lock().unwrap();
+            let names = eng.presets.names();
+            let active = eng.active_preset.clone().unwrap_or_default();
+            format!(
+                "{{\"ok\":1,\"presets\":[{}],\"active\":\"{}\",\"revision\":{}}}",
+                names
+                    .iter()
+                    .map(|s| format!("\"{}\"", s))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                active,
+                eng.presets.revision
+            )
+        }
+        "apply" => {
+            if name.is_empty() {
+                return "{\"ok\":0,\"error\":\"preset apply 缺少预设名（用法: policy preset apply <name>）\"}"
+                    .to_string();
+            }
+            let mut eng = state.engine.lock().unwrap();
+            match eng.apply_preset(name) {
+                Ok(()) => format!(
+                    concat!(
+                        "{{",
+                        "\"ok\":1,",
+                        "\"applied\":\"{}\",",
+                        "\"enabled\":{},",
+                        "\"grace_seconds\":{},",
+                        "\"cooldown_seconds\":{},",
+                        "\"keep_fg_service\":{},",
+                        "\"keep_media\":{}",
+                        "}}"
+                    ),
+                    name,
+                    eng.policy.enabled,
+                    eng.policy.grace_seconds,
+                    eng.policy.cooldown_seconds,
+                    eng.policy.keep_fg_service,
+                    eng.policy.keep_media
+                ),
+                Err(e) => format!("{{\"ok\":0,\"error\":\"{}\"}}", e.replace('"', "'")),
+            }
+        }
+        "clear" => {
+            let mut eng = state.engine.lock().unwrap();
+            eng.clear_preset();
+            format!(
+                "{{\"ok\":1,\"active\":\"{}\",\"enabled\":{},\"grace_seconds\":{}}}",
+                eng.active_preset.clone().unwrap_or_default(),
+                eng.policy.enabled,
+                eng.policy.grace_seconds
+            )
+        }
+        _ => "{\"ok\":0,\"error\":\"preset: 用法 list | apply <name> | clear\"}".to_string(),
     }
 }
 

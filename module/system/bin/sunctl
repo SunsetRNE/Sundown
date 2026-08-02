@@ -10,7 +10,7 @@ INSTALLED_META="$SUNDOWN_DIR/update/installed.json"
 READY_MARKER="$SUNDOWN_DIR/update/daemon.ready"
 SOCK_PATH="$SUNDOWN_DIR/sundownd.sock"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.4.14-l3"
+VERSION="0.4.15-l3"
 
 # ---------- 工具函数 ----------
 
@@ -282,6 +282,9 @@ cmd_policy() {
     # L3 策略管理（WebUI 配置页后端；经 daemon 管理面 socket，收敛单一入口）
     #   policy status -> 策略状态 JSON（enabled/grace/cooldown/白名单/force/冻结表/计数）
     #   policy reload -> 强制从磁盘重载（失败保留旧表）
+    #   policy preset list        -> 情景预设列表 + 当前生效
+    #   policy preset apply <n>   -> 应用预设（内存覆盖 [general]，不动磁盘 policy.toml）
+    #   policy preset clear       -> 清除预设（回落磁盘 policy.toml 参数）
     sub="${1:-status}"
     case "$sub" in
         status|reload)
@@ -293,8 +296,31 @@ cmd_policy() {
             printf '%s\n' "$resp"
             return 0
             ;;
+        preset)
+            shift
+            psub="${1:-list}"
+            case "$psub" in
+                list|clear)
+                    resp="$(sock_query "policy preset $psub")"
+                    ;;
+                apply)
+                    [ -n "$2" ] || { echo "用法: sunctl policy preset apply <预设名>" >&2; return 2; }
+                    resp="$(sock_query "policy preset apply $2")"
+                    ;;
+                *)
+                    echo "用法: sunctl policy preset list|apply <name>|clear" >&2
+                    return 2
+                    ;;
+            esac
+            if [ -z "$resp" ]; then
+                echo "❌ daemon 未连接（socket 不可用），无法执行 policy preset" >&2
+                return 1
+            fi
+            printf '%s\n' "$resp"
+            return 0
+            ;;
         *)
-            echo "用法: sunctl policy status|reload" >&2
+            echo "用法: sunctl policy status|reload|preset list|preset apply <name>|preset clear" >&2
             return 2
             ;;
     esac
@@ -332,6 +358,9 @@ usage() {
   reload-probe           [L2] 热更新探针 dex
   policy status          [L3] 查询冻结策略状态（JSON）
   policy reload          [L3] 强制从磁盘重载策略
+  policy preset list     [L3] 情景预设列表 + 当前生效
+  policy preset apply <n> [L3] 应用预设（内存覆盖 [general]，不动磁盘 policy.toml）
+  policy preset clear    [L3] 清除预设（回落磁盘 policy.toml 参数）
   events [行数]          [L3.1] 结构化事件时间线（JSON；焦点/唤醒/冻结/豁免/握手）
   apply-update           [后续] 激活 staged 守护进程更新
   logs [行数]            查看启动看门狗日志

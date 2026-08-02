@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use crate::events::{EvAction, EvLevel, EventBuffer};
 use crate::freezer;
 use crate::policy::{AppMode, Policy};
+use crate::preset::{Preset, PresetTable};
 use crate::{logi, logw};
 
 /// 每个包最近一次 focus 事件的豁免判定字段
@@ -43,6 +44,10 @@ pub struct EngineState {
     pub pkg_pids: HashMap<String, Vec<u32>>,
     /// 结构化事件缓冲（日志数据层；环形 256，覆盖最旧——观测可损失）
     pub events: EventBuffer,
+    /// 情景预设表（conf/action.toml；reload 时一并刷新，空表 = 预设不可用）
+    pub presets: PresetTable,
+    /// 当前生效预设名（None = 磁盘 policy.toml 参数）
+    pub active_preset: Option<String>,
     pub freeze_ops: u64,
     pub unfreeze_ops: u64,
     pub wakeup_thaws: u64,
@@ -60,6 +65,8 @@ impl Default for EngineState {
             pkg_uids: HashMap::new(),
             pkg_pids: HashMap::new(),
             events: EventBuffer::default(),
+            presets: PresetTable::default(),
+            active_preset: None,
             freeze_ops: 0,
             unfreeze_ops: 0,
             wakeup_thaws: 0,
@@ -213,8 +220,12 @@ impl EngineState {
         );
     }
 
-    /// 策略重载（config.rs reload 回调）：成功替换；失败保留旧表
+    /// 策略重载（config.rs reload 回调）：成功替换；失败保留旧表。
+    /// 预设表随热加载一并刷新（action.toml 变更即时生效）；生效中预设仍存在则
+    /// 重放覆盖，已删除则回落磁盘参数。
     pub fn reload_policy(&mut self) {
+        // 情景预设表随热加载一并刷新（缺失/解析失败 → 空表，预设功能降级不致命）
+        self.presets = PresetTable::load();
         if let Some((p, _)) = Policy::load() {
             logi!(
                 "L3 策略已重载: enabled={} grace={}s cooldown={}s whitelist={} force={} apps={}（revision={}）",
@@ -233,6 +244,20 @@ impl EngineState {
                 Some(&format!("enabled={} apps={} rev={}", p.enabled, p.apps.len(), p.revision)),
             );
             self.policy = p;
+            // 生效中预设：仍存在 → 重放内存覆盖；已删除 → 回落磁盘参数
+            if let Some(name) = self.active_preset.clone() {
+                let keep = self.presets.presets.get(&name).cloned();
+                match keep {
+                    Some(pp) => {
+                        self.overlay_preset(&name, &pp);
+                        logi!("L3 预设保持（热加载后重放）: {}", name);
+                    }
+                    None => {
+                        self.active_preset = None;
+                        logw!("L3 预设 {} 已不存在，回落磁盘参数", name);
+                    }
+                }
+            }
         } else {
             logw!("L3 策略重载失败（保留旧表 revision={}）", self.policy.revision);
             self.events.push_system(
@@ -242,6 +267,79 @@ impl EngineState {
                 None,
             );
         }
+    }
+
+    // ---------------- 情景预设（policy preset 命令） ----------------
+
+    /// 应用预设：内存覆盖 [general] 参数（不动磁盘 policy.toml）。
+    /// 白名单 / force / per-app 始终以磁盘 policy.toml 为准（预设不触碰）。
+    pub fn apply_preset(&mut self, name: &str) -> Result<(), String> {
+        let p = match self.presets.presets.get(name) {
+            Some(p) => p.clone(),
+            None => {
+                let avail = self.presets.names();
+                return Err(if avail.is_empty() {
+                    "预设表为空（action.toml 缺失或未定义预设）".to_string()
+                } else {
+                    format!("预设不存在: {}（可用: {}）", name, avail.join(", "))
+                });
+            }
+        };
+        self.overlay_preset(name, &p);
+        self.active_preset = Some(name.to_string());
+        logi!(
+            "L3 预设应用: {}（enabled={} grace={}s cooldown={}s keep_fg={} keep_media={}）",
+            name,
+            p.enabled,
+            p.grace_seconds,
+            p.cooldown_seconds,
+            p.keep_fg_service,
+            p.keep_media
+        );
+        self.events.push_system(
+            EvLevel::Report,
+            EvAction::Policy,
+            Some("preset"),
+            Some(&format!("apply={} enabled={} grace={}s", name, p.enabled, p.grace_seconds)),
+        );
+        Ok(())
+    }
+
+    /// 清除预设：重新加载磁盘 policy.toml，回落磁盘参数。
+    /// 磁盘不可读时保留现状（失败安全，与 reload_policy 一致）。
+    pub fn clear_preset(&mut self) {
+        let prev = self.active_preset.take();
+        if let Some((p, _)) = Policy::load() {
+            self.policy = p;
+            if let Some(name) = &prev {
+                logi!(
+                    "L3 预设清除: {}（回落磁盘参数 revision={}）",
+                    name,
+                    self.policy.revision
+                );
+                self.events.push_system(
+                    EvLevel::Report,
+                    EvAction::Policy,
+                    Some("preset"),
+                    Some(&format!("clear={}", name)),
+                );
+            } else {
+                logi!("L3 预设清除：当前无生效预设（重载磁盘参数）");
+            }
+        } else {
+            self.active_preset = prev; // 恢复原状
+            logw!("L3 预设清除失败（policy.toml 不可读，保留现状）");
+        }
+    }
+
+    /// 参数覆盖（apply / reload 重放共用；不推事件）
+    fn overlay_preset(&mut self, name: &str, p: &Preset) {
+        self.policy.enabled = p.enabled;
+        self.policy.grace_seconds = p.grace_seconds;
+        self.policy.cooldown_seconds = p.cooldown_seconds;
+        self.policy.keep_fg_service = p.keep_fg_service;
+        self.policy.keep_media = p.keep_media;
+        let _ = name;
     }
 
     // ---------------- 定时驱动（main 主循环 tick 调用） ----------------

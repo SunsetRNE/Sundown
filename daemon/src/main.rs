@@ -16,6 +16,7 @@ mod freezer;
 mod logging;
 mod paths;
 mod policy;
+mod preset;
 mod sock;
 mod state;
 mod toml;

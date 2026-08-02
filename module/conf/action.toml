@@ -1,0 +1,38 @@
+# Sundown L3 情景预设（conf/action.toml）— inotify 热加载，修改保存即生效
+#
+# 预设 = [general] 参数组（内存切换模型，参考 Cerberus action.toml 预设体系）：
+#   sunctl policy preset list           -> 查看可用预设 + 当前生效
+#   sunctl policy preset apply <name>   -> 应用预设（内存覆盖 [general]，不动磁盘 policy.toml）
+#   sunctl policy preset clear          -> 清除预设（回落磁盘 policy.toml 参数）
+#
+# 设计纪律：
+#   - 预设只覆盖 enabled / grace_seconds / cooldown_seconds / keep_fg_service / keep_media
+#   - 白名单 / force / per-app 策略始终以磁盘 policy.toml 为准（预设不触碰）
+#   - 失败安全：本文件缺失/解析失败 → 空预设表（预设功能不可用，不致命）
+#   - 未知键 → 警告不致命（前向兼容）
+#   - 字段缺省：enabled=false、grace_seconds=30、cooldown_seconds=60、
+#     keep_fg_service=true、keep_media=true
+
+[presets."watch"]
+# 观影/后台挂机场景：长 grace，宽松豁免
+enabled = true
+grace_seconds = 90
+cooldown_seconds = 120
+keep_fg_service = true
+keep_media = true
+
+[presets."aggressive"]
+# 极限省电场景：短 grace，立即冻结，媒体豁免关闭（播放中也可能冻结）
+enabled = true
+grace_seconds = 5
+cooldown_seconds = 30
+keep_fg_service = false
+keep_media = false
+
+[presets."office"]
+# 办公场景：中度 grace，前台服务/媒体全豁免
+enabled = true
+grace_seconds = 60
+cooldown_seconds = 60
+keep_fg_service = true
+keep_media = true
