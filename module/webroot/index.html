@@ -204,6 +204,27 @@
   .lc-sub { font-size: 0.7rem; color: var(--dim); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .lc-sub b { color: var(--accent); font-weight: 600; }
   .lc-time { font-size: 0.64rem; color: var(--dim); flex-shrink: 0; font-family: ui-monospace, monospace; }
+  /* ---- v2.2 日志深化 ---- */
+  .lc-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 0.62rem; margin-left: 4px; vertical-align: 1px; }
+  .lc-badge.fg    { background: rgba(109,219,143,.16); color: var(--ok); }
+  .lc-badge.bg    { background: rgba(154,143,181,.18); color: var(--dim); }
+  .lc-badge.media { background: rgba(201,109,216,.18); color: var(--wake); }
+  .lc-badge.unknown { background: rgba(255,107,107,.2); color: var(--err); font-weight: 700; }
+  .lc-badge.whitelisted { background: rgba(109,219,143,.2); color: var(--ok); font-weight: 700; }
+  .lc-dwell { color: var(--dim); font-size: 0.62rem; margin-left: 6px; }
+  .lc-pkgbtn { cursor: pointer; border-bottom: 1px dashed rgba(255,255,255,0.35); }
+  .lc-pkgbtn:active { opacity: .6; }
+  .lc-raw {
+    display: none; margin-top: 7px; padding: 8px;
+    background: #100c1a; border-radius: 8px;
+    font-size: 0.66rem; color: var(--dim); word-break: break-all;
+    font-family: ui-monospace, monospace; white-space: pre-wrap; line-height: 1.5;
+  }
+  .log-card.open .lc-raw { display: block; }
+  .log-card.open { border-left-width: 4px; }
+  .log-search-row { display: flex; gap: 6px; margin-bottom: 8px; }
+  .log-search-row input[type=text] { flex: 1; font-size: 0.8rem; }
+  .hint-copy { font-size: 0.66rem; color: var(--dim); margin-top: 6px; text-align: right; }
 
   /* ---- 更多 ---- */
   .kv { display: flex; gap: 8px; padding: 6px 0; font-size: 0.84rem; }
@@ -411,7 +432,11 @@
           <option value="600">600 行</option>
         </select>
         <button class="mini-btn" id="log-refresh">🔄 刷新</button>
+        <button class="mini-btn" id="log-copy" title="复制原始日志">📋 复制</button>
         <label class="auto-refresh"><input type="checkbox" id="log-auto" checked> 自动</label>
+      </div>
+      <div class="log-search-row">
+        <input type="text" id="log-search" placeholder="🔍 搜索包名 / 关键字（如 tencent、gms、未知）">
       </div>
       <div class="stat-row" id="log-stats">
         <div class="stat-cell focus"><div class="num" id="ls-focus">-</div><div class="lab">焦点</div></div>
@@ -770,6 +795,31 @@ async function quickAddWhitelist(pkg) {
   toast("已将 " + pkg + " 加入白名单并保存…");
   await savePolicy();
 }
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      toast("✅ 已复制 " + text.length + " 字符");
+      return;
+    }
+    throw new Error("clipboard 不可用");
+  } catch (e) {
+    // 降级：textarea + execCommand（KernelSU WebUI 非安全上下文场景）
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      if (ok) { toast("✅ 已复制 " + text.length + " 字符"); return; }
+      throw new Error("execCommand 失败");
+    } catch (e2) {
+      toast("❌ 复制失败，请长按手动复制");
+    }
+  }
+}
 
 /* ================= 日志页 ================= */
 function parseLogLine(line) {
@@ -778,34 +828,43 @@ function parseLogLine(line) {
   const time = m[1].replace("Z", "");
   const level = m[2];
   const body = m[3];
-  let type = "sys", icon = "ℹ️", title = body, sub = "";
+  const out = { type: "sys", icon: "ℹ️", time, raw: line, title: body, sub: "", pkg: null, badges: [], dwell: null };
   let r;
   if ((r = body.match(/焦点切换: ([^\s（(]+)（fg=(\w+) media=(\w+)，累计 (\d+) 次）/))) {
-    type = "focus"; icon = "🎯";
-    title = r[1];
-    sub = "焦点切换 · 累计 <b>" + r[4] + "</b> 次 · " + (r[2] === "true" ? "前台" : "后台") + "/" + (r[3] === "true" ? "媒体" : "无媒体");
+    out.type = "focus"; out.icon = "🎯"; out.pkg = r[1]; out.title = r[1];
+    out.sub = "焦点切换 · 累计 " + r[4] + " 次";
+    out.badges.push({ cls: r[2] === "true" ? "fg" : "bg", txt: r[2] === "true" ? "前台" : "后台" });
+    out.badges.push({ cls: r[3] === "true" ? "media" : "bg", txt: r[3] === "true" ? "媒体中" : "无媒体" });
   } else if ((r = body.match(/唤醒事件: pkg=(\S+) reason=(\w+)（累计 (\d+) 条）/))) {
-    type = "wake"; icon = "🔔";
-    title = r[1] === "?" ? "未知进程" : r[1];
-    sub = "唤醒 · " + (REASON_CN[r[2]] || r[2]) + " · 累计 <b>" + r[3] + "</b> 条";
+    out.type = "wake";
+    out.icon = { broadcast: "📡", service: "🛎️", pendingintent: "⏰" }[r[2]] || "🔔";
+    const unknown = r[1] === "?";
+    out.pkg = unknown ? null : r[1];
+    out.title = unknown ? "未知进程" : r[1];
+    out.sub = "唤醒 · " + (REASON_CN[r[2]] || r[2]) + " · 累计 " + r[3] + " 条";
+    if (unknown) out.badges.push({ cls: "unknown", txt: "未知源" });
   } else if ((r = body.match(/豁免判定: ([^\s（(]+)（fg=(\w+) media=(\w+)）/))) {
-    type = "exempt"; icon = "🛡️";
-    title = r[1];
-    sub = "豁免判定 · " + (r[2] === "true" ? "前台" : "后台") + " / " + (r[3] === "true" ? "媒体中" : "无媒体");
+    out.type = "exempt"; out.icon = "🛡️"; out.pkg = r[1]; out.title = r[1];
+    out.sub = "豁免判定";
+    out.badges.push({ cls: r[2] === "true" ? "fg" : "bg", txt: r[2] === "true" ? "前台" : "后台" });
+    out.badges.push({ cls: r[3] === "true" ? "media" : "bg", txt: r[3] === "true" ? "媒体中" : "无媒体" });
   } else if (/退后台计时|冻结|解冻|冷却|跳过/.test(body)) {
-    type = "freeze"; icon = "❄️";
-    title = body.replace(/^L3\s*/, "");
+    out.type = "freeze"; out.icon = "❄️"; out.title = body.replace(/^L3\s*/, "");
   } else if (level === "ERROR" || /FATAL/.test(body)) {
-    type = "err"; icon = "⛔";
+    out.type = "err"; out.icon = "⛔";
   } else if (level === "WARN") {
-    type = "warn"; icon = "⚠️";
+    out.type = "warn"; out.icon = "⚠️";
   } else if (/探针桩握手/.test(body)) {
-    type = "sys"; icon = "📡";
-  } else if (/探针 dex 握手|fetch-dex|hook bridge|热更新|策略|配置|豁免表|焦点事件|唤醒事件事件/.test(body)) {
-    type = "sys"; icon = "📦";
+    out.type = "sys"; out.icon = "📡";
+  } else if (/探针 dex 握手|fetch-dex|hook bridge|热更新|策略|配置|豁免表|焦点事件/.test(body)) {
+    out.type = "sys"; out.icon = "📦";
   }
-  return { type, icon, time, title, sub };
+  return out;
 }
+const fmtDur = ms => {
+  const s = Math.round(ms / 1000);
+  return s < 60 ? s + "s" : Math.floor(s / 60) + "m" + (s % 60) + "s";
+};
 let LOGS_RAW = "";
 async function refreshLogs() {
   const lines = $("log-lines").value;
@@ -813,18 +872,40 @@ async function refreshLogs() {
   const raw = (r.stdout || "").trim() || (r.stderr || "暂无日志");
   LOGS_RAW = raw;
   renderLogStats(raw);
+  // 解析 + 焦点停留时长（相邻焦点事件时间差）
+  const parsed = raw.split("\n").map(parseLogLine).filter(Boolean);
+  let prevFocus = null;
+  parsed.forEach(p => {
+    if (p.type === "focus" && p.time) {
+      const t = Date.parse(p.time.replace(" ", "T") + "Z");
+      if (prevFocus != null && t > prevFocus) {
+        const d = t - prevFocus;
+        if (d > 1000 && d < 3600000) p.dwell = d;
+      }
+      prevFocus = t;
+    }
+  });
+  const kw = ($("log-search").value || "").trim().toLowerCase();
+  const cards = parsed.filter(p => {
+    if (logFilter !== "all" && p.type !== logFilter && !(logFilter === "err" && (p.type === "err" || p.type === "warn"))) return false;
+    if (kw && !(p.title + " " + p.sub + " " + p.raw).toLowerCase().includes(kw)) return false;
+    return true;
+  });
   const box = $("log-box");
-  const cards = raw.split("\n").map(parseLogLine).filter(p => p && (
-    logFilter === "all" || p.type === logFilter || (logFilter === "err" && (p.type === "err" || p.type === "warn"))
-  ));
   box.innerHTML = cards.length
-    ? cards.map(p =>
-        '<div class="log-card ' + p.type + '">' +
-        '<div class="lc-icon">' + p.icon + "</div>" +
-        '<div class="lc-body"><div class="lc-title">' + esc(p.title) + "</div>" +
-        '<div class="lc-sub">' + (p.sub || '<span style="color:var(--dim)">' + esc(p.title) + "</span>") + "</div></div>" +
-        '<div class="lc-time">' + esc(p.time) + "</div></div>"
-      ).join("")
+    ? cards.map(p => {
+        const badges = p.badges.map(b => '<span class="lc-badge ' + b.cls + '">' + esc(b.txt) + "</span>").join("");
+        const title = p.pkg
+          ? '<span class="lc-pkgbtn" data-pkg="' + esc(p.pkg) + '">' + esc(p.pkg) + "</span>"
+          : esc(p.title);
+        return '<div class="log-card ' + p.type + '" data-raw="' + esc(p.raw) + '">' +
+          '<div class="lc-icon">' + p.icon + "</div>" +
+          '<div class="lc-body"><div class="lc-title">' + title +
+            (p.dwell ? '<span class="lc-dwell">停留 ' + fmtDur(p.dwell) + "</span>" : "") + "</div>" +
+          '<div class="lc-sub">' + esc(p.sub) + badges + "</div>" +
+          '<div class="lc-raw">' + esc(p.raw) + "</div></div>" +
+          '<div class="lc-time">' + esc(p.time) + "</div></div>";
+      }).join("")
     : '<span class="empty">（当前过滤条件下无匹配事件）</span>';
   box.scrollTop = box.scrollHeight;
 }
@@ -917,6 +998,15 @@ function init() {
   $("log-lines").onchange = refreshLogs;
   $("log-refresh").onclick = refreshLogs;
   $("log-auto").onchange = () => { $("log-auto").checked ? startLogAuto() : stopLogAuto(); };
+  // v2.2：卡片点击展开原始行；包名点击快捷加白名单
+  $("log-box").onclick = e => {
+    const pkgBtn = e.target.closest(".lc-pkgbtn");
+    if (pkgBtn) { quickAddWhitelist(pkgBtn.dataset.pkg); return; }
+    const card = e.target.closest(".log-card");
+    if (card) card.classList.toggle("open");
+  };
+  $("log-search").oninput = () => { if (curPage === "logs") refreshLogs(); };
+  $("log-copy").onclick = () => copyText(LOGS_RAW || "（暂无日志）");
   // 更多
   $("btn-env").onclick = refreshEnv;
   $("btn-refresh").onclick = () => { refreshDash(); toast("已刷新"); };
