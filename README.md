@@ -83,7 +83,7 @@ Sundown/
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
-## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.20-l3：eBPF 流量数据源适配 Android16 + 定位活动豁免 daemon 侧 + 热更新 staged 命令与 WebUI 入口）
+## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.21-l3：修复 eBPF bpf() syscall 缓冲区缺陷——Android16 实机校验发现并定位）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
@@ -147,6 +147,11 @@ Sundown/
   - 热更新命令实装：`sunctl apply-update [zip|URL]` 下载 Nightly 模块包 → 提取 sundownd → 运行 `--version` 解析版本 → SHA256 + installed.json.new + pending.json（staged_boot_id）写入 pending 四件套（防降级：release_no 只增）；`sunctl apply-update --activate` 立即激活（备份 → 替换 → 重启 daemon → 20s+10s readiness 校验 → 失败自动回滚，与 service.sh 同规）
   - installed.json 初始化（daemon 启动仅缺失时写入 version_name/release_no，staged 激活仍由 service.sh 原子替换）
   - WebUI v2.2：策略页新增定位活动豁免开关 + 更多页「检查并升级（Nightly）」一键暂存按钮（下载后确认重启激活）
+- [x] eBPF bpf() syscall 缓冲区缺陷修复（v0.4.21-l3）：
+  - 实机校验发现 v0.4.20-l3 的 eBPF 源仍失效（日志"网络统计源不可用"），map 文件本身 root 可读但 BPF_MAP_GET_NEXT_KEY/LOOKUP_ELEM/OBJ_GET_INFO_BY_FD 全失败
+  - 根因 1：内核 `bpf_check_uarg_tail_zero` 要求用户缓冲区 `[attr_size, sizeof(union bpf_attr))` 区间全零（否则 E2BIG）——原实现传栈上小数组（16/24/32 字节）尾部随机垃圾 → 必然失败
+  - 根因 2：`struct bpf_map_info` 在 6.x 内核约 88+ 字节，原 info buffer 仅 64 字节 + info_len=64 → OBJ_GET_INFO_BY_FD 返回 EINVAL，快照函数第一步即失败
+  - 修复：`bpf_cmd` 统一改用 256B 清零缓冲承载（`[0u8; 256]` + copy_from_slice 填充前 N 字节，attr_size 传实际字段长度，256 ≥ sizeof(union bpf_attr) 约 144B）；info buffer/info_len 均扩为 256
 
 ## 待办（后置）
 - [ ] 定位活动豁免 dex 侧 AppOps 判定（ExemptMonitor.java 扩展 loc 字段上报，走 L2 热更新路线）

@@ -138,10 +138,11 @@ fn bpf_snapshot_uid_bytes() -> Option<HashMap<u32, u64>> {
     let fd = f.as_raw_fd();
 
     // 1) 获取 map 信息（key_size / value_size）
-    let mut info = [0u8; 64];
+    // 内核 bpf_map_info（6.x）约 88+ 字节：buffer 与 info_len 给 256 防 EINVAL
+    let mut info = [0u8; 256];
     let mut attr_info = [0u8; 16];
     attr_info[0..4].copy_from_slice(&(fd as u32).to_ne_bytes());
-    attr_info[4..8].copy_from_slice(&64u32.to_ne_bytes());
+    attr_info[4..8].copy_from_slice(&256u32.to_ne_bytes());
     attr_info[8..16].copy_from_slice(&(info.as_mut_ptr() as u64).to_ne_bytes());
     if bpf_cmd(BPF_OBJ_GET_INFO_BY_FD, &attr_info) != 0 {
         return None;
@@ -196,8 +197,15 @@ fn bpf_snapshot_uid_bytes() -> Option<HashMap<u32, u64>> {
     Some(map)
 }
 
+/// bpf() syscall 封装。
+/// 关键：内核 `bpf_check_uarg_tail_zero` 要求用户缓冲区 [attr_size, sizeof(union bpf_attr))
+/// 区间必须全零（否则 E2BIG）——栈上小数组尾部是随机数据必然失败（v0.4.20-l3 实机
+/// 验证教训）；统一用 256B 清零缓冲承载，attr_size 传实际字段长度（内核再 min 到
+/// sizeof(bpf_attr)）。256 ≥ sizeof(union bpf_attr)（6.x 约 144B）。
 fn bpf_cmd(cmd: libc::c_int, attr: &[u8]) -> libc::c_long {
-    unsafe { libc::syscall(libc::SYS_bpf, cmd, attr.as_ptr(), attr.len()) }
+    let mut buf = [0u8; 256];
+    buf[..attr.len()].copy_from_slice(attr);
+    unsafe { libc::syscall(libc::SYS_bpf, cmd, buf.as_ptr(), attr.len()) }
 }
 
 /// /proc/uid_stat/<uid>/tcp_rcv + tcp_snd（累计字节；任一缺失按另一侧计）
