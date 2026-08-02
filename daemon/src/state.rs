@@ -106,7 +106,8 @@ impl DaemonState {
         }
     }
 
-    /// 初始策略：读 conf/policy.toml，失败用默认（策略关闭，观测优先）
+    /// 初始策略：读 conf/policy.toml，失败用默认（策略关闭，观测优先）；
+    /// 情景预设表一并加载（v0.4.18-l3 修复：此前仅 reload 时刷新，重启后为空）
     fn init_engine() -> EngineState {
         let mut e = EngineState::default();
         if let Some((p, _)) = crate::policy::Policy::load() {
@@ -123,6 +124,18 @@ impl DaemonState {
             e.policy = p;
         } else {
             logw!("L3 初始策略缺失/解析失败（策略关闭，观测模式）: {}", paths::POLICY_FILE);
+        }
+        // L3 情景预设：启动即加载 action.toml（缺失/解析失败 → 空表，不致命）
+        e.presets = crate::preset::PresetTable::load();
+        let pn = e.presets.names();
+        if !pn.is_empty() {
+            logi!(
+                "L3 情景预设已加载: {}（revision={}）",
+                pn.join(", "),
+                e.presets.revision
+            );
+        } else {
+            logw!("L3 情景预设为空（action.toml 缺失或无预设）: {}", paths::ACTION_FILE);
         }
         e
     }
