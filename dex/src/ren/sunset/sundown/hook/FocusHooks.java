@@ -75,18 +75,33 @@ final class FocusHooks implements HookEngine {
 
     // ---------------- hook 回调（实例方法，签名 Object xxx(MethodCallback)） ----------------
 
-    /** activity 切换信号：扫参数中的 ComponentName 取包名（签名跨版本鲁棒） */
+    /**
+     * activity 切换信号：扫参数中的 ComponentName 取包名（签名跨版本鲁棒）。
+     *
+     * 噪声过滤（2026-08-02 真机实证）：updateActivityUsageStats 的 event 参数
+     * 在 resume(1)/pause(2)/stopped(3) 都会触发——pause/stopped 时参数仍是
+     * 正在离开的 app（OPPO ROM 实证：抖音 splash 启动瞬间 launcher 的 PAUSED
+     * 事件被当作"焦点切到 launcher"上报 → 引擎误判退后台 → 误冻前台 app）。
+     * 因此只把 event==ACTIVITY_RESUMED(1) 视为焦点切换上报，其余忽略。
+     * event 定位：参数中最后一个值∈{1,2,3} 的 Integer（userId 在前，event 在后）；
+     * 找不到（签名漂移）→ 保守照旧上报（宁多不漏）。
+     */
     public Object onActivitySwitch(MethodCallback cb) {
         Object res = cb.invokeOriginalOrDefault();
         try {
             String pkg = null;
+            Integer event = null;
             for (Object a : cb.args) {
                 if (a instanceof ComponentName) {
                     pkg = ((ComponentName) a).getPackageName();
-                    break;
+                } else if (a instanceof Integer) {
+                    int v = ((Integer) a).intValue();
+                    if (v >= 1 && v <= 3) {
+                        event = Integer.valueOf(v);
+                    }
                 }
             }
-            if (pkg != null) {
+            if (pkg != null && (event == null || event.intValue() == 1)) {
                 dispatcher.dispatch("event focus pkg=" + pkg);
                 // L3：登记最近焦点（ExemptMonitor 独立线程做 fg/media 豁免判定）
                 if (monitor != null) {

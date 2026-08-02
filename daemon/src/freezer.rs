@@ -92,14 +92,35 @@ pub fn is_uid_frozen(uid: u32) -> Option<bool> {
     }
 }
 
-/// uid 目录下是否还有存活进程（cgroup.procs 由内核维护，比 proc-add 事件可靠——
-/// dex 未升级 proc-add 上报前，pkg_pids 索引不可信，冻结核验一律走本函数）
+/// uid 目录下是否还有存活进程（2026-08-02 PJD110/Android16 实证：
+/// app 进程挂在 apps/uid_X/pid_Y/ 子目录，uid_X/cgroup.procs **不递归包含**
+/// 子目录进程（恒空）——必须遍历 pid_*；同时兜底兼容旧结构直接挂 uid 层。
+/// 比 proc-add 事件可靠（dex 未上报 proc-add 前，pkg_pids 索引不可信）。
 pub fn uid_has_procs(uid: u32) -> bool {
-    let path = format!("/sys/fs/cgroup/apps/uid_{}/cgroup.procs", uid);
-    match std::fs::read_to_string(&path) {
-        Ok(s) => !s.trim().is_empty(),
-        Err(_) => false, // 目录不存在 = 无进程
+    let base = format!("/sys/fs/cgroup/apps/uid_{}", uid);
+    let rd = match std::fs::read_dir(&base) {
+        Ok(r) => r,
+        Err(_) => return false, // 目录不存在 = 无进程
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("pid_") {
+            let procs = entry.path().join("cgroup.procs");
+            if let Ok(s) = std::fs::read_to_string(&procs) {
+                if !s.trim().is_empty() {
+                    return true;
+                }
+            }
+        }
     }
+    // 兜底：旧结构直接挂 uid 层
+    if let Ok(s) = std::fs::read_to_string(format!("{}/cgroup.procs", base)) {
+        if !s.trim().is_empty() {
+            return true;
+        }
+    }
+    false
 }
 
 /// 按包名冻结（经 packages.list 查 uid）；pkg 未知 → false

@@ -2,6 +2,8 @@ package ren.sunset.sundown;
 
 import android.app.ActivityManager;
 import android.app.ActivityManager.RunningServiceInfo;
+import android.app.ActivityManager.RunningTaskInfo;
+import android.content.ComponentName;
 import android.os.IBinder;
 import android.util.Log;
 
@@ -34,14 +36,22 @@ public final class ExemptMonitor {
     private static final long INTERVAL_MS = 2000;
     /** RunningServiceInfo.flags 的前台服务标志（START_FLAG_FOREGROUND） */
     private static final int START_FLAG_FOREGROUND = 1;
+    /** 同时判定的最近活跃包上限（LRU：退后台但仍有服务/媒体的 app 持续获得豁免） */
+    private static final int MAX_TRACKED = 4;
 
     private final EventDispatcher dispatcher;
 
-    /** hook 回调侧（AMS 锁内线程）写入：仅 volatile 写，零阻塞 */
-    private volatile String lastPkg;
-    private volatile boolean lastFg;
-    private volatile boolean lastMedia;
-    private boolean sent;
+    /** 观察中的包 → 上次判定（fg/media/sent），lock 保护 */
+    private final java.util.Map<String, Flags> states = new java.util.HashMap<>();
+    /** 观察顺序（队首最新，LRU 淘汰），lock 保护 */
+    private final java.util.List<String> order = new java.util.ArrayList<>();
+    private final Object lock = new Object();
+
+    private static final class Flags {
+        boolean fg;
+        boolean media;
+        boolean sent;
+    }
 
     ExemptMonitor(EventDispatcher dispatcher) {
         this.dispatcher = dispatcher;
@@ -49,7 +59,30 @@ public final class ExemptMonitor {
 
     /** hook 回调侧（锁内）调用：登记最近焦点包，零阻塞 */
     public void observe(String pkg) {
-        lastPkg = pkg;
+        synchronized (lock) {
+            order.remove(pkg);
+            order.add(0, pkg);
+            while (order.size() > MAX_TRACKED) {
+                order.remove(order.size() - 1);
+            }
+            if (!states.containsKey(pkg)) {
+                states.put(pkg, new Flags());
+            }
+        }
+    }
+
+    /**
+     * daemon 重连/换代后调用：重置所有包的 sent 标志，下一节拍全量重报豁免判定。
+     * （daemon 重启会清空其 exempt 表；若判定值未变化，本侧不会自发重发——
+     * 导致新 daemon 的豁免表缺失，退后台即有服务/媒体的 app 被误计时/误冻。
+     * 2026-08-02 真机实证：daemon 重启后微信 fg=true 不再上报，进入 grace。）
+     */
+    public void reset() {
+        synchronized (lock) {
+            for (Flags f : states.values()) {
+                f.sent = false;
+            }
+        }
     }
 
     void start() {
@@ -71,25 +104,83 @@ public final class ExemptMonitor {
                 return;
             }
             try {
-                String pkg = lastPkg;
-                if (pkg == null) {
-                    continue;
+                // 权威前台校正（每节拍）：hook focus 事件在 OPPO ROM 存在抖动噪声
+                // （回桌面后残留 resume 事件反复上报，pause 过滤挡不住 event=1 的
+                // 乱序/残留）。以 ActivityTaskManager.getTasks(1) 的真实 top activity
+                // 为准，变化时补发权威 focus 事件——daemon 的 last_focus/decide_leave
+                // 以权威源为准，hook focus 降级为 observe 线索（2026-08-02 真机实证）。
+                String top = topActivityPkg();
+                if (top != null && !top.equals(lastTop)) {
+                    lastTop = top;
+                    dispatcher.dispatch("event focus pkg=" + top);
+                    observe(top);
                 }
-                boolean fg = hasForegroundService(pkg);
-                boolean media = hasActiveMedia(pkg);
-                boolean changed = !sent || fg != lastFg || media != lastMedia;
-                lastFg = fg;
-                lastMedia = media;
-                sent = true;
-                if (changed) {
-                    dispatcher.dispatch(
-                            "event exempt pkg=" + pkg
-                                    + " fg=" + (fg ? 1 : 0)
-                                    + " media=" + (media ? 1 : 0));
+                java.util.List<String> pkgs;
+                synchronized (lock) {
+                    pkgs = new java.util.ArrayList<>(order); // 快照，锁外判定
+                }
+                for (String pkg : pkgs) {
+                    boolean fg = hasForegroundService(pkg);
+                    boolean media = hasActiveMedia(pkg);
+                    Flags st;
+                    synchronized (lock) {
+                        st = states.get(pkg);
+                        if (st == null) {
+                            st = new Flags();
+                            states.put(pkg, st);
+                        }
+                    }
+                    boolean changed = !st.sent || fg != st.fg || media != st.media;
+                    st.fg = fg;
+                    st.media = media;
+                    st.sent = true;
+                    if (changed) {
+                        dispatcher.dispatch(
+                                "event exempt pkg=" + pkg
+                                        + " fg=" + (fg ? 1 : 0)
+                                        + " media=" + (media ? 1 : 0));
+                    }
                 }
             } catch (Throwable t) {
                 Log.w(TAG, "豁免判定异常（跳过本轮）: " + t);
             }
+        }
+    }
+
+    /** 真实前台包名（ActivityTaskManager.getTasks(1)，@hide 全反射；system_server 内
+     *  自调用 fast-path binder，2s 节拍开销可接受）。失败返回 null（降级 hook focus）。 */
+    private String lastTop;
+
+    private static String topActivityPkg() {
+        try {
+            Class<?> atmCls = Class.forName("android.app.ActivityTaskManager");
+            Method getInstance = atmCls.getMethod("getInstance");
+            Object atm = getInstance.invoke(null);
+            if (atm == null) {
+                return null;
+            }
+            Method getTasks = atm.getClass().getMethod("getTasks", int.class);
+            Object ret = getTasks.invoke(atm, 1);
+            if (!(ret instanceof List)) {
+                return null;
+            }
+            List<?> tasks = (List<?>) ret;
+            if (tasks.isEmpty()) {
+                return null;
+            }
+            Object info = tasks.get(0);
+            if (info == null) {
+                return null;
+            }
+            java.lang.reflect.Field f = info.getClass().getField("topActivity");
+            Object cn = f.get(info);
+            if (!(cn instanceof ComponentName)) {
+                return null;
+            }
+            return ((ComponentName) cn).getPackageName();
+        } catch (Throwable t) {
+            Log.w(TAG, "topActivity 判定失败（降级 hook focus）: " + t);
+            return null;
         }
     }
 

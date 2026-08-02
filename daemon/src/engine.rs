@@ -67,11 +67,14 @@ impl EngineState {
     // ---------------- 事件入口 ----------------
 
     /// event focus pkg=P [fg=0|1] [media=0|1]
-    pub fn on_focus(&mut self, pkg: &str, fg: bool, media: bool) {
+    ///
+    /// 注意：fg/media 参数来自 focus 事件行（dex hook 回调侧仅登记 pkg，未携带
+    /// 实时判定），**不可用于覆盖 exempt 表**——否则会把 ExemptMonitor 独立线程
+    /// 上报的正确豁免判定（fg=true 前台服务/媒体）冲掉，导致退后台即有前台服务的
+    /// app 被误计时/误冻（2026-08-02 真机实证：微信 fg=true 被 focus 事件覆盖后
+    /// 进入 grace）。exempt 表只由 on_exempt 维护。
+    pub fn on_focus(&mut self, pkg: &str, _fg: bool, _media: bool) {
         let now = Instant::now();
-        // 记录该包豁免判定（供后续离开前台决策）
-        self.exempt
-            .insert(pkg.to_string(), ExemptFlags { fg_service: fg, media });
 
         // 新前台冻结中 → 解冻 + 冷却
         if self.frozen.remove(pkg).is_some() {
@@ -217,6 +220,23 @@ impl EngineState {
             if self.cooldown.contains_key(&pkg) {
                 self.grace.remove(&pkg);
                 continue;
+            }
+            // 豁免二次校验（2026-08-02 真机实证补充）：focus 事件在 OPPO ROM 存在
+            // pause 噪声（updateActivityUsageStats 的 PAUSED 回调被误报为焦点切换），
+            // tick 到期时 last_focus 可能失真；ExemptMonitor 独立线程 2s 节拍以
+            // getServices/播放配置真实判定 fg/media——tick 这里兜底消费，防止
+            // 有前台服务/媒体播放的 app 被 focus 噪声误冻。
+            if let Some(fl) = self.exempt.get(&pkg) {
+                if (self.policy.keep_fg_service && fl.fg_service)
+                    || (self.policy.keep_media && fl.media)
+                {
+                    logi!(
+                        "L3 tick豁免跳过（fg={} media={}）: {}",
+                        fl.fg_service, fl.media, pkg
+                    );
+                    self.grace.remove(&pkg);
+                    continue;
+                }
             }
             self.freeze_now(&pkg, now);
             self.grace.remove(&pkg);

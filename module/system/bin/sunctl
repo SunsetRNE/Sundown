@@ -10,7 +10,7 @@ INSTALLED_META="$SUNDOWN_DIR/update/installed.json"
 READY_MARKER="$SUNDOWN_DIR/update/daemon.ready"
 SOCK_PATH="$SUNDOWN_DIR/sundownd.sock"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.4.0-l3"
+VERSION="0.4.1-l3"
 
 # ---------- 工具函数 ----------
 

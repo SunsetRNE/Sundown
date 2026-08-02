@@ -206,6 +206,10 @@ final class Runtime {
 
     /** hello-dex 应答处理：安装 hook（一次性）+ 版本落后则 fetch-dex 自愈 */
     private void onHello(JSONObject hello) {
+        // L3：每次成功握手（含 daemon 重启后的重连）都重置豁免上报状态——
+        // daemon 重启清空其 exempt 表，本侧判定值未变化时不会自发重发；
+        // 重置 sent 后下一节拍全量重报，保证新 daemon 豁免表完整（防误冻）。
+        exemptMonitor.reset();
         if (!hooksInstalled) {
             hooksInstalled = true; // 先置位防重入；失败下轮重连再试
             try {
