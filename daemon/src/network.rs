@@ -75,6 +75,27 @@ impl NetSampler {
         active
     }
 
+    /// uid 是否处于任何网络活动：窗口内增量 > 0（v0.4.23-l3，keep_network 网络豁免/唤醒用）。
+    /// 语义对齐 AStop `force_network_exemption`：只要 uid 有流量（内核侧统计，即使进程被
+    /// cgroup 冻结 rx 仍计数）即视为活跃——网络敏感 app（VPN/推送/下载）活跃时不冻、
+    /// 冻结后有流量则唤醒。与 is_active 共享基线（窗口一致，仅阈值不同，互不干扰）。
+    pub fn is_active_any(&mut self, uid: u32, window: Duration) -> bool {
+        let Some(bytes) = self.uid_bytes(uid) else {
+            return false; // 源不可用：降级
+        };
+        let now = Instant::now();
+        let active = match self.last.get(&uid) {
+            Some((prev, at)) => {
+                let dt = now.duration_since(*at);
+                let delta = bytes.saturating_sub(*prev);
+                dt >= window && delta > 0
+            }
+            None => false,
+        };
+        self.last.insert(uid, (bytes, now));
+        active
+    }
+
     /// 读取 uid 累计网络字节（收发合计）。多源探测，缓存可用源。
     fn uid_bytes(&mut self, uid: u32) -> Option<u64> {
         if self.source == Some(NetSource::UidStat) {

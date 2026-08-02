@@ -18,6 +18,10 @@
 # [whitelist] packages 豁免包（退后台不冻结）/ keep_fg_service 前台服务豁免 / keep_media 媒体播放豁免
 #             keep_location 定位活动豁免（v0.4.20-l3：dex 侧 AppOps 判定 loc=1，定位使用中不冻）
 #             keep_high_network 高网络负载豁免（v0.4.19-l3，daemon 侧流量采样判定）
+#             keep_network 网络豁免（v0.4.23-l3，对齐 AStop force_network_exemption）：
+#               有网络活动（任何流量增量 >0）即不冻结——比 keep_high_network 高阈值更宽松；
+#               已冻结时检测到网络活动 → 自动唤醒解冻（对齐 AStop allow_network_wakeup）。
+#               VPN/推送/下载/通话类网络敏感 app 推荐开启（缺省 true）。
 #             push_policy 子进程策略 keep|kill（v0.4.19-l3：冻结时 :push 类子进程 保留/杀死）
 # [apps."pkg"] per-app 策略（v0.4.8-l3 新增，参考 Cerberus 四策略分级）：
 #   mode = "exempt"   豁免：退后台永不冻结（等价 whitelist，可携带独立豁免开关）
@@ -27,6 +31,8 @@
 #   keep_fg_service / keep_media = true|false  per-app 豁免开关（缺省跟随全局）
 #   keep_location = true|false  per-app 定位活动豁免开关（v0.4.20-l3，缺省跟随全局）
 #   keep_high_network = true|false  per-app 高网络豁免开关（v0.4.19-l3，缺省跟随全局）
+#   keep_network = true|false  per-app 网络豁免开关（v0.4.23-l3：有网络活动即不冻结 +
+#                              冻结中网络唤醒；缺省跟随全局 keep_network）
 #   keep_wakeup = true|false  per-app 交互/FCM 唤醒解冻开关（v0.4.19-l3；false = 唤醒不解冻，
 #                              防 FCM/唤醒风暴 app 反复解冻，缺省 true 保持既有行为）
 #   push_mode = "keep"|"kill"  per-app 子进程策略（v0.4.19-l3，缺省跟随全局 push_policy）
@@ -70,6 +76,7 @@ keep_fg_service = true
 keep_media = true
 keep_location = true
 keep_high_network = true
+keep_network = true
 push_policy = "keep"
 
 # ---- per-app 策略示例（默认全部注释：不配置 = 跟随全局 standard 规则）----

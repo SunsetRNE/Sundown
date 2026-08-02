@@ -502,6 +502,19 @@ impl EngineState {
                 self.grace.remove(&pkg);
                 continue;
             }
+            // v0.4.23-l3：网络豁免二次校验——grace 到期时仍有任何网络活动 → 跳过冻结
+            if self.keep_net(&pkg) && self.net_active_any(&pkg) {
+                logi!("L3 tick网络豁免跳过: {}", pkg);
+                self.events.push_app(
+                    EvLevel::Info,
+                    EvAction::Exempt,
+                    &pkg,
+                    Some("tick_network_exempt"),
+                    None,
+                );
+                self.grace.remove(&pkg);
+                continue;
+            }
             self.freeze_now(&pkg, now, "grace_expired");
             self.grace.remove(&pkg);
         }
@@ -558,6 +571,39 @@ impl EngineState {
                 }
             }
         }
+
+        // v0.4.23-l3：冻结中网络唤醒（对齐 AStop allow_network_wakeup）——keep_network
+        // 开启的 app 被冻结后，若内核侧仍有网络流量（rx 计数：外部发包/心跳/隧道流量，
+        // 即使进程被冻结内核照收）→ 立即解冻，防"冻死断流"（VPN/推送/下载类）。
+        // 每 10 tick ≈3s 一次；解冻后进冷却窗口（防"解冻-再冻"抖动）。
+        // 注意：先收集 frozen 键再遍历（net_active_any 需要 &mut self，避免借用冲突）。
+        if self.tick_count % 10 == 0 && !self.frozen.is_empty() {
+            let frozen_pkgs: Vec<String> = self.frozen.keys().cloned().collect();
+            let mut wake: Vec<String> = Vec::new();
+            for pkg in &frozen_pkgs {
+                if self.keep_net(pkg) && self.net_active_any(pkg) {
+                    wake.push(pkg.clone());
+                }
+            }
+            for pkg in wake {
+                if freezer::unfreeze_pkg(&pkg) {
+                    self.unfreeze_ops += 1;
+                    self.wakeup_thaws += 1;
+                    logw!("L3 网络唤醒解冻: {}", pkg);
+                }
+                self.frozen.remove(&pkg);
+                self.grace.remove(&pkg);
+                self.cooldown
+                    .insert(pkg.clone(), Instant::now() + self.cooldown_dur());
+                self.events.push_app(
+                    EvLevel::Info,
+                    EvAction::Unfreeze,
+                    &pkg,
+                    Some("network_wakeup"),
+                    None,
+                );
+            }
+        }
     }
 
     // ---------------- 决策 ----------------
@@ -578,6 +624,16 @@ impl EngineState {
         match self.policy.apps.get(pkg) {
             Some(ap) => ap.keep_high_network.unwrap_or(self.policy.keep_high_network),
             None => self.policy.keep_high_network,
+        }
+    }
+
+    /// 网络豁免开关（v0.4.23-l3，per-app 覆盖优先，缺省回落全局）——
+    /// 对齐 AStop force_network_exemption：开启 = 有网络活动（任何流量增量）即不冻结，
+    /// 已冻结时网络活动触发唤醒解冻（对齐 AStop allow_network_wakeup）。
+    fn keep_net(&self, pkg: &str) -> bool {
+        match self.policy.apps.get(pkg) {
+            Some(ap) => ap.keep_network.unwrap_or(self.policy.keep_network),
+            None => self.policy.keep_network,
         }
     }
 
@@ -650,6 +706,15 @@ impl EngineState {
             return false;
         };
         self.net.is_active(uid, DEFAULT_WINDOW, DEFAULT_THRESHOLD)
+    }
+
+    /// 网络活动采样判定（v0.4.23-l3）：uid 窗口内任何流量增量 > 0（数据源不可用 → false）。
+    /// 内核侧统计：即使进程被 cgroup 冻结，rx 仍计数——冻结中检测到流量即可唤醒。
+    fn net_active_any(&mut self, pkg: &str) -> bool {
+        let Some(uid) = crate::freezer::pkg_uid(pkg) else {
+            return false;
+        };
+        self.net.is_active_any(uid, DEFAULT_WINDOW)
     }
 
     /// 当前本地时间（分钟数 0..=1439）；失败 None。libc localtime_r（零依赖）。
@@ -750,6 +815,20 @@ impl EngineState {
                 EvAction::Exempt,
                 pkg,
                 Some("high_network"),
+                None,
+            );
+            return;
+        }
+        // v0.4.23-l3：网络豁免（对齐 AStop force_network_exemption）——任何网络活动
+        // （流量增量 >0，比 keep_high_network 高阈值更宽松）即不冻结。
+        // VPN/推送/下载/通话类网络敏感 app 有流量在跑 → 永不进 grace。
+        if self.keep_net(pkg) && self.net_active_any(pkg) {
+            logi!("L3 网络豁免: {}", pkg);
+            self.events.push_app(
+                EvLevel::Info,
+                EvAction::Exempt,
+                pkg,
+                Some("network_exempt"),
                 None,
             );
             return;

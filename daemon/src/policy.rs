@@ -68,6 +68,11 @@ pub struct AppPolicy {
     pub keep_location: Option<bool>,
     /// 高网络负载豁免开关（None = 跟随全局 keep_high_network）
     pub keep_high_network: Option<bool>,
+    /// 网络豁免开关（v0.4.23-l3，对齐 AStop force_network_exemption）：
+    /// 有网络活动即不冻结（任何流量增量 >0，区别于 keep_high_network 的高阈值）；
+    /// 已冻结时检测到网络活动 → 唤醒解冻（对齐 AStop allow_network_wakeup）。
+    /// None = 跟随全局 keep_network
+    pub keep_network: Option<bool>,
     /// 交互/FCM 唤醒豁免开关（None = 缺省 true：wakeup 事件照常解冻）
     pub keep_wakeup: Option<bool>,
     /// 子进程策略（None = 跟随全局 push_policy）
@@ -85,6 +90,7 @@ impl Default for AppPolicy {
             keep_media: None,
             keep_location: None,
             keep_high_network: None,
+            keep_network: None,
             keep_wakeup: None,
             push_mode: None,
             unfreeze_window: None,
@@ -131,6 +137,9 @@ pub struct Policy {
     pub keep_location: bool,
     /// 豁免动作：高网络负载不冻（daemon 侧流量采样判定，/proc/uid_stat）
     pub keep_high_network: bool,
+    /// 豁免动作：网络豁免（v0.4.23-l3，对齐 AStop force_network_exemption）——
+    /// 有网络活动（任何流量增量）即不冻结；已冻结时网络活动触发唤醒解冻
+    pub keep_network: bool,
     /// 子进程策略（冻结时 :push 类子进程 保留/杀死，缺省 keep）
     pub push_policy: PushMode,
     /// VPN 守护进程保护（v0.4.22-l3）：true = 自动探测的 tun 持有者 + 手动列表永不冻结（缺省 true）
@@ -157,6 +166,7 @@ impl Default for Policy {
             keep_media: true,
             keep_location: true,
             keep_high_network: true,
+            keep_network: true,
             push_policy: PushMode::Keep,
             keep_vpn: true,
             vpn_packages: Vec::new(),
@@ -226,6 +236,7 @@ fn apply_entry(p: &mut Policy, e: &TomlEntry) {
         ("whitelist", "keep_media") => p.keep_media = bool_of(val, e, true),
         ("whitelist", "keep_location") => p.keep_location = bool_of(val, e, true),
         ("whitelist", "keep_high_network") => p.keep_high_network = bool_of(val, e, true),
+        ("whitelist", "keep_network") => p.keep_network = bool_of(val, e, true),
         ("whitelist", "push_policy") => match str_of(val, e) {
             Some(s) => match PushMode::parse(&s) {
                 Some(m) => p.push_policy = m,
@@ -270,6 +281,7 @@ fn apply_app_entry(p: &mut Policy, pkg: &str, e: &TomlEntry) {
         "keep_media" => ap.keep_media = Some(bool_of(val, e, true)),
         "keep_location" => ap.keep_location = Some(bool_of(val, e, true)),
         "keep_high_network" => ap.keep_high_network = Some(bool_of(val, e, true)),
+        "keep_network" => ap.keep_network = Some(bool_of(val, e, true)),
         "keep_wakeup" => ap.keep_wakeup = Some(bool_of(val, e, true)),
         "push_mode" => match str_of(val, e) {
             Some(s) => match PushMode::parse(&s) {
@@ -592,5 +604,30 @@ packages = [ "com.example.clash", "com.example.v2ray" ]
         // 类型错误回落默认 true
         let p3 = Policy::from_toml("[vpn]\nkeep_vpn = 1", 13).unwrap();
         assert!(p3.keep_vpn);
+    }
+
+    #[test]
+    fn parse_network_dimension_v0423() {
+        // v0.4.23-l3：网络豁免维度（全局 + per-app，对齐 AStop force_network_exemption）
+        let src = r#"
+[whitelist]
+keep_network = false
+
+[apps."com.example.downloader"]
+keep_network = true
+
+[apps."com.example.bad"]
+keep_network = 1
+"#;
+        let p = Policy::from_toml(src, 14).unwrap();
+        assert!(!p.keep_network); // 全局关闭
+        assert_eq!(p.apps["com.example.downloader"].keep_network, Some(true)); // per-app 覆盖
+        assert_eq!(p.apps["com.example.bad"].keep_network, Some(true)); // 类型错误回落默认 true（失败安全）
+        // 缺省（未配置）回落全局语义由引擎 keep_net 方法处理：None → 全局
+        assert_eq!(Policy::default().keep_network, true);
+        // 默认 per-app None（跟随全局）
+        assert!(Policy::default().apps.get("x").is_none());
+        let p2 = Policy::from_toml("[apps.\"com.x.y\"]\nmode = \"strict\"", 15).unwrap();
+        assert_eq!(p2.apps["com.x.y"].keep_network, None);
     }
 }

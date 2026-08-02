@@ -83,7 +83,7 @@ Sundown/
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
-## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.22-l3：VPN 守护进程硬豁免 + 残留冻结三路兜底——修复实机冻死/断网）
+## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.23-l3：per-app 网络豁免位 + 冻结中网络唤醒——对齐 AStop force_network_exemption / allow_network_wakeup）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
@@ -160,6 +160,11 @@ Sundown/
   - on_focus 兜底：frozen 表无记录但 uid 实际冻结（残留/事件丢失）→ 仍解冻（reason=residual_thaw）
   - tick 低频对账（每 30 tick ≈9s）：实际冻结但表无记录 → 解冻，防僵尸状态
   - WebUI v2.3：策略页新增 VPN 守护进程保护开关；policy.toml 模板补 [vpn] 段文档
+- [x] per-app 网络豁免位 + 冻结中网络唤醒（v0.4.23-l3，参考 AStopV1.7 研究落地）：
+  - 背景：AStop 研究确认其网络解法 = `force_network_exemption`（网络活跃即豁免）+ `allow_network_wakeup`（冻结后网络事件唤醒）+ critical_apps.txt 强制名单；Sundown 已有 keep_high_network（高阈值 256KB/30s），缺"任何网络活动"档位的宽松豁免与冻结中唤醒
+  - 网络豁免 `keep_network`（全局 `[whitelist]` + per-app `[apps."pkg"]`，缺省 true）：`NetSampler::is_active_any` 窗口内流量增量 >0 即活跃（内核侧统计——进程被 cgroup 冻结后 rx 仍计数）；decide_leave 豁免链新增 `network_exempt`、tick 到期二次校验新增 `tick_network_exempt`——VPN/推送/下载/通话类网络敏感 app 有流量在跑永不进 grace
+  - 冻结中网络唤醒（对齐 AStop allow_network_wakeup）：tick 每 10 拍（≈3s）扫描 frozen 表中 keep_network 开启者，检测到网络活动 → 解冻（reason=network_wakeup，进冷却防抖）——防"冻死断流"（隧道心跳/外部发包仍被内核计数）
+  - WebUI v2.4：策略页新增网络豁免开关；policy.toml 模板补 keep_network 文档（全局 + per-app）
 
 ## 待办（后置）
 - [ ] 定位活动豁免 dex 侧 AppOps 判定（ExemptMonitor.java 扩展 loc 字段上报，走 L2 热更新路线）

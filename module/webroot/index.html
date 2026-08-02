@@ -376,6 +376,10 @@
         <div class="switch" id="p-khn"></div>
       </div>
       <div class="field">
+        <label>网络豁免<span class="desc">keep_network：有网络活动即不冻结 + 冻结中网络唤醒（v0.4.23-l3，对齐 AStop force_network_exemption / allow_network_wakeup）</span></label>
+        <div class="switch" id="p-knw"></div>
+      </div>
+      <div class="field">
         <label>推送子进程保留<span class="desc">push_policy=keep：冻结时保留 :push 子进程不断推送；关闭 = kill 连带杀死（v0.4.19-l3）</span></label>
         <div class="switch" id="p-pp"></div>
       </div>
@@ -489,7 +493,7 @@
       <div class="kv"><span class="k">L2b 桥 hash</span><span class="v mono" id="m-bridge-hash">-</span></div>
     </div>
 
-    <div class="foot-note">Sundown by SunsetREN · WebUI v2.0</div>
+    <div class="foot-note">Sundown by SunsetREN · WebUI v2.4</div>
   </section>
 </main>
 
@@ -550,12 +554,14 @@ async function fetchToml() {
   const m5 = RAW_TOML.match(/^keep_location\s*=\s*(true|false)/m);
   const m4 = RAW_TOML.match(/^push_policy\s*=\s*"(keep|kill)"/m);
   const m6 = RAW_TOML.match(/^keep_vpn\s*=\s*(true|false)/m);
+  const m7 = RAW_TOML.match(/^keep_network\s*=\s*(true|false)/m);
   TOML.keep_fg_service = m1 ? m1[1] === "true" : true;
   TOML.keep_media = m2 ? m2[1] === "true" : true;
   TOML.keep_location = m5 ? m5[1] === "true" : true;
   TOML.keep_high_network = m3 ? m3[1] === "true" : true;
   TOML.push_policy = m4 ? m4[1] : "keep";
   TOML.keep_vpn = m6 ? m6[1] === "true" : true;
+  TOML.keep_network = m7 ? m7[1] === "true" : true;
   return TOML;
 }
 const fmtUptime = s => {
@@ -728,6 +734,7 @@ async function refreshPolicyForm() {
   setSwitch($("p-km"), TOML.keep_media);
   setSwitch($("p-kl"), TOML.keep_location);
   setSwitch($("p-khn"), TOML.keep_high_network);
+  setSwitch($("p-knw"), TOML.keep_network);
   setSwitch($("p-pp"), TOML.push_policy === "keep");
   setSwitch($("p-kvp"), TOML.keep_vpn);
   wlDraft = (P.whitelist || []).slice();
@@ -772,9 +779,10 @@ function buildToml() {
   const km = $("p-km").dataset.on === "1";
   const kl = $("p-kl").dataset.on === "1";
   const khn = $("p-khn").dataset.on === "1";
+  const knw = $("p-knw").dataset.on === "1";
   const pp = $("p-pp").dataset.on === "1" ? "keep" : "kill";
   const kvp = $("p-kvp").dataset.on === "1";
-  return "# Sundown L3 冻结策略（conf/policy.toml）— 由 WebUI v2.3 保存\n"
+  return "# Sundown L3 冻结策略（conf/policy.toml）— 由 WebUI v2.4 保存\n"
     + "# inotify 热加载：保存即生效；语法错误时 daemon 保留旧表\n\n"
     + "[general]\n"
     + "enabled = " + en + "\n"
@@ -791,6 +799,7 @@ function buildToml() {
     + "keep_media = " + km + "\n"
     + "keep_location = " + kl + "\n"
     + "keep_high_network = " + khn + "\n"
+    + "keep_network = " + knw + "\n"
     + "push_policy = \"" + pp + "\"\n\n"
     + "[defense]\n"
     + "anr_protect = false\n"
