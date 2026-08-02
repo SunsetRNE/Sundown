@@ -2,8 +2,16 @@
 # 失败安全铁律：语法错误 → 保留旧表 + 日志留痕；未知键/段 → 警告不致命
 #
 # ⚠️ 发布默认 enabled=false（观望模式）：冻结是强副作用操作，确认无异常后再开启。
-# 实测教训（2026-08-02）：grace=10s + 无豁免字段会误冻高频 app（含 AI 助手自身）→
+# 实测教训（2026-08-02 首版）：grace=10s + 无豁免字段会误冻高频 app（含 AI 助手自身）→
 # binder 阻塞 ANR/闪退；启用前请先完善白名单并观察 grace_pending 列表。
+#
+# ✅ 实测结论（2026-08-02 v0.4.9-l3，ColorOS 实机，白名单 11 包 + 3 per-app）：
+#   strict+5s → focus→grace(5s)→freeze(grace_expired) 全链路通过
+#   唤醒解冻 → 重新打开冻结 app 触发 unfreeze(foreground)，恢复前台
+#   standard  → 跟随全局 grace 30s 到期冻结（mark.via 实测）
+#   exempt    → 退后台不进 grace（grace_pending 无），永不冻结（termux 实测 35s+）
+#   真实场景 → 抖音退后台 30s 自动冻结；用户点开自动唤醒解冻（wakeup_thaws+1）
+#   无副作用 → 全程无 ANR/崩溃；微信/QQ 后台唤醒仅记录不冻结
 #
 # [general]   enabled 总开关 / grace_seconds 退后台宽限秒数 / cooldown_seconds 解冻后冷却秒数
 # [freeze]    force 立即冻结包（不走 grace）
@@ -42,21 +50,31 @@ keep_fg_service = true
 keep_media = true
 
 # ---- per-app 策略示例（默认全部注释：不配置 = 跟随全局 standard 规则）----
-# 通讯类高频 app：严格模式 + 保留媒体豁免（语音通话/播放中不冻）
+# 通讯类高频 app：strict + 保留媒体豁免（语音通话/视频播放中不冻），grace 15s 兼顾消息场景
 # [apps."com.tencent.mm"]
 # mode = "strict"
-# grace_seconds = 8
+# grace_seconds = 15
 # keep_media = true
+#
+# 同上（QQ 与微信同策略）
+# [apps."com.tencent.mobileqq"]
+# mode = "strict"
+# grace_seconds = 15
+# keep_media = true
+#
+# 短视频：standard 跟随全局（刷完退后台 30s 后冻，省电；播放中媒体豁免不冻）
+# [apps."com.ss.android.ugc.aweme"]
+# mode = "standard"
+#
+# 开发者工具：完全豁免（后台常驻任务，如编译/同步/终端）
+# [apps."com.termux"]
+# mode = "exempt"
 #
 # 游戏类：strict + 关闭媒体豁免（挂机场景也要冻，省电优先）
 # [apps."com.tencent.tmgp.sgame"]
 # mode = "strict"
 # grace_seconds = 5
 # keep_media = false
-#
-# 工具类：完全豁免（后台常驻任务，如下载/同步）
-# [apps."com.example.downloader"]
-# mode = "exempt"
 
 [defense]
 anr_protect = false
