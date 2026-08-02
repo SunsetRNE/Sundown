@@ -82,9 +82,17 @@ final class FocusHooks implements HookEngine {
      * 在 resume(1)/pause(2)/stopped(3) 都会触发——pause/stopped 时参数仍是
      * 正在离开的 app（OPPO ROM 实证：抖音 splash 启动瞬间 launcher 的 PAUSED
      * 事件被当作"焦点切到 launcher"上报 → 引擎误判退后台 → 误冻前台 app）。
-     * 因此只把 event==ACTIVITY_RESUMED(1) 视为焦点切换上报，其余忽略。
+     * 因此只把 event==ACTIVITY_RESUMED(1) 视为焦点切换候选，其余忽略。
      * event 定位：参数中最后一个值∈{1,2,3} 的 Integer（userId 在前，event 在后）；
      * 找不到（签名漂移）→ 保守照旧上报（宁多不漏）。
+     *
+     * 焦点去抖（v0.4.14-l3）：resume 事件在 OPPO ROM 仍存在退后台瞬间的乱序/
+     * 残留（回桌面后 launcher/calculator 交替上报 → daemon last_focus 被污染 →
+     * force 立即冻结被抖动解冻，真机实证）。因此 hook focus **降级为线索**：
+     * 仅登记 ExemptMonitor（observe），由权威 topActivity（2s 节拍，
+     * ActivityTaskManager.getTasks(1)）作为唯一焦点决策源——daemon 的
+     * last_focus/decide_leave 只消费权威事件。权威源失效（连续 10s 无成功
+     * 判定）时自动恢复 hook 直报兜底（宁多不漏，与降级哲学一致）。
      */
     public Object onActivitySwitch(MethodCallback cb) {
         Object res = cb.invokeOriginalOrDefault();
@@ -102,10 +110,13 @@ final class FocusHooks implements HookEngine {
                 }
             }
             if (pkg != null && (event == null || event.intValue() == 1)) {
-                dispatcher.dispatch("event focus pkg=" + pkg);
                 // L3：登记最近焦点（ExemptMonitor 独立线程做 fg/media 豁免判定）
                 if (monitor != null) {
                     monitor.observe(pkg);
+                }
+                // 权威焦点源不活跃时（启动初期 / getTasks 持续失败）恢复直报兜底
+                if (monitor == null || !monitor.authActive()) {
+                    dispatcher.dispatch("event focus pkg=" + pkg);
                 }
             }
         } catch (Throwable t) {

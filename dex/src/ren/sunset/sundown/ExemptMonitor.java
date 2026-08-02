@@ -38,8 +38,20 @@ public final class ExemptMonitor {
     private static final int START_FLAG_FOREGROUND = 1;
     /** 同时判定的最近活跃包上限（LRU：退后台但仍有服务/媒体的 app 持续获得豁免） */
     private static final int MAX_TRACKED = 4;
+    /** 权威 topActivity 判定失效阈值：超过该时长无成功判定 → hook focus 恢复直报兜底 */
+    private static final long AUTH_STALE_MS = 10000;
 
     private final EventDispatcher dispatcher;
+
+    /** 最近一次权威 topActivity 判定成功时刻（elapsedRealtime，单调时钟） */
+    private volatile long lastAuthOkMs = 0L;
+
+    /** 权威焦点源是否活跃（最近 AUTH_STALE_MS 内 topActivity 判定成功）。
+     *  FocusHooks 据此裁决：权威活跃 → hook focus 仅登记线索（去抖）；
+     *  权威失效（如 getTasks 反射连续失败）→ hook focus 恢复直报兜底（宁多不漏）。 */
+    public boolean authActive() {
+        return (android.os.SystemClock.elapsedRealtime() - lastAuthOkMs) < AUTH_STALE_MS;
+    }
 
     /** 观察中的包 → 上次判定（fg/media/sent），lock 保护 */
     private final java.util.Map<String, Flags> states = new java.util.HashMap<>();
@@ -110,10 +122,14 @@ public final class ExemptMonitor {
                 // 为准，变化时补发权威 focus 事件——daemon 的 last_focus/decide_leave
                 // 以权威源为准，hook focus 降级为 observe 线索（2026-08-02 真机实证）。
                 String top = topActivityPkg();
-                if (top != null && !top.equals(lastTop)) {
-                    lastTop = top;
-                    dispatcher.dispatch("event focus pkg=" + top);
-                    observe(top);
+                if (top != null) {
+                    // 权威判定成功：刷新活性（FocusHooks 据此去抖/兜底裁决）
+                    lastAuthOkMs = android.os.SystemClock.elapsedRealtime();
+                    if (!top.equals(lastTop)) {
+                        lastTop = top;
+                        dispatcher.dispatch("event focus pkg=" + top);
+                        observe(top);
+                    }
                 }
                 java.util.List<String> pkgs;
                 synchronized (lock) {

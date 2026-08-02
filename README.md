@@ -83,7 +83,7 @@ Sundown/
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
-## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅ 进行中（v0.4.8-l3：per-app 策略分级 exempt/standard/strict，待真机验证）
+## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.14-l3：冻结链路全实测 + 焦点去抖）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
@@ -122,9 +122,21 @@ Sundown/
   report-bridge/event 协议扩展；daemon status 新增 probe_hook_bridge_hash/
   focus_pkg/wakeup_events；CI build-bridge job（pinned AAR + sha256 校验）。
   计划与裁决见 docs/l2b-plan.md，hook 点经 AStop v1.6.0 dex 静态扫描实证萃取
-- [ ] L2b 真机回归：V1~V8 验证清单（docs/l2b-plan.md §5，execmod/hidden API 首要）
-- [ ] L3：策略引擎与情景预设
+- [x] L2b 真机回归（2026-08-02，v0.4.13-l3 版本闭环 c84b14c 四位一体匹配：
+  stub/dex/bridge hash 全绿，焦点/唤醒/豁免事件流实测工作）
+- [x] L3 策略引擎（v0.4.8-l3 起渐进交付）：
 - [x] L3 per-app 策略分级（v0.4.8-l3：`[apps."pkg"]` mode=exempt|standard|strict + grace/豁免开关覆盖，daemon 侧 + 单元测试；设计见 docs/l3-plan.md §0.6）
+- [x] L3 结构化事件缓冲（v0.4.9-l3：`daemon/src/events.rs`，EvLevel 7 档 × EvAction 8 种 × subject app/system，环形 256 覆盖最旧 + total 单调计数，零依赖手写 JSON；sock `events [n]` 命令；status 追加 events_count/events_total）
+- [x] L3 冻结链路实测（v0.4.11-l3 沉淀：strict 5s / standard 30s / exempt / force / 前台解冻 / 唤醒解冻 / 冷却 7 链路全验证，真实场景抖音 30s 自动冻结 + 点开自动解冻，全程无 ANR；结论固化在 module/conf/policy.toml 注释）
+- [x] L3 freeze 事件 reason 语义化（v0.4.12-l3：freeze_now reason 参数区分 `grace_expired`/`force`）
+- [x] WebUI 日志页 v3（v0.4.13-l3：数据源切换 sunctl events 结构化 JSON，parseEvent 推导卡片，analyzeLogs 双模式 + 老 daemon 文本降级，焦点停留时长改 ts 秒差）
+- [x] 焦点去抖（v0.4.14-l3：hook focus 降级为线索，ExemptMonitor 权威 topActivity 2s 节拍为唯一决策源 + 10s 失效自动恢复 hook 兜底——根治 OPPO ROM resume 残留导致的 force 抖动解冻）
+
+## 待办（后置）
+- [ ] L3 情景预设（action.toml，参考 Cerberus 预设体系）
+- [ ] Cerberus 其余豁免维度：音频/定位/高网络/FCM/交互唤醒/定时解冻 per-app 开关、子进程管理（:push 保留/杀死）
+- [ ] 热更新路线（L0 staged 自动激活 + dex push 联动 WebUI 一键升级）
+- [ ] WebUI 日志页交互打磨（v3 数据面就绪后的分组/时间线视图）
 
 ## 依赖
 

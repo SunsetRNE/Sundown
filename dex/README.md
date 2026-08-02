@@ -74,7 +74,7 @@ daemon 重启/断线：dex 侧每 2s 重连重握手（对齐 L1 桩哲学）。
 | 命令 | 说明 | 应答 |
 |---|---|---|
 | `report-bridge <hash>` | 伴生库（libsundownhook）build hash 上报（hello-dex 后紧随） | `{"ok":1,"bridge_hash_match":1\|0\|-1}` |
-| `event focus pkg=<pkg>` | 前台焦点切换（AMS#updateActivityUsageStats 实证点位） | `{"ok":1}` |
+| `event focus pkg=<pkg>` | 前台焦点切换。**v0.4.14-l3 起双源语义**：权威源（ExemptMonitor 2s 节拍 ActivityTaskManager.getTasks(1)）变化时上报——daemon last_focus/decide_leave 唯一决策源；hook 源（AMS#updateActivityUsageStats RESUME 事件）在权威活跃时仅登记 observe 线索不再上报（OPPO ROM 退后台瞬间 resume 乱序/残留去抖，真机实证 force 冻结被抖动解冻）；权威失效（10s 无成功判定）自动恢复 hook 直报兜底 | `{"ok":1}` |
 | `event exempt pkg=<pkg> fg=0\|1 media=0\|1` | 【L3】豁免判定监视器上行（独立线程 2s 节拍：前台服务 / 媒体播放，判定变化才发；daemon 决策消费） | `{"ok":1}` |
 | `event wakeup pkg=<pkg> reason=<broadcast\|service\|pendingintent>` | 唤醒入口命中 | `{"ok":1}` |
 | `event proc-add pid=<n> pkg=<pkg> [uid=<n>] / proc-remove pid=<n> / force-stop pkg=<pkg>` | 进程生命周期（L3 进程表接入点；proc-add 附 pkg/uid，缺失时 daemon 从 /proc/<pid>/status 兜底） | `{"ok":1}` |
