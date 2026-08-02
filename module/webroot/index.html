@@ -379,6 +379,10 @@
         <label>推送子进程保留<span class="desc">push_policy=keep：冻结时保留 :push 子进程不断推送；关闭 = kill 连带杀死（v0.4.19-l3）</span></label>
         <div class="switch" id="p-pp"></div>
       </div>
+      <div class="field">
+        <label>VPN 守护进程保护<span class="desc">keep_vpn：tun 隧道持有者永不冻结——VPN 被冻结 = 全网断网（v0.4.22-l3 自动探测）</span></label>
+        <div class="switch" id="p-kvp"></div>
+      </div>
     </div>
     <div class="card">
       <h2>🛡️ 白名单（永不冻结）<span class="cnt" id="wl-cnt"></span></h2>
@@ -545,11 +549,13 @@ async function fetchToml() {
   const m3 = RAW_TOML.match(/^keep_high_network\s*=\s*(true|false)/m);
   const m5 = RAW_TOML.match(/^keep_location\s*=\s*(true|false)/m);
   const m4 = RAW_TOML.match(/^push_policy\s*=\s*"(keep|kill)"/m);
+  const m6 = RAW_TOML.match(/^keep_vpn\s*=\s*(true|false)/m);
   TOML.keep_fg_service = m1 ? m1[1] === "true" : true;
   TOML.keep_media = m2 ? m2[1] === "true" : true;
   TOML.keep_location = m5 ? m5[1] === "true" : true;
   TOML.keep_high_network = m3 ? m3[1] === "true" : true;
   TOML.push_policy = m4 ? m4[1] : "keep";
+  TOML.keep_vpn = m6 ? m6[1] === "true" : true;
   return TOML;
 }
 const fmtUptime = s => {
@@ -723,6 +729,7 @@ async function refreshPolicyForm() {
   setSwitch($("p-kl"), TOML.keep_location);
   setSwitch($("p-khn"), TOML.keep_high_network);
   setSwitch($("p-pp"), TOML.push_policy === "keep");
+  setSwitch($("p-kvp"), TOML.keep_vpn);
   wlDraft = (P.whitelist || []).slice();
   forceDraft = (P.force || []).slice();
   renderWl();
@@ -766,7 +773,8 @@ function buildToml() {
   const kl = $("p-kl").dataset.on === "1";
   const khn = $("p-khn").dataset.on === "1";
   const pp = $("p-pp").dataset.on === "1" ? "keep" : "kill";
-  return "# Sundown L3 冻结策略（conf/policy.toml）— 由 WebUI v2.1 保存\n"
+  const kvp = $("p-kvp").dataset.on === "1";
+  return "# Sundown L3 冻结策略（conf/policy.toml）— 由 WebUI v2.3 保存\n"
     + "# inotify 热加载：保存即生效；语法错误时 daemon 保留旧表\n\n"
     + "[general]\n"
     + "enabled = " + en + "\n"
@@ -774,6 +782,9 @@ function buildToml() {
     + "cooldown_seconds = " + cool + "\n\n"
     + "[freeze]\n"
     + "force = " + tomlList(forceDraft) + "\n\n"
+    + "[vpn]\n"
+    + "keep_vpn = " + kvp + "\n"
+    + "packages = []\n\n"
     + "[whitelist]\n"
     + "packages = " + tomlList(wlDraft) + "\n"
     + "keep_fg_service = " + kfg + "\n"

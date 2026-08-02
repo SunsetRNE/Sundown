@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::{loge, logi, logw, paths};
 
@@ -284,6 +285,218 @@ pub fn pid_uid(pid: u32) -> Option<u32> {
     None
 }
 
+// ---------------- VPN 守护进程保护（v0.4.22-l3） ----------------
+//
+// 背景（实机反馈）：VPN 类 app（Clash 等）的 tun 隧道承载全局代理——被冻结 =
+// 全网 app 断网（VPN 切后台冻死后其余 app 全部无网络）；且其主进程非 :push 类，
+// push_mode=Keep 选择性冻结保不住，fg 软豁免依赖 dex 判定存在失效窗口。
+// 方案：硬豁免——探测持有 tun 设备 fd 的进程所属 uid（VPN owner），该 uid 永不
+// 冻结；另支持 policy [vpn] packages 手动兜底列表（引擎侧消费）。
+
+/// tun 接口名判定（tun0/tun1/tun10...；排除 tunl0 等系统 IPIP 隧道）
+fn is_tun_iface(name: &str) -> bool {
+    name.len() > 3
+        && name.starts_with("tun")
+        && name.chars().skip(3).all(|c| c.is_ascii_digit())
+}
+
+fn has_tun_iface() -> bool {
+    let Ok(text) = std::fs::read_to_string("/proc/net/dev") else {
+        return false;
+    };
+    text.lines().any(|l| {
+        let name = l.trim_start().split(':').next().unwrap_or("");
+        is_tun_iface(name)
+    })
+}
+
+/// 探测 VPN owner uid：持有 tun 设备 fd 的进程所属 uid（60s 缓存——全扫有成本）
+static VPN_OWNER_CACHE: Mutex<Option<(Instant, Option<u32>)>> = Mutex::new(None);
+const VPN_CACHE_TTL: Duration = Duration::from_secs(60);
+
+pub fn vpn_owner_uid() -> Option<u32> {
+    {
+        let g = VPN_OWNER_CACHE.lock().unwrap();
+        if let Some((t, v)) = g.as_ref() {
+            if t.elapsed() < VPN_CACHE_TTL {
+                return *v;
+            }
+        }
+    }
+    let v = scan_vpn_owner();
+    *VPN_OWNER_CACHE.lock().unwrap() = Some((Instant::now(), v));
+    v
+}
+
+/// 指定 uid 是否为当前 VPN owner（tun 隧道持有者）
+pub fn is_vpn_owner(uid: u32) -> bool {
+    vpn_owner_uid() == Some(uid)
+}
+
+fn scan_vpn_owner() -> Option<u32> {
+    // 1) 无 tun 接口（VPN 未建立）→ None
+    if !has_tun_iface() {
+        return None;
+    }
+    // 2) 收集候选 pid：apps cgroup 下 uid_*/pid_*（比全 /proc 少且准确）；
+    //    cgroup 不可读时回退全 /proc 遍历
+    let mut pids: Vec<u32> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/sys/fs/cgroup/apps") {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.starts_with("uid_") {
+                continue;
+            }
+            if let Ok(rd2) = std::fs::read_dir(e.path()) {
+                for e2 in rd2.flatten() {
+                    let n2 = e2.file_name().to_string_lossy().to_string();
+                    if let Some(rest) = n2.strip_prefix("pid_") {
+                        if let Ok(pid) = rest.parse::<u32>() {
+                            pids.push(pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if pids.is_empty() {
+        if let Ok(rd) = std::fs::read_dir("/proc") {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.chars().all(|c| c.is_ascii_digit()) {
+                    if let Ok(pid) = name.parse::<u32>() {
+                        pids.push(pid);
+                    }
+                }
+            }
+        }
+    }
+    // 3) 逐个进程扫 fd，命中 tun 设备 → 返回其 uid
+    for pid in pids {
+        let fd_dir = format!("/proc/{}/fd", pid);
+        let Ok(rd) = std::fs::read_dir(&fd_dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let Ok(target) = std::fs::read_link(e.path()) else {
+                continue;
+            };
+            let t = target.to_string_lossy();
+            let hit = t.starts_with("/dev/tun") || t.contains("anon_inode:[tun");
+            if hit {
+                if let Some(uid) = pid_uid(pid) {
+                    logi!("L3 VPN owner 探测命中: uid={} pid={} fd={}", uid, pid, t);
+                    return Some(uid);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// uid 是否实际处于冻结（uid 层或任一 pid 子层 cgroup.freeze=1）。
+/// 选择性冻结（keep_push）只写 pid 子层——必须两层都查。
+pub fn uid_has_frozen_procs(uid: u32) -> bool {
+    let base = format!("/sys/fs/cgroup/apps/uid_{}", uid);
+    if let Ok(s) = std::fs::read_to_string(format!("{}/cgroup.freeze", base)) {
+        if s.trim() == "1" {
+            return true;
+        }
+    }
+    let Ok(rd) = std::fs::read_dir(&base) else {
+        return false;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with("pid_") {
+            continue;
+        }
+        if let Ok(s) = std::fs::read_to_string(e.path().join("cgroup.freeze")) {
+            if s.trim() == "1" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 全部冻结中 uid（uid 层或任一 pid 子层 =1）；对账/诊断用
+pub fn frozen_uids() -> Vec<u32> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir("/sys/fs/cgroup/apps") else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with("uid_") {
+            continue;
+        }
+        let Ok(uid) = name[4..].parse::<u32>() else {
+            continue;
+        };
+        if let Ok(s) = std::fs::read_to_string(e.path().join("cgroup.freeze")) {
+            if s.trim() == "1" {
+                out.push(uid);
+                continue;
+            }
+        }
+        if let Ok(rd2) = std::fs::read_dir(e.path()) {
+            for e2 in rd2.flatten() {
+                let n2 = e2.file_name().to_string_lossy().to_string();
+                if !n2.starts_with("pid_") {
+                    continue;
+                }
+                if let Ok(s) = std::fs::read_to_string(e2.path().join("cgroup.freeze")) {
+                    if s.trim() == "1" {
+                        out.push(uid);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 启动/异常恢复：解冻全部残留冻结（uid 层 + pid 子层写 0）→ 返回解冻 uid 数。
+/// daemon 崩溃/重启后 cgroup.freeze 状态保留（内核态），frozen 表却已清空——
+/// 若不清理，残留冻结的 app 切前台也不会被解冻（表现为"能打开但点击无响应"）。
+pub fn thaw_all_residual() -> usize {
+    let mut n = 0usize;
+    let Ok(rd) = std::fs::read_dir("/sys/fs/cgroup/apps") else {
+        return n;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with("uid_") {
+            continue;
+        }
+        // uid 层
+        let uid_path = e.path().join("cgroup.freeze");
+        if let Ok(s) = std::fs::read_to_string(&uid_path) {
+            if s.trim() == "1" && write_freeze(&uid_path.to_string_lossy(), "0") {
+                n += 1;
+            }
+        }
+        // pid 子层（选择性冻结残留）
+        if let Ok(rd2) = std::fs::read_dir(e.path()) {
+            for e2 in rd2.flatten() {
+                let n2 = e2.file_name().to_string_lossy().to_string();
+                if !n2.starts_with("pid_") {
+                    continue;
+                }
+                let p = e2.path().join("cgroup.freeze");
+                if let Ok(s) = std::fs::read_to_string(&p) {
+                    if s.trim() == "1" {
+                        let _ = write_freeze(&p.to_string_lossy(), "0");
+                    }
+                }
+            }
+        }
+    }
+    n
+}
+
 fn write_freeze(path: &str, val: &str) -> bool {
     match std::fs::write(path, val.as_bytes()) {
         Ok(_) => true,
@@ -317,6 +530,28 @@ mod tests {
         assert!(!is_push_cmdline("com.tencent.mm:remote"));
         assert!(!is_push_cmdline("com.x.y:pushservice")); // 前缀不是独立 token
         assert!(!is_push_cmdline(""));
+    }
+
+    #[test]
+    fn tun_iface_match_v0422() {
+        // v0.4.22-l3：VPN 隧道接口判定（tun0/tun1/tun10 命中；tunl0 等系统隧道排除）
+        assert!(is_tun_iface("tun0"));
+        assert!(is_tun_iface("tun1"));
+        assert!(is_tun_iface("tun10"));
+        assert!(is_tun_iface("tun123"));
+        // 排除：系统 IPIP 隧道 / 无数字后缀 / 空
+        assert!(!is_tun_iface("tunl0"));
+        assert!(!is_tun_iface("tun"));
+        assert!(!is_tun_iface(""));
+        assert!(!is_tun_iface("wlan0"));
+        assert!(!is_tun_iface("rmnet0"));
+        // /proc/net/dev 行解析：接口名在冒号前（可带前导空格）
+        let line = "  tun0: 1234 5678    0    0    0     0          0         0    1234 5678    0    0    0     0       0          0         0";
+        let name = line.trim_start().split(':').next().unwrap_or("");
+        assert!(is_tun_iface(name));
+        let lo = "    lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0";
+        let n2 = lo.trim_start().split(':').next().unwrap_or("");
+        assert!(!is_tun_iface(n2));
     }
 
     fn pid_parse_uid(text: &str) -> Option<u32> {

@@ -133,6 +133,10 @@ pub struct Policy {
     pub keep_high_network: bool,
     /// 子进程策略（冻结时 :push 类子进程 保留/杀死，缺省 keep）
     pub push_policy: PushMode,
+    /// VPN 守护进程保护（v0.4.22-l3）：true = 自动探测的 tun 持有者 + 手动列表永不冻结（缺省 true）
+    pub keep_vpn: bool,
+    /// VPN 手动兜底列表（自动探测失效时；命中即受保护，优先级最高）
+    pub vpn_packages: Vec<String>,
     /// 防御 hook 组（L3 仅解析+展示，不启用）
     pub defense_anr: bool,
     pub defense_cached_optimizer: bool,
@@ -154,6 +158,8 @@ impl Default for Policy {
             keep_location: true,
             keep_high_network: true,
             push_policy: PushMode::Keep,
+            keep_vpn: true,
+            vpn_packages: Vec::new(),
             defense_anr: false,
             defense_cached_optimizer: false,
             revision: 0,
@@ -200,6 +206,11 @@ impl Policy {
     pub fn is_forced(&self, pkg: &str) -> bool {
         self.force.iter().any(|f| f == pkg)
     }
+
+    /// VPN 手动兜底列表判定（v0.4.22-l3）
+    pub fn is_vpn_listed(&self, pkg: &str) -> bool {
+        self.vpn_packages.iter().any(|v| v == pkg)
+    }
 }
 
 fn apply_entry(p: &mut Policy, e: &TomlEntry) {
@@ -224,6 +235,8 @@ fn apply_entry(p: &mut Policy, e: &TomlEntry) {
         },
         ("defense", "anr_protect") => p.defense_anr = bool_of(val, e, false),
         ("defense", "cached_app_optimizer") => p.defense_cached_optimizer = bool_of(val, e, false),
+        ("vpn", "keep_vpn") => p.keep_vpn = bool_of(val, e, true),
+        ("vpn", "packages") => p.vpn_packages = str_array_of(val, e),
         (s, _k) if s.starts_with("apps.") => apply_app_entry(p, &s[5..], e),
         (s, k) => {
             if !s.is_empty() {
@@ -555,5 +568,29 @@ keep_location = 1
         assert_eq!(PushMode::parse("nuke"), None);
         assert_eq!(PushMode::Keep.as_str(), "keep");
         assert_eq!(PushMode::Kill.as_str(), "kill");
+    }
+
+    #[test]
+    fn parse_vpn_section_v0422() {
+        // v0.4.22-l3：VPN 守护进程保护段（keep_vpn + 手动兜底列表）
+        let src = r#"
+[vpn]
+keep_vpn = true
+packages = [ "com.example.clash", "com.example.v2ray" ]
+"#;
+        let p = Policy::from_toml(src, 11).unwrap();
+        assert!(p.keep_vpn);
+        assert!(p.is_vpn_listed("com.example.clash"));
+        assert!(p.is_vpn_listed("com.example.v2ray"));
+        assert!(!p.is_vpn_listed("com.example.other"));
+        // 缺省：keep_vpn = true（安全优先）
+        assert!(Policy::default().keep_vpn);
+        assert!(Policy::default().vpn_packages.is_empty());
+        // keep_vpn = false 显式关闭
+        let p2 = Policy::from_toml("[vpn]\nkeep_vpn = false", 12).unwrap();
+        assert!(!p2.keep_vpn);
+        // 类型错误回落默认 true
+        let p3 = Policy::from_toml("[vpn]\nkeep_vpn = 1", 13).unwrap();
+        assert!(p3.keep_vpn);
     }
 }

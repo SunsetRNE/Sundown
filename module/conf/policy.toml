@@ -33,6 +33,12 @@
 #   unfreeze_window = "HH:MM-HH:MM"  per-app 定时解冻窗口（v0.4.19-l3：窗口内退后台不冻结；
 #                              不支持跨零点，如 22:00-23:59；缺省无窗口）
 # [defense]   防御 hook 组（本期仅解析，不启用——L3.1）
+# [vpn]       VPN 守护进程保护（v0.4.22-l3）：
+#   keep_vpn = true|false  true = 自动探测的 tun 隧道持有者永不冻结（缺省 true）
+#             ——VPN app 被冻结 = 隧道断开 = 全网 app 断网（实机反馈），
+#             其主进程非 :push 类，选择性冻结/软豁免都保不住，必须硬豁免。
+#   packages = [ ... ]     手动兜底列表：自动探测失效（非标准 tun fd 实现）时
+#             直接把 VPN app 包名列在这里，命中即受保护（优先级最高）。
 
 [general]
 enabled = false
@@ -41,6 +47,10 @@ cooldown_seconds = 60
 
 [freeze]
 force = []
+
+[vpn]
+keep_vpn = true
+packages = []
 
 [whitelist]
 packages = [

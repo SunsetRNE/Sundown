@@ -83,7 +83,7 @@ Sundown/
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
-## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.21-l3：修复 eBPF bpf() syscall 缓冲区缺陷——Android16 实机校验发现并定位）
+## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.22-l3：VPN 守护进程硬豁免 + 残留冻结三路兜底——修复实机冻死/断网）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
@@ -152,6 +152,14 @@ Sundown/
   - 根因 1：内核 `bpf_check_uarg_tail_zero` 要求用户缓冲区 `[attr_size, sizeof(union bpf_attr))` 区间全零（否则 E2BIG）——原实现传栈上小数组（16/24/32 字节）尾部随机垃圾 → 必然失败
   - 根因 2：`struct bpf_map_info` 在 6.x 内核约 88+ 字节，原 info buffer 仅 64 字节 + info_len=64 → OBJ_GET_INFO_BY_FD 返回 EINVAL，快照函数第一步即失败
   - 修复：`bpf_cmd` 统一改用 256B 清零缓冲承载（`[0u8; 256]` + copy_from_slice 填充前 N 字节，attr_size 传实际字段长度，256 ≥ sizeof(union bpf_attr) 约 144B）；info buffer/info_len 均扩为 256
+- [x] VPN 守护进程硬豁免 + 残留冻结三路兜底（v0.4.22-l3，修复实机冻死/全网断网）：
+  - 根因链：VPN app 承载 tun 隧道被冻结 = 隧道断开 = 全网 app 断网；其主进程非 :push 类选择性冻结保不住、fg 软豁免依赖 dex 判定有失效窗口；白名单热更新只影响未来决策（已冻结包不追溯解冻）；daemon 崩溃/重启后 cgroup.freeze 内核态保留但 frozen 表清空 → 切前台不解冻 → "能打开但点击无响应" ANR 闪退
+  - VPN 硬豁免：自动探测持有 tun 设备 fd 的进程所属 uid（`/proc/<pid>/fd` readlink 命中 `/dev/tun*`，60s 缓存，apps cgroup pid 枚举 + /proc 回退），decide_leave/tick/freeze_now 三处拦截（force 也拦截），事件留痕 `vpn_protected`；policy 新增 `[vpn] keep_vpn=true`（缺省开）+ `packages` 手动兜底列表
+  - 策略热更新对账：reload 后 frozen 表重新评估，新增白名单/VPN/豁免的已冻结包立即解冻（reason=policy_reload）
+  - 启动残留清理：daemon 启动即扫描 apps/uid_*/ 写 0 全量解冻（uid 层 + pid 子层）
+  - on_focus 兜底：frozen 表无记录但 uid 实际冻结（残留/事件丢失）→ 仍解冻（reason=residual_thaw）
+  - tick 低频对账（每 30 tick ≈9s）：实际冻结但表无记录 → 解冻，防僵尸状态
+  - WebUI v2.3：策略页新增 VPN 守护进程保护开关；policy.toml 模板补 [vpn] 段文档
 
 ## 待办（后置）
 - [ ] 定位活动豁免 dex 侧 AppOps 判定（ExemptMonitor.java 扩展 loc 字段上报，走 L2 热更新路线）

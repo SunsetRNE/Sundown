@@ -56,6 +56,8 @@ pub struct EngineState {
     pub freeze_ops: u64,
     pub unfreeze_ops: u64,
     pub wakeup_thaws: u64,
+    /// tick 计数（v0.4.22-l3：低频对账节拍用）
+    pub tick_count: u64,
 }
 
 impl Default for EngineState {
@@ -76,6 +78,7 @@ impl Default for EngineState {
             freeze_ops: 0,
             unfreeze_ops: 0,
             wakeup_thaws: 0,
+            tick_count: 0,
         }
     }
 }
@@ -94,7 +97,8 @@ impl EngineState {
         let now = Instant::now();
 
         // 新前台冻结中 → 解冻 + 冷却
-        if self.frozen.remove(pkg).is_some() {
+        let was_frozen = self.frozen.remove(pkg).is_some();
+        if was_frozen {
             if freezer::unfreeze_pkg(pkg) {
                 self.unfreeze_ops += 1;
                 logi!("L3 前台解冻: {}（解冻累计 {}）", pkg, self.unfreeze_ops);
@@ -116,6 +120,23 @@ impl EngineState {
                 );
             }
             self.cooldown.insert(pkg.to_string(), now + self.cooldown_dur());
+        } else {
+            // v0.4.22-l3 兜底：frozen 表无记录但 uid 实际冻结（daemon 重启残留 /
+            // 事件丢失导致的表状态失真）→ 仍解冻，防"能打开但点击无响应"（ANR）
+            if let Some(uid) = freezer::pkg_uid(pkg) {
+                if freezer::uid_has_frozen_procs(uid) && freezer::unfreeze_pkg(pkg) {
+                    self.unfreeze_ops += 1;
+                    logw!("L3 前台兜底解冻（残留冻结）: {}", pkg);
+                    self.events.push_app(
+                        EvLevel::Warn,
+                        EvAction::Unfreeze,
+                        pkg,
+                        Some("residual_thaw"),
+                        None,
+                    );
+                    self.cooldown.insert(pkg.to_string(), now + self.cooldown_dur());
+                }
+            }
         }
         // 新前台取消其 grace（切回来了）
         self.grace.remove(pkg);
@@ -281,6 +302,29 @@ impl EngineState {
                     }
                 }
             }
+            // v0.4.22-l3：策略热更新即时生效——新增白名单/VPN/豁免后，
+            // 已冻结的包立即解冻（此前只影响未来决策，实机反馈"开了白名单仍冻死"）
+            let thaw: Vec<String> = self
+                .frozen
+                .keys()
+                .filter(|p| self.should_never_freeze(p))
+                .cloned()
+                .collect();
+            for pkg in thaw {
+                if freezer::unfreeze_pkg(&pkg) {
+                    self.unfreeze_ops += 1;
+                    logw!("L3 策略热更新解冻: {}", pkg);
+                }
+                self.frozen.remove(&pkg);
+                self.grace.remove(&pkg);
+                self.events.push_app(
+                    EvLevel::Info,
+                    EvAction::Unfreeze,
+                    &pkg,
+                    Some("policy_reload"),
+                    None,
+                );
+            }
         } else {
             logw!("L3 策略重载失败（保留旧表 revision={}）", self.policy.revision);
             self.events.push_system(
@@ -411,6 +455,11 @@ impl EngineState {
                 self.grace.remove(&pkg);
                 continue;
             }
+            // v0.4.22-l3：VPN 保护（策略热更新后 keep_vpn 开启、VPN 包已在 grace 表）
+            if self.is_vpn_protected(&pkg) {
+                self.grace.remove(&pkg);
+                continue;
+            }
             if self.cooldown.contains_key(&pkg) {
                 self.grace.remove(&pkg);
                 continue;
@@ -482,6 +531,33 @@ impl EngineState {
                 None,
             );
         }
+
+        // v0.4.22-l3：冻结表与实际 cgroup 状态对账（每 30 tick ≈9s）——
+        // 残留冻结（表无记录但实际冻着）一律解冻，防"冻着却无记录"的僵尸状态。
+        // （daemon 重启残留由 main 启动清理兜底；此处覆盖运行期异常）
+        self.tick_count += 1;
+        if self.tick_count % 30 == 0 {
+            let frozen_uids = freezer::frozen_uids();
+            if !frozen_uids.is_empty() {
+                let mut kept: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                for pkg in self.frozen.keys() {
+                    if let Some(uid) = freezer::pkg_uid(pkg) {
+                        kept.insert(uid);
+                    }
+                }
+                for uid in frozen_uids {
+                    if !kept.contains(&uid) && freezer::unfreeze_uid(uid) {
+                        logw!("L3 对账解冻残留冻结: uid={}", uid);
+                        self.events.push_system(
+                            EvLevel::Warn,
+                            EvAction::Unfreeze,
+                            Some("residual"),
+                            Some(&format!("uid={}", uid)),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // ---------------- 决策 ----------------
@@ -503,6 +579,34 @@ impl EngineState {
             Some(ap) => ap.keep_high_network.unwrap_or(self.policy.keep_high_network),
             None => self.policy.keep_high_network,
         }
+    }
+
+    /// VPN 守护进程保护（v0.4.22-l3）：keep_vpn 开启时，手动列表或自动探测的
+    /// tun 持有者（VPN owner）永不冻结——VPN 被冻结 = 全网断网（实机反馈）。
+    /// 优先级最高：白名单/force 之前检查。
+    fn is_vpn_protected(&self, pkg: &str) -> bool {
+        if !self.policy.keep_vpn {
+            return false;
+        }
+        if self.policy.is_vpn_listed(pkg) {
+            return true;
+        }
+        match crate::freezer::pkg_uid(pkg) {
+            Some(uid) => crate::freezer::is_vpn_owner(uid),
+            None => false,
+        }
+    }
+
+    /// 新策略下永不冻结的包（白名单 / VPN 保护 / per-app exempt）——热更新对账用
+    fn should_never_freeze(&self, pkg: &str) -> bool {
+        self.policy.is_whitelisted(pkg)
+            || self.is_vpn_protected(pkg)
+            || self
+                .policy
+                .apps
+                .get(pkg)
+                .map(|ap| ap.mode == AppMode::Exempt)
+                .unwrap_or(false)
     }
 
     /// 定位活动豁免开关（per-app 覆盖优先，缺省回落全局）
@@ -570,6 +674,18 @@ impl EngineState {
         }
         if self.policy.is_whitelisted(pkg) {
             return; // 白名单永不冻结
+        }
+        // v0.4.22-l3：VPN 守护进程硬豁免（tun 持有者冻结 = 全网断网，优先级最高）
+        if self.is_vpn_protected(pkg) {
+            logi!("L3 VPN 保护豁免: {}", pkg);
+            self.events.push_app(
+                EvLevel::Info,
+                EvAction::Exempt,
+                pkg,
+                Some("vpn_protected"),
+                None,
+            );
+            return;
         }
         // 提前提取 per-app 数据（不持引用——后续 net_active 需要 &mut self）
         let exempt_mode = self
@@ -666,6 +782,19 @@ impl EngineState {
     /// reason: "grace_expired"（tick 到期）| "force"（force 列表立即冻结）——事件语义区分
     /// v0.4.19-l3：push_mode 分派——Keep=选择性冻结（:push 保留）/ Kill=连带杀死 :push
     fn freeze_now(&mut self, pkg: &str, now: Instant, reason: &str) {
+        // v0.4.22-l3 最终防线：VPN 保护拒绝冻结（防 force 路径绕过）
+        if self.is_vpn_protected(pkg) {
+            logw!("L3 VPN 保护拒绝冻结: {}", pkg);
+            self.events.push_app(
+                EvLevel::Warn,
+                EvAction::Exempt,
+                pkg,
+                Some("vpn_protected"),
+                None,
+            );
+            self.grace.remove(pkg);
+            return;
+        }
         // 冻结前核验：uid 无存活进程 → 跳过（避免无效冻结写与记录混乱）
         match freezer::pkg_uid(pkg) {
             Some(uid) if !freezer::uid_has_procs(uid) => {

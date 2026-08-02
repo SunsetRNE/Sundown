@@ -118,6 +118,23 @@ fn main() {
     let state = Arc::new(DaemonState::new());
     let shutdown = Arc::new(AtomicBool::new(false));
 
+    // v0.4.22-l3：启动残留冻结清理——daemon 崩溃/重启后 cgroup.freeze 状态保留
+    // （内核态），frozen 表却已清空；不清则残留冻结 app 切前台也不会被解冻
+    // （"能打开但点击无响应"→ ANR 闪退，实机反馈）。启动即全量解冻，重新开始决策。
+    {
+        use crate::events::{EvAction, EvLevel};
+        let n = freezer::thaw_all_residual();
+        if n > 0 {
+            logw!("启动残留冻结清理：解冻 {} 个 uid（上次退出异常遗留）", n);
+            state.engine.lock().unwrap().events.push_system(
+                EvLevel::Warn,
+                EvAction::Unfreeze,
+                Some("startup_thaw"),
+                Some(&format!("{} uids", n)),
+            );
+        }
+    }
+
     // L3.1 结构化事件：daemon 启动
     {
         use crate::events::{EvAction, EvLevel};
