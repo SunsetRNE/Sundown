@@ -317,7 +317,7 @@ impl EngineState {
                     continue;
                 }
             }
-            self.freeze_now(&pkg, now);
+            self.freeze_now(&pkg, now, "grace_expired");
             self.grace.remove(&pkg);
         }
 
@@ -403,7 +403,7 @@ impl EngineState {
             return; // 冷却窗口内免冻
         }
         if self.policy.is_forced(pkg) {
-            self.freeze_now(pkg, now);
+            self.freeze_now(pkg, now, "force");
             return;
         }
         // grace 时长：per-app（strict 缺省 8s / grace_override）→ 全局
@@ -429,7 +429,8 @@ impl EngineState {
     }
 
     /// 执行冻结（uid 级，经 packages.list 查 uid）
-    fn freeze_now(&mut self, pkg: &str, now: Instant) {
+    /// reason: "grace_expired"（tick 到期）| "force"（force 列表立即冻结）——事件语义区分
+    fn freeze_now(&mut self, pkg: &str, now: Instant, reason: &str) {
         // 冻结前核验：uid 无存活进程 → 跳过（避免无效冻结写与记录混乱）
         match freezer::pkg_uid(pkg) {
             Some(uid) if !freezer::uid_has_procs(uid) => {
@@ -453,7 +454,7 @@ impl EngineState {
                 EvLevel::Success,
                 EvAction::Freeze,
                 pkg,
-                Some("grace_expired"),
+                Some(reason),
                 None,
             );
         } else {

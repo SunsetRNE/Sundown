@@ -106,7 +106,7 @@ daemon 内存环形缓冲（容量 256，覆盖最旧），事件模型参考 AS
 | `action` | `open`/`close`/`freeze`/`unfreeze`/`delay`/`exempt`/`policy`/`system` | 动作（参考 Cerberus log_level_action_*） |
 | `subject` | `app`/`system` | 主体（参考 Cerberus log_subject_*） |
 | `pkg` | 字符串（可选） | 应用包名；subject=app 时必有 |
-| `reason` | 字符串（可选） | 触发原因：`foreground`/`wakeup`/`grace`/`grace_expired`/`force_stop`/`per_app_exempt`/`exempt_action`/`tick_exempt`/`no_procs`/`freeze_failed`/`policy_disabled`/`reloaded`/`reload_failed`/`probe_handshake`/`dex_handshake`/`dex_reregister`/`bridge_report`/`daemon_start`/`daemon_stop` 等 |
+| `reason` | 字符串（可选） | 触发原因：`foreground`/`wakeup`/`grace`/`grace_expired`/`force`（force 列表立即冻结，v0.4.12-l3 起与 grace_expired 区分）/`force_stop`/`per_app_exempt`/`exempt_action`/`tick_exempt`/`no_procs`/`freeze_failed`/`policy_disabled`/`reloaded`/`reload_failed`/`probe_handshake`/`dex_handshake`/`dex_reregister`/`bridge_report`/`daemon_start`/`daemon_stop` 等 |
 | `msg` | 字符串（可选） | 人类可读补充 |
 
 - 可选字段（pkg/reason/msg）缺省时**省略**（非 null）
