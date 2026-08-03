@@ -245,19 +245,18 @@ final class Runtime {
         // v0.4.28-l3：自愈换代延迟 3-10s（随机）——实机事故（2026-08-03）：daemon 重启后
         // dex 立即重连 fetch-dex 换代，新代类加载（DefineClass→SetupClass）触发 lsplant
         // SetClassStatus hook 空指针 → system_server SIGSEGV。延迟错开 daemon 启动脆弱
-        // 窗口（inotify/事件风暴期），降低换代与系统初始化竞态概率。失败保留旧代，下轮
-        // hello 重连天然重试（自愈语义不变）。
+        // 窗口（inotify/事件风暴期），降低换代与系统初始化竞态概率。
+        // v0.4.30-l3：**自动自愈换代禁用**——2026-08-03 软重启事故（3 次）实锤：
+        // 字节源不一致时 fetch-dex 下发旧字节 → 换代后版本仍不匹配 → 每 6-7s 一次
+        // 死循环（换代风暴）；且换代窗口（旧代 uninstall→新代 install）内其他线程
+        // 并发类加载会撞 lsplant SetClassStatus hook 空指针（tombstone_06，与
+        // v0.4.27 tombstone_26 同源）。Java 层无法消除该竞态，策略改为：
+        //   运行期版本落后仅告警；换代走冷启动（system_server 重启加载新 dex）
+        //   或管理面显式 sunctl reload-probe（低频、用户知情、daemon 侧熔断保护）。
         if (match == 0 && expected != null && !expected.equals(version)) {
-            long delay = 3000 + (System.nanoTime() & 0x7fffffff) % 7000; // 3-10s
-            Log.i(TAG, "本地版本落后（v" + version + " → " + expected + "），延迟 " + delay
-                    + "ms 后 fetch-dex 自愈");
-            try {
-                Thread.sleep(delay);
-            } catch (InterruptedException e) {
-                return; // shutdown
-            }
-            byte[] dex = DaemonLink.fetchDex(socketName);
-            if (dex != null) swapTo(dex, expected);
+            Log.w(TAG, "版本落后（v" + version + " → " + expected
+                    + "），自动自愈换代已禁用（防 SetClassStatus 竞态崩溃）："
+                    + "请重启 system_server 或 sunctl reload-probe 后生效");
         }
     }
 

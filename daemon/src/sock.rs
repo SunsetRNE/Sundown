@@ -681,20 +681,56 @@ fn bridge_response(state: &DaemonState) -> String {
 fn serve_dex_bytes(writer: &mut UnixStream, state: &DaemonState) -> std::io::Result<()> {
     match std::fs::read(paths::PROBE_DEX) {
         Ok(bytes) => {
-            let expected_json = match state.expected_dex_hash() {
+            let expected = state.expected_dex_hash();
+            // v0.4.30-l3：字节源一致性熔断（2026-08-03 软重启事故根因之一）——
+            // fetch-dex 读 root 侧字节源，若其 BuildInfo 版本 ≠ 模块期望（部署漏同步 root 侧 /
+            // 软重启不跑 post-fs-data.sh），下发旧字节 → dex 换代后版本仍不匹配 →
+            // 自愈死循环（实测每 6-7s 一次）→ 换代风暴引爆 lsplant SetClassStatus 空指针。
+            // 不一致时拒绝下发（ok:0 + 详细 error），dex 侧保持旧代安全运行，杜绝风暴。
+            let actual = extract_dex_version(&bytes);
+            let consistent = match (&expected, &actual) {
+                (Some(h), Some(a)) => *a == *h,
+                (Some(_), None) => {
+                    logw!("fetch-dex：dex 字节版本解析失败（放行，dex 侧防空转兜底）");
+                    true
+                }
+                (None, _) => true, // 模块无期望 hash（dev 场景）→ 放行
+            };
+            if !consistent {
+                let resp = format!(
+                    "{{\"ok\":0,\"error\":\"字节源版本与期望不一致 actual={} expected={}，请同步六位一体（含 root 侧）\"}}",
+                    actual.as_deref().unwrap_or("<解析失败>"),
+                    expected.as_deref().unwrap_or("<无>")
+                );
+                writer.write_all(resp.as_bytes())?;
+                writer.write_all(b"\n")?;
+                writer.flush()?;
+                logw!(
+                    "fetch-dex 熔断：root 侧字节源版本 {} ≠ 期望 {}（拒绝下发，防换代风暴）",
+                    actual.as_deref().unwrap_or("<解析失败>"),
+                    expected.as_deref().unwrap_or("<无>")
+                );
+                return Ok(());
+            }
+            let expected_json = match &expected {
                 Some(h) => format!("\"{}\"", h),
                 None => "null".to_string(),
             };
+            let actual_json = match &actual {
+                Some(a) => format!("\"{}\"", a),
+                None => "null".to_string(),
+            };
             let header = format!(
-                "{{\"ok\":1,\"size\":{},\"expected_hash\":{}}}",
+                "{{\"ok\":1,\"size\":{},\"expected_hash\":{},\"actual_hash\":{}}}",
                 bytes.len(),
-                expected_json
+                expected_json,
+                actual_json
             );
             writer.write_all(header.as_bytes())?;
             writer.write_all(b"\n")?;
             writer.write_all(&bytes)?;
             writer.flush()?;
-            logi!("fetch-dex: 已下发 {} 字节", bytes.len());
+            logi!("fetch-dex: 已下发 {} 字节 (actual={})", bytes.len(), actual.as_deref().unwrap_or("?"));
         }
         Err(e) => {
             let resp = format!(
@@ -710,23 +746,107 @@ fn serve_dex_bytes(writer: &mut UnixStream, state: &DaemonState) -> std::io::Res
     Ok(())
 }
 
+/// v0.4.30-l3：从 dex 字节解析 BuildInfo 构建版本（CI 注入的 commit short sha，
+/// 7 位小写 hex，与模块 probe.dex.hash 同语义同源）。
+/// 轻量 DEX 格式解析（零依赖）：header.string_ids_size/off → 遍历 string_id →
+/// 读 MUTF-8 字符串 → 匹配 7 位小写 hex 即返回。解析失败返回 None（调用方放行不误伤）。
+fn extract_dex_version(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 0x70 || &bytes[0..4] != b"dex\n" {
+        return None;
+    }
+    let u32_at = |off: usize| -> Option<u32> {
+        if off + 4 > bytes.len() {
+            return None;
+        }
+        Some(u32::from_le_bytes(bytes[off..off + 4].try_into().ok()?))
+    };
+    let string_ids_size = u32_at(0x38)? as usize;
+    let string_ids_off = u32_at(0x3C)? as usize;
+    for i in 0..string_ids_size {
+        let id_off = string_ids_off.checked_add(i.checked_mul(8)?)?;
+        let data_off = u32_at(id_off)? as usize;
+        if data_off >= bytes.len() {
+            continue;
+        }
+        // string_data_item: uleb128 utf16_size + MUTF-8 bytes + 0x00
+        let mut p = data_off;
+        let mut shift = 0u32;
+        loop {
+            if p >= bytes.len() {
+                break;
+            }
+            let b = bytes[p];
+            p += 1;
+            shift += 7;
+            if b & 0x80 == 0 || shift > 35 {
+                break;
+            }
+        }
+        let start = p;
+        while p < bytes.len() && bytes[p] != 0 {
+            p += 1;
+        }
+        if p > bytes.len() {
+            continue;
+        }
+        if let Ok(s) = std::str::from_utf8(&bytes[start..p]) {
+            let t = s.trim();
+            // 7 位小写 hex（CI 注入格式）：数字 + 小写 a-f；排除大写（is_ascii_lowercase
+            // 只匹配 'a'-'z'，数字返回 false，不能用于此判断）
+            let is_short_sha = t.len() == 7
+                && t.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
+            if is_short_sha {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// push-dex（仅 root 管理面）：读 dex 文件 → 广播事件头行 + 字节帧给全部订阅者。
 /// 无订阅者不算失败（notified=0：冷启动时桩会经 hello 应答拿到新 dex / dex 自愈）。
+/// v0.4.30-l3：加字节源一致性熔断——广播的字节版本 ≠ 模块期望时拒绝推送
+/// （防管理面换代也撞 SetClassStatus 竞态；与 fetch-dex 熔断同一事故根因）。
 fn push_dex(state: &DaemonState, arg: &str) -> String {
     let path = if arg.is_empty() { paths::PROBE_DEX } else { arg };
     match std::fs::read(path) {
         Ok(bytes) => {
-            let expected_json = match state.expected_dex_hash() {
+            let expected = state.expected_dex_hash();
+            let actual = extract_dex_version(&bytes);
+            let consistent = match (&expected, &actual) {
+                (Some(h), Some(a)) => *a == *h,
+                (Some(_), None) => true, // 解析失败放行（广播字节可能非 dex，管理面自查）
+                (None, _) => true,
+            };
+            if !consistent {
+                logw!(
+                    "push-dex 熔断：字节源版本 {} ≠ 期望 {}（拒绝推送，防换代竞态）",
+                    actual.as_deref().unwrap_or("<解析失败>"),
+                    expected.as_deref().unwrap_or("<无>")
+                );
+                return format!(
+                    "{{\"ok\":0,\"error\":\"字节源版本与期望不一致 actual={} expected={}，请同步六位一体（含 root 侧）\"}}",
+                    actual.as_deref().unwrap_or("<解析失败>"),
+                    expected.as_deref().unwrap_or("<无>")
+                );
+            }
+            let expected_json = match &expected {
                 Some(h) => format!("\"{}\"", h),
                 None => "null".to_string(),
             };
+            let actual_json = match &actual {
+                Some(a) => format!("\"{}\"", a),
+                None => "null".to_string(),
+            };
             let header = format!(
-                "{{\"event\":\"dex-push\",\"size\":{},\"expected_hash\":{}}}\n",
+                "{{\"event\":\"dex-push\",\"size\":{},\"expected_hash\":{},\"actual_hash\":{}}}\n",
                 bytes.len(),
-                expected_json
+                expected_json,
+                actual_json
             );
             let notified = state.broadcast_dex(header.as_bytes(), &bytes);
-            logi!("push-dex: {} 字节 → 通知 {} 个订阅者", bytes.len(), notified);
+            logi!("push-dex: {} 字节 (actual={}) → 通知 {} 个订阅者", bytes.len(), actual.as_deref().unwrap_or("?"), notified);
             format!(
                 "{{\"ok\":1,\"notified\":{},\"size\":{},\"dex_path\":\"{}\"}}",
                 notified,
@@ -801,4 +921,46 @@ fn probe_response(state: &DaemonState) -> String {
         paths::PROBE_DEX_MOUNT,
         dex_present as i32,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_dex_version;
+
+    /// 构造最小 DEX：header + 1 个 string_id + 1 个字符串（CI 短 sha 格式）
+    fn mini_dex_with_string(s: &[u8]) -> Vec<u8> {
+        let mut dex = vec![0u8; 0x80 + s.len() + 1];
+        dex[0..4].copy_from_slice(b"dex\n");
+        dex[0x38..0x3C].copy_from_slice(&1u32.to_le_bytes()); // string_ids_size = 1
+        dex[0x3C..0x40].copy_from_slice(&0x70u32.to_le_bytes()); // string_ids_off = 0x70
+        dex[0x70..0x74].copy_from_slice(&0x78u32.to_le_bytes()); // data_off = 0x78
+        dex[0x78] = s.len() as u8; // utf16_size（ASCII 单字节）
+        dex[0x79..0x79 + s.len()].copy_from_slice(s);
+        // 尾部自动为 0（终止符）
+        dex
+    }
+
+    #[test]
+    fn dex_version_extract_short_sha() {
+        let dex = mini_dex_with_string(b"a672eff");
+        assert_eq!(extract_dex_version(&dex).as_deref(), Some("a672eff"));
+    }
+
+    #[test]
+    fn dex_version_reject_non_dex() {
+        assert_eq!(extract_dex_version(b"not a dex file at all"), None);
+        assert_eq!(extract_dex_version(&[]), None);
+    }
+
+    #[test]
+    fn dex_version_reject_oversize_string() {
+        let dex = mini_dex_with_string(b"abcdef1234567890"); // 非 7 位
+        assert_eq!(extract_dex_version(&dex), None);
+    }
+
+    #[test]
+    fn dex_version_reject_uppercase_hex() {
+        let dex = mini_dex_with_string(b"A672EFF"); // 大写 → 非 CI 注入格式
+        assert_eq!(extract_dex_version(&dex), None);
+    }
 }
