@@ -774,7 +774,10 @@ pub(crate) fn extract_dex_version(bytes: &[u8]) -> Option<String> {
     let string_ids_size = u32_at(0x38)? as usize;
     let string_ids_off = u32_at(0x3C)? as usize;
     for i in 0..string_ids_size {
-        let id_off = string_ids_off.checked_add(i.checked_mul(8)?)?;
+        // v0.4.40-l3 修复：string_id_item 是 4 字节（string_data_off, uint），
+        // 原 8 字节步长只遍历偶数索引——hash 落在奇数位时解析失败（2026-08-03 实机：
+        // v0.4.36/v0.4.39 的 dex 自检误报"解析失败"，v0.4.38 的 hash 恰在偶数位才侥幸通过）。
+        let id_off = string_ids_off.checked_add(i.checked_mul(4)?)?;
         let data_off = u32_at(id_off)? as usize;
         if data_off >= bytes.len() {
             continue;
@@ -967,6 +970,31 @@ mod tests {
     fn dex_version_reject_oversize_string() {
         let dex = mini_dex_with_string(b"abcdef1234567890"); // 非 7 位
         assert_eq!(extract_dex_version(&dex), None);
+    }
+
+    /// 构造 2 个 string_id 的最小 DEX（hash 放第二个，奇数索引）
+    fn mini_dex_two_strings(first: &[u8], second: &[u8]) -> Vec<u8> {
+        let off1 = 0x78 + 1 + first.len() + 1;
+        let mut dex = vec![0u8; off1 + 1 + second.len() + 1];
+        dex[0..4].copy_from_slice(b"dex\n");
+        dex[0x38..0x3C].copy_from_slice(&2u32.to_le_bytes()); // string_ids_size = 2
+        dex[0x3C..0x40].copy_from_slice(&0x70u32.to_le_bytes()); // string_ids_off = 0x70
+        dex[0x70..0x74].copy_from_slice(&0x78u32.to_le_bytes()); // entry0 → 0x78
+        dex[0x74..0x78].copy_from_slice(&(off1 as u32).to_le_bytes()); // entry1 → off1
+        dex[0x78] = first.len() as u8; // uleb128 utf16_size（<128 单字节）
+        dex[0x79..0x79 + first.len()].copy_from_slice(first);
+        dex[0x79 + first.len()] = 0;
+        dex[off1] = second.len() as u8;
+        dex[off1 + 1..off1 + 1 + second.len()].copy_from_slice(second);
+        dex
+    }
+
+    /// v0.4.40-l3 回归：hash 在第二个 string_id（奇数索引）也能解析——
+    /// 旧实现 `i * 8` 步长只遍历偶数索引，此用例必然返回 None。
+    #[test]
+    fn dex_version_extract_second_string_id() {
+        let dex = mini_dex_two_strings(b"com.example.Foo", b"a672eff");
+        assert_eq!(extract_dex_version(&dex).as_deref(), Some("a672eff"));
     }
 
     #[test]
