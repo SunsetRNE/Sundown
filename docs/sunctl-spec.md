@@ -19,6 +19,8 @@
 | `logs` | `[行数=50]` | 输出 boot_watchdog.log 末尾 | 0 |
 | `logs` | `--engine [行数=100]` | 输出 sundownd.log 末尾（引擎事件时间轴：焦点/唤醒/豁免/冻结） | 0 |
 | `events` | `[行数=50]` | 【L3.1】结构化事件时间线（JSON 数组，最旧→最新；字段见 §事件契约） | 0=成功；1=daemon 未连接；2=参数错误 |
+| `config` | `export [路径]` | 【v0.4.45-l3 已交付】导出本地配置压缩包（conf/policy.toml + conf/action.toml + META.txt 校验清单：export_version/exported_by/exported_at/sha256），POSIX tar（toybox 内置）；缺省路径 /sdcard/Download/sundown-config-<时间戳>.tar。用途：换机/迁移（不走云端） | 0=成功；1=无配置/导出失败 |
+| `config` | `import <路径>` | 【v0.4.45-l3 已交付】导入配置压缩包：① 白名单校验（仅 META.txt/conf//conf/policy.toml/conf/action.toml，防 zip-slip）② 解压临时目录 ③ META sha256 完整性校验 ④ 备份 `conf.bak.<时间戳>` → 替换 ⑤ daemon `policy reload` 热加载（失败安全：语法错保留旧表，提示恢复备份） | 0=成功；1=包缺失/白名单拒绝/校验失败；2=参数错误 |
 | `policy` | `status` | 【L3】查询冻结策略状态（JSON，经 daemon 管理面 socket） | 0=成功；1=daemon 未连接；2=参数错误 |
 | `policy` | `reload` | 【L3】强制从磁盘重载策略（失败保留旧表） | 同上 |
 | `policy` | `preset list` | 【L3】情景预设列表 + 当前生效（JSON；v0.4.17-l3 起 presets 元素为对象：`{name,enabled,grace_seconds,cooldown_seconds,keep_fg_service,keep_media}`，WebUI 动态渲染用） | 同上 |
