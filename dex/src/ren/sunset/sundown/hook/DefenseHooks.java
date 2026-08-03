@@ -55,6 +55,11 @@ final class DefenseHooks implements HookEngine {
     private static final String PESR = "com.android.server.am.ProcessRecord$ProcessErrorStateRecord";
     private static final String CACHED_APP_OPTIMIZER = "com.android.server.am.CachedAppOptimizer";
     private static final String ACTIVITY_RECORD = "com.android.server.wm.ActivityRecord";
+    // v0.4.26-l3：ColorOS HANS 防御（对齐 AStop RomCompatHooks，语义裁剪为冻结集防御）
+    private static final String HANS_MANAGER = "com.android.server.am.OplusHansManager";
+    private static final String HANS_PROXY = "com.android.server.hans.OplusHansProxyManager";
+    private static final String BG_SCENE = "com.android.server.hans.scene.OplusBgSceneManager";
+    private static final String STARTUP_STRATEGY = "com.android.server.am.OplusAppStartupManager$OplusStartupStrategy";
 
     /** 冻结 uid 快照（扫描线程原子替换，hook 线程只读，零锁） */
     private static final class FrozenSet {
@@ -117,6 +122,31 @@ final class DefenseHooks implements HookEngine {
 
         // 6. 冻结期 Activity 保护（不回收，防解冻后黑屏/重建）
         hookAllOverloads(findClass(ACTIVITY_RECORD), "destroyImmediately", callback("onDestroyImmediately"));
+
+        // 7. v0.4.26-l3 ColorOS HANS 防御（实机校准：PJD110/Android16 无 CachedAppOptimizer#freezeApp，
+        //    系统 freezer 入口为 freezeAppAsync*LSP 家族；HANS 用 unfreezeForKernel 解冻——真机元凶）
+        // 7a. 系统 freezer 防双冻结：ColorOS 改名后的 freeze 入口（锁内方法，全重载）
+        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezeAppAsyncLSP", callback("onSystemFreeze"));
+        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezeAppAsyncInternalLSP", callback("onSystemFreeze"));
+        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezeAppAsyncAtEarliestLSP", callback("onSystemFreeze"));
+        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezeAppAsyncImmediateLSP", callback("onSystemFreeze"));
+        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezeBinder", callback("onSystemFreeze"));
+        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezeBinderAndPackageCgroup", callback("onSystemFreeze"));
+        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezePackageCgroup", callback("onSystemFreeze"));
+        // 7b. HANS 主动冻结入口（冻结集内 uid 阻止二次冻结）
+        hookAllOverloads(findClass(HANS_MANAGER), "freezeAppForPreload", callback("onSystemFreeze"));
+        hookAllOverloads(findClass(HANS_MANAGER), "freezeAllProcess", callback("onSystemFreeze"));
+        hookAllOverloads(findClass(HANS_MANAGER), "freezeCgroupUid", callback("onSystemFreeze"));
+        // 7c. HANS 解冻防御（防 HANS 解掉 Sundown 冻结态——墓碑失效/假活）
+        hookAllOverloads(findClass(HANS_MANAGER), "unfreezeForKernel", callback("onHansUnfreeze"));
+        hookAllOverloads(findClass(HANS_MANAGER), "unfreezeForKernelTargetPid", callback("onHansUnfreeze"));
+        hookAllOverloads(findClass(HANS_MANAGER), "unfreezeAppforHansMinSystem", callback("onHansUnfreeze"));
+        // 7d. HANS Proxy 防御（冻结集内 uid 不被 HANS 代理干预）
+        hookAllOverloads(findClass(HANS_PROXY), "isProxyed", callback("onHansIsProxyed"));
+        // 7e. ColorOS GMS 限制禁用（对齐 AStop DO_NOTHING：registerGmsRestrictObserver/updateGmsRestrict）
+        hookAllOverloads(findClass(BG_SCENE), "registerGmsRestrictObserver", callback("onNoop"));
+        hookAllOverloads(findClass(BG_SCENE), "updateGmsRestrict", callback("onNoop"));
+        hookAllOverloads(findClass(STARTUP_STRATEGY), "isGoogleRestricInfoOn", callback("onReturnFalse"));
 
         // 启动冻结集扫描线程（install 一次；uninstall 停）
         if (!scannerThread.isAlive()) {
@@ -336,6 +366,99 @@ final class DefenseHooks implements HookEngine {
             Log.w(TAG, "destroyImmediately 拦截异常（放行）: " + t);
         }
         return cb.invokeOriginalOrDefault();
+    }
+
+    // ---------------- v0.4.26-l3 ColorOS HANS / 系统 freezer 防御回调 ----------------
+
+    /** 系统二次冻结拦截：freezeAppAsync*LSP / freezeBinder / freezePackageCgroup / HANS 冻结入口
+     *  —— 冻结集内 uid（或 pid 参数）→ 阻断（不 invoke 原方法，防双冻结/冻结态错乱） */
+    public Object onSystemFreeze(MethodCallback cb) {
+        try {
+            for (Object a : cb.args) {
+                if (a == null) continue;
+                if (a instanceof Integer) {
+                    int v = ((Integer) a).intValue();
+                    if (v > 0) {
+                        // uid 语义（>=10000 普通 app）或 pid 语义（TargetPid/进程）任一命中即拦
+                        if (v >= 10000 && frozen.contains(v)) {
+                            Log.i(TAG, "系统 freeze 拦截（冻结中 uid=" + v + "）: " + cb.target.getName());
+                            return cb.defaultReturn();
+                        }
+                        if (pidFrozen(v)) {
+                            Log.i(TAG, "系统 freeze 拦截（冻结中 pid=" + v + "）: " + cb.target.getName());
+                            return cb.defaultReturn();
+                        }
+                    }
+                } else {
+                    Integer uid = extractUid(a);
+                    if (uid != null && uid.intValue() >= 10000 && frozen.contains(uid.intValue())) {
+                        Log.i(TAG, "系统 freeze 拦截（冻结中 uid=" + uid + "）: " + cb.target.getName());
+                        return cb.defaultReturn();
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "系统 freeze 拦截异常（放行）: " + t);
+        }
+        return cb.invokeOriginalOrDefault();
+    }
+
+    /** HANS 解冻防御：unfreezeForKernel / unfreezeForKernelTargetPid / unfreezeAppforHansMinSystem
+     *  —— 冻结集内 uid/pid → 阻断（防 HANS 解掉 Sundown 冻结态，墓碑失效/假活） */
+    public Object onHansUnfreeze(MethodCallback cb) {
+        try {
+            for (Object a : cb.args) {
+                if (a == null) continue;
+                if (a instanceof Integer) {
+                    int v = ((Integer) a).intValue();
+                    if (v > 0) {
+                        if (frozen.contains(v)) {
+                            Log.i(TAG, "HANS unfreeze 拦截（冻结中 uid=" + v + "）");
+                            return cb.defaultReturn();
+                        }
+                        if (pidFrozen(v)) {
+                            Log.i(TAG, "HANS unfreeze 拦截（冻结中 pid=" + v + "）");
+                            return cb.defaultReturn();
+                        }
+                    }
+                } else {
+                    Integer uid = extractUid(a);
+                    if (uid != null && frozen.contains(uid.intValue())) {
+                        Log.i(TAG, "HANS unfreeze 拦截（冻结中 uid=" + uid + "）");
+                        return cb.defaultReturn();
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "HANS unfreeze 拦截异常（放行）: " + t);
+        }
+        return cb.invokeOriginalOrDefault();
+    }
+
+    /** HANS Proxy 防御：isProxyed 冻结集内 uid → false（阻止 HANS 代理干预冻结 app） */
+    public Object onHansIsProxyed(MethodCallback cb) {
+        try {
+            for (Object a : cb.args) {
+                Integer uid = extractUid(a);
+                if (uid != null && uid.intValue() >= 10000 && frozen.contains(uid.intValue())) {
+                    Log.i(TAG, "HANS isProxyed 拦截（冻结中 uid=" + uid + "）");
+                    return Boolean.FALSE;
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "HANS isProxyed 拦截异常（放行）: " + t);
+        }
+        return cb.invokeOriginalOrDefault();
+    }
+
+    /** DO_NOTHING：禁 ColorOS GMS 限制（registerGmsRestrictObserver/updateGmsRestrict，void → null） */
+    public Object onNoop(MethodCallback cb) {
+        return cb.defaultReturn();
+    }
+
+    /** returnConstant(FALSE)：OplusStartupStrategy#isGoogleRestricInfoOn → false（GMS 限制信息关闭） */
+    public Object onReturnFalse(MethodCallback cb) {
+        return Boolean.FALSE;
     }
 
     // ---------------- 工具 ----------------
