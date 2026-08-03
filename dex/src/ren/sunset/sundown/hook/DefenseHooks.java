@@ -60,6 +60,9 @@ public final class DefenseHooks implements HookEngine {
     private static final String HANS_PROXY = "com.android.server.hans.OplusHansProxyManager";
     private static final String BG_SCENE = "com.android.server.hans.scene.OplusBgSceneManager";
     private static final String STARTUP_STRATEGY = "com.android.server.am.OplusAppStartupManager$OplusStartupStrategy";
+    // v0.4.39-l3：P1⑨ 防御补全（对齐 AStop OomAdjusterHooks / SystemDefenseHooks / DeviceIdleWhitelistHooks）
+    private static final String OOM_ADJUSTER = "com.android.server.am.OomAdjuster";
+    private static final String DEVICE_IDLE = "com.android.server.deviceidle.DeviceIdleController";
 
     /** 冻结 uid 快照（扫描线程原子替换，hook 线程只读，零锁） */
     private static final class FrozenSet {
@@ -176,6 +179,23 @@ public final class DefenseHooks implements HookEngine {
         hookAllOverloads(findClass(BG_SCENE), "registerGmsRestrictObserver", callback("onNoop"));
         hookAllOverloads(findClass(BG_SCENE), "updateGmsRestrict", callback("onNoop"));
         hookAllOverloads(findClass(STARTUP_STRATEGY), "isGoogleRestricInfoOn", callback("onReturnFalse"));
+
+        // 8. v0.4.39-l3 P1⑨ OomAdjuster 防御：系统重算 adj 不得覆盖 daemon OOM 保护（-1000）
+        //    —— daemon 侧 protect_oom 写 /proc/<pid>/oom_score_adj 锁 -1000（OOM_DISABLE 等效），
+        //    但 OomAdjuster 周期重算会写回 cached≈900 覆盖保护（解冻即"白冻"）。
+        //    双保险：applyOomAdj*（计算入口，冻结集内跳过）+ setOomAdj（写入入口，adj 改写 -1000）。
+        hookAllOverloads(findClass(OOM_ADJUSTER), "applyOomAdjLSP", callback("onOomAdjCompute"));
+        hookAllOverloads(findClass(OOM_ADJUSTER), "applyOomAdj", callback("onOomAdjCompute"));
+        hookAllOverloads(findClass(PROCESS_LIST), "setOomAdj", callback("onOomAdjApply"));
+
+        // 9. v0.4.39-l3 P1⑨ 禁用耗电判定（冻结集内豁免——AStop 无条件禁用 checkExcessivePowerUsageLPr，
+        //    Sundown 裁剪为冻结集防御：非冻结 app 保持系统耗电判定，防"耗电异常"杀冻结 app）
+        hookAllOverloads(findClass(AMS), "checkExcessivePowerUsageLPr", callback("onExcessivePower"));
+
+        // 10. v0.4.39-l3 P1⑨ Doze 白名单注入：冻结 uid 注入白名单数组（appId = uid，无需 pkg 映射），
+        //     防 Doze 维护期把冻结 app 当非白名单清理（对齐 AStop DeviceIdleWhitelistHooks）
+        hookAllOverloads(findClass(DEVICE_IDLE), "getAppIdWhitelistInternal", callback("onAppIdWhitelist"));
+        hookAllOverloads(findClass(DEVICE_IDLE), "getAppIdUserWhitelistInternal", callback("onAppIdWhitelist"));
 
         // 启动冻结集扫描线程（install 一次；uninstall 停）
         if (!scannerThread.isAlive()) {
@@ -488,6 +508,104 @@ public final class DefenseHooks implements HookEngine {
     /** returnConstant(FALSE)：OplusStartupStrategy#isGoogleRestricInfoOn → false（GMS 限制信息关闭） */
     public Object onReturnFalse(MethodCallback cb) {
         return Boolean.FALSE;
+    }
+
+    // ---------------- v0.4.39-l3 P1⑨ 防御补全回调 ----------------
+
+    /** OomAdjuster 计算入口防御：applyOomAdj* 目标是冻结集内 uid → 跳过（内核保持 -1000，
+     *  防系统把 adj 重算回 cached≈900 覆盖 daemon OOM 保护） */
+    public Object onOomAdjCompute(MethodCallback cb) {
+        try {
+            for (Object a : cb.args) {
+                Integer uid = extractUid(a);
+                if (uid != null && uid.intValue() >= 10000 && sundownFrozen(uid.intValue())) {
+                    Log.i(TAG, "OomAdjuster 计算跳过（冻结中 uid=" + uid + "）: " + cb.target.getName());
+                    return cb.defaultReturn();
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "OomAdjuster 计算跳过异常（放行）: " + t);
+        }
+        return cb.invokeOriginalOrDefault();
+    }
+
+    /** OomAdjuster 写入入口防御：setOomAdj(pid, adj, ...) 冻结集内 pid → adj 改写 -1000
+     *  （保留系统流程完整，写入值强制为保护值；pid 判定走 /proc 归属核验） */
+    public Object onOomAdjApply(MethodCallback cb) {
+        try {
+            Integer pid = null;
+            Integer adjIdx = null;
+            int intCount = 0;
+            for (int i = 0; i < cb.args.length; i++) {
+                if (cb.args[i] instanceof Integer) {
+                    intCount++;
+                    if (intCount == 1) {
+                        pid = (Integer) cb.args[i];
+                    } else if (intCount == 2) {
+                        adjIdx = Integer.valueOf(i);
+                    }
+                }
+            }
+            if (pid != null && adjIdx != null && pid.intValue() > 0
+                    && pidFrozenSundown(pid.intValue())) {
+                Log.i(TAG, "OomAdjuster 写入保护（冻结中 pid=" + pid + "，adj 锁 -1000）");
+                cb.args[adjIdx.intValue()] = Integer.valueOf(-1000);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "OomAdjuster 写入保护异常（放行）: " + t);
+        }
+        return cb.invokeOriginalOrDefault();
+    }
+
+    /** 耗电判定豁免：checkExcessivePowerUsageLPr 冻结集内 uid → false（不耗电，
+     *  防"耗电异常"杀冻结 app；非冻结 app 保持系统判定） */
+    public Object onExcessivePower(MethodCallback cb) {
+        try {
+            for (Object a : cb.args) {
+                Integer uid = extractUid(a);
+                if (uid != null && uid.intValue() >= 10000 && sundownFrozen(uid.intValue())) {
+                    Log.i(TAG, "耗电判定豁免（冻结中 uid=" + uid + "）");
+                    return Boolean.FALSE;
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "耗电判定豁免异常（放行）: " + t);
+        }
+        return cb.invokeOriginalOrDefault();
+    }
+
+    /** Doze 白名单注入：getAppId*WhitelistInternal 返回数组追加冻结 uid（appId = uid，
+     *  无需 pkg 映射；防 Doze 维护期清理冻结 app） */
+    public Object onAppIdWhitelist(MethodCallback cb) {
+        try {
+            Object r = cb.invokeOriginalOrDefault();
+            if (!(r instanceof int[])) return r;
+            int[] orig = (int[]) r;
+            List<Integer> frozen = new ArrayList<Integer>();
+            for (Integer uid : sundownFrozen) {
+                if (uid.intValue() >= 10000 && !intArrayContains(orig, uid.intValue())) {
+                    frozen.add(uid);
+                }
+            }
+            if (frozen.isEmpty()) return orig;
+            int[] merged = new int[orig.length + frozen.size()];
+            System.arraycopy(orig, 0, merged, 0, orig.length);
+            for (int i = 0; i < frozen.size(); i++) {
+                merged[orig.length + i] = frozen.get(i).intValue();
+            }
+            Log.i(TAG, "Doze 白名单注入 " + frozen.size() + " 个冻结 uid");
+            return merged;
+        } catch (Throwable t) {
+            Log.w(TAG, "Doze 白名单注入异常（放行）: " + t);
+        }
+        return cb.invokeOriginalOrDefault();
+    }
+
+    private static boolean intArrayContains(int[] arr, int v) {
+        for (int x : arr) {
+            if (x == v) return true;
+        }
+        return false;
     }
 
     // ---------------- 工具 ----------------
