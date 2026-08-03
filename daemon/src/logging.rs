@@ -19,10 +19,10 @@ fn now_stamp() -> String {
     unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
         if libc::localtime_r(&now, &mut tm).is_null() {
-            return format!("[{}Z]", now); // 失败兜底：epoch 秒
+            return now.to_string(); // 失败兜底：epoch 秒（不带括号，外层 log() 统一加）
         }
         format!(
-            "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}]",
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
             tm.tm_year + 1900,
             tm.tm_mon + 1,
             tm.tm_mday,
