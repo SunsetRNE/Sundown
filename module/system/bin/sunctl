@@ -12,7 +12,7 @@ SOCK_PATH="$SUNDOWN_DIR/sundownd.sock"
 UPDATE_DIR="$SUNDOWN_DIR/update"
 PENDING_DIR="$UPDATE_DIR/pending"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.4.44-l3"
+VERSION="0.4.45-l3"
 
 # ---------- 工具函数 ----------
 
@@ -514,6 +514,128 @@ cmd_events() {
     return 0
 }
 
+# ---------- 配置迁移（v0.4.45-l3：本地配置压缩包，不走云端） ----------
+# config export [路径]  → 打包 conf/（policy.toml + action.toml）+ META 校验清单
+# config import <路径>  → 白名单校验 → sha256 校验 → 备份现有 → 替换 → daemon 热加载
+# 设计决策：换机/迁移用本地压缩包（tar，toybox 内置），不依赖云端账号体系
+
+CONF_DIR="$SUNDOWN_DIR/conf"
+EXPORT_TMP="$SUNDOWN_DIR/export.tmp"
+CONFIG_WHITELIST="META.txt conf/ conf/policy.toml conf/action.toml"
+
+cmd_config_export() {
+    # 用法: config export [目标路径]（缺省 /sdcard/Download/sundown-config-<时间戳>.tar）
+    local dest="${1:-/sdcard/Download/sundown-config-$(date +%Y%m%d-%H%M%S).tar}"
+    rm -rf "$EXPORT_TMP"; mkdir -p "$EXPORT_TMP/conf"
+    local found=0
+    [ -f "$CONF_DIR/policy.toml" ] && { cp "$CONF_DIR/policy.toml" "$EXPORT_TMP/conf/"; found=1; }
+    [ -f "$CONF_DIR/action.toml" ] && { cp "$CONF_DIR/action.toml" "$EXPORT_TMP/conf/"; found=1; }
+    if [ "$found" = "0" ]; then
+        echo "❌ 无任何配置文件（$CONF_DIR 下 policy.toml/action.toml 均不存在）" >&2
+        rm -rf "$EXPORT_TMP"; return 1
+    fi
+    # META 校验清单（导出版本/来源/时间/各文件 sha256——导入侧完整性校验）
+    {
+        echo "export_version=1"
+        echo "exported_by=Sundown $VERSION"
+        echo "exported_at=$(date '+%F %T')"
+        for f in conf/policy.toml conf/action.toml; do
+            [ -f "$EXPORT_TMP/$f" ] && echo "sha256:$f=$(sha256sum "$EXPORT_TMP/$f" | cut -d' ' -f1)"
+        done
+    } > "$EXPORT_TMP/META.txt"
+    # 打包（POSIX tar，toybox 兼容；配置极小无需压缩）
+    if ! ( cd "$EXPORT_TMP" && tar cf "$dest" META.txt conf ) 2>/dev/null || [ ! -f "$dest" ]; then
+        echo "❌ 导出失败（tar 不可用或目标不可写: $dest）" >&2
+        rm -rf "$EXPORT_TMP"; return 1
+    fi
+    rm -rf "$EXPORT_TMP"
+    echo "✅ 配置已导出: $dest"
+    ls -la "$dest" 2>/dev/null | awk '{print "   大小: "$5" 字节"}'
+    echo "   内容: $(tar tf "$dest" 2>/dev/null | tr '\n' ' ')"
+    echo "   换机迁移: 拷到新设备后运行 sunctl config import <此文件>"
+    return 0
+}
+
+cmd_config_import() {
+    # 用法: config import <包路径>
+    local src="$1"
+    [ -n "$src" ] || { echo "用法: sunctl config import <包路径>" >&2; return 2; }
+    [ -f "$src" ] || { echo "❌ 包不存在: $src" >&2; return 1; }
+    # 1. 包内容白名单校验（防 zip-slip/恶意包：仅允许 META.txt + conf/ 下两个配置）
+    local files="$(tar tf "$src" 2>/dev/null)"
+    [ -n "$files" ] || { echo "❌ 无法读取包内容（tar 不可用或包损坏）: $src" >&2; return 1; }
+    local f w ok
+    for f in $files; do
+        ok=0
+        for w in $CONFIG_WHITELIST; do
+            [ "$f" = "$w" ] && { ok=1; break; }
+        done
+        if [ "$ok" = "0" ]; then
+            echo "❌ 包内含非白名单条目，拒绝导入（防 zip-slip）: $f" >&2
+            return 1
+        fi
+    done
+    # 2. 解压到临时目录
+    rm -rf "$EXPORT_TMP"; mkdir -p "$EXPORT_TMP"
+    ( cd "$EXPORT_TMP" && tar xf "$src" ) 2>/dev/null
+    if [ ! -f "$EXPORT_TMP/conf/policy.toml" ] && [ ! -f "$EXPORT_TMP/conf/action.toml" ]; then
+        echo "❌ 包内无有效配置（缺 conf/policy.toml 且缺 conf/action.toml）" >&2
+        rm -rf "$EXPORT_TMP"; return 1
+    fi
+    # 3. META sha256 完整性校验
+    [ -f "$EXPORT_TMP/META.txt" ] || { echo "❌ 包内缺 META.txt（非 Sundown 导出包？）" >&2; rm -rf "$EXPORT_TMP"; return 1; }
+    while IFS= read -r line; do
+        case "$line" in
+            sha256:*)
+                f="${line#sha256:}"; f="${f%%=*}"
+                h="${line##*=}"
+                if [ -f "$EXPORT_TMP/$f" ]; then
+                    actual="$(sha256sum "$EXPORT_TMP/$f" | cut -d' ' -f1)"
+                    if [ "$actual" != "$h" ]; then
+                        echo "❌ sha256 校验失败（包损坏或篡改）: $f" >&2
+                        rm -rf "$EXPORT_TMP"; return 1
+                    fi
+                fi
+                ;;
+        esac
+    done < "$EXPORT_TMP/META.txt"
+    # 4. 备份现有配置 → 替换
+    local bak="$CONF_DIR.bak.$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$bak"
+    [ -f "$CONF_DIR/policy.toml" ] && cp "$CONF_DIR/policy.toml" "$bak/"
+    [ -f "$CONF_DIR/action.toml" ] && cp "$CONF_DIR/action.toml" "$bak/"
+    # 迁移来源（META 在 rm 前提取）
+    local src_from="$(sed -n 's/^exported_at=//p' "$EXPORT_TMP/META.txt" 2>/dev/null | head -n 1)"
+    [ -n "$src_from" ] || src_from="未知"
+    cp "$EXPORT_TMP/conf/policy.toml" "$CONF_DIR/" 2>/dev/null
+    [ -f "$EXPORT_TMP/conf/action.toml" ] && cp "$EXPORT_TMP/conf/action.toml" "$CONF_DIR/" 2>/dev/null
+    rm -rf "$EXPORT_TMP"
+    # 5. 触发 daemon 热加载（失败安全：语法错误 → daemon 保留旧表，此处仅提示）
+    local resp
+    resp="$(sock_query "policy reload")"
+    echo "✅ 配置已导入（备份: $bak）"
+    echo "   迁移来源: $src_from"
+    if [ -n "$resp" ]; then
+        echo "   策略热加载: $resp"
+        echo "   ⚠️ 若策略未生效（语法错误→daemon 保留旧表），恢复备份:"
+        echo "      cp $bak/policy.toml $CONF_DIR/policy.toml"
+    else
+        echo "   ⚠️ daemon 未连接——配置已落盘，将在 daemon 下次启动时加载"
+    fi
+    return 0
+}
+
+cmd_config() {
+    case "$1" in
+        export) shift; cmd_config_export "$@" ;;
+        import) shift; cmd_config_import "$@" ;;
+        *)
+            echo "用法: sunctl config export [路径] | import <路径>" >&2
+            return 2
+            ;;
+    esac
+}
+
 cmd_version() {
     echo "Sundown $VERSION (by SunsetREN)"
     echo "  daemon: $(daemon_version)"
@@ -534,6 +656,8 @@ usage() {
   policy preset apply <n> [L3] 应用预设（内存覆盖 [general]，不动磁盘 policy.toml）
   policy preset clear    [L3] 清除预设（回落磁盘 policy.toml 参数）
   events [行数]          [L3.1] 结构化事件时间线（JSON；焦点/唤醒/冻结/豁免/握手）
+  config export [路径]   [迁移] 导出配置压缩包（policy.toml + action.toml + sha256 校验清单）
+  config import <路径>   [迁移] 导入配置压缩包（白名单校验 → 完整性校验 → 备份 → 热加载）
   apply-update [src]    [L0] 下载/暂存 daemon 更新（src=本地zip或URL；缺省查 GitHub Nightly）
   apply-update --activate [L0] 立即激活已暂存更新（备份/readiness/自动回滚）
   logs [行数]            查看启动看门狗日志
@@ -553,6 +677,7 @@ case "$1" in
     reload-probe)    cmd_reload_probe ;;
     policy)          shift; cmd_policy "$@" ;;
     events)          shift; cmd_events "$@" ;;
+    config)          shift; cmd_config "$@" ;;
     apply-update)    shift; cmd_apply_update "$@" ;;
     logs)            shift; cmd_logs "$@" ;;
     version|--version|-v) cmd_version ;;
