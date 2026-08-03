@@ -11,6 +11,10 @@ use std::collections::HashMap;
 pub enum AppMode {
     /// 豁免：退后台永不冻结（等价 whitelist，但允许携带 per-app 豁免开关）
     Exempt,
+    /// 重要（v0.4.41-l3，对齐 AStop IMPORTANT 档）：可冻结但更温和——
+    /// grace = 全局 ×2（退后台不急着冻），唤醒解冻强制开启（keep_wakeup 不可关）。
+    /// 语义：微信/IM/网盘类"重要但不豁免"，墓碑而非杀。
+    Important,
     /// 标准：按全局 grace_seconds（可被 grace_override 覆盖）
     Standard,
     /// 严格：失焦后短 grace 冻结（默认 8s，可被 grace_override 覆盖）
@@ -21,6 +25,7 @@ impl AppMode {
     fn parse(s: &str) -> Option<AppMode> {
         match s {
             "exempt" => Some(AppMode::Exempt),
+            "important" => Some(AppMode::Important),
             "standard" => Some(AppMode::Standard),
             "strict" => Some(AppMode::Strict),
             _ => None,
@@ -101,13 +106,16 @@ impl Default for AppPolicy {
 impl AppPolicy {
     /// strict 模式缺省 grace（参考 Cerberus 严格档 5~8s）
     pub const STRICT_DEFAULT_GRACE: u64 = 8;
+    /// important 模式 grace 倍数（全局 ×2：退后台不急着冻，给"重要但非豁免"app 更宽窗口）
+    pub const IMPORTANT_GRACE_MULT: u64 = 2;
 
-    /// 该 app 生效的 grace 秒数（strict 缺省 8；其余缺省回落全局）
+    /// 该 app 生效的 grace 秒数（strict 缺省 8；important = 全局 ×2；其余缺省回落全局）
     pub fn effective_grace(&self, global: u64) -> u64 {
         match self.grace_override {
             Some(g) => g,
             None => match self.mode {
                 AppMode::Strict => Self::STRICT_DEFAULT_GRACE,
+                AppMode::Important => global.saturating_mul(Self::IMPORTANT_GRACE_MULT),
                 _ => global,
             },
         }
@@ -519,12 +527,30 @@ grace_seconds = 120
         let p2 = Policy::from_toml(src2, 8).unwrap();
         assert_eq!(p2.apps["com.x.y"].effective_grace(30), AppPolicy::STRICT_DEFAULT_GRACE);
     }
-
     #[test]
     fn parse_per_app_bad_mode() {
         // 未知 mode → 回落 standard（不致命）
-        let p = Policy::from_toml("[apps.\"com.x.y\"]\nmode = \"turbo\"", 1).unwrap();
-        assert_eq!(p.apps["com.x.y"].mode, AppMode::Standard);
+    }
+
+    #[test]
+    fn important_mode_v041() {
+        // v0.4.41-l3：IMPORTANT 档（对齐 AStop）——grace = 全局 ×2，解析 + 缺省回落
+        let src = "[general]\nenabled = true\ngrace_seconds = 30\n\n[apps.\"com.tencent.mm\"]\nmode = \"important\"\nkeep_wakeup = false";
+        let p = Policy::from_toml(src, 1).unwrap();
+        let ap = p.apps.get("com.tencent.mm").unwrap();
+        assert_eq!(ap.mode, AppMode::Important);
+        // grace = 全局 ×2
+        assert_eq!(ap.effective_grace(30), 60);
+        // 无 override 时 important 缺省 = 全局 ×2（与 strict 8s 区分）
+        let src2 = "[apps.\"com.example.imp\"]\nmode = \"important\"";
+        let p2 = Policy::from_toml(src2, 1).unwrap();
+        assert_eq!(p2.apps["com.example.imp"].effective_grace(45), 90);
+        // grace_override 优先于档位缺省
+        let src3 = "[apps.\"com.example.imp2\"]\nmode = \"important\"\ngrace_seconds = 15";
+        let p3 = Policy::from_toml(src3, 1).unwrap();
+        assert_eq!(p3.apps["com.example.imp2"].effective_grace(30), 15);
+        // 未知档仍回落 standard
+        assert_eq!(AppMode::parse("turbo"), None);
     }
 
     #[test]

@@ -25,6 +25,9 @@
 #             push_policy 子进程策略 keep|kill（v0.4.19-l3：冻结时 :push 类子进程 保留/杀死）
 # [apps."pkg"] per-app 策略（v0.4.8-l3 新增，参考 Cerberus 四策略分级）：
 #   mode = "exempt"   豁免：退后台永不冻结（等价 whitelist，可携带独立豁免开关）
+#   mode = "important" 重要（v0.4.41-l3，对齐 AStop IMPORTANT 档）：可冻结但更温和——
+#                     grace = 全局 ×2（退后台不急着冻）+ 唤醒解冻强制开启（keep_wakeup 不可关），
+#                     语义 = 微信/IM/网盘类"重要但不豁免"，墓碑而非杀
 #   mode = "standard" 标准：按全局 grace_seconds（可被 grace_seconds 覆盖）
 #   mode = "strict"   严格：失焦后短 grace 冻结（缺省 8s，可被 grace_seconds 覆盖）
 #   grace_seconds = N    覆盖该包 grace（strict 缺省 8s；standard 缺省跟随全局）

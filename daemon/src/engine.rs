@@ -740,9 +740,16 @@ impl EngineState {
     }
 
     /// 交互/FCM 唤醒豁免开关（per-app；缺省 true = 照常解冻，保持既有行为）
+    /// v0.4.41-l3：important 档强制开启（唤醒即解冻——"重要但可冻结"语义，
+    /// 防止配置 keep_wakeup=false 把重要 app 冻死在墓碑里）
     fn keep_wakeup(&self, pkg: &str) -> bool {
         match self.policy.apps.get(pkg) {
-            Some(ap) => ap.keep_wakeup.unwrap_or(true),
+            Some(ap) => {
+                if ap.mode == AppMode::Important {
+                    return true;
+                }
+                ap.keep_wakeup.unwrap_or(true)
+            }
             None => true,
         }
     }
