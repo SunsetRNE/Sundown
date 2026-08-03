@@ -33,6 +33,13 @@ impl AppMode {
     }
 }
 
+impl Default for AppMode {
+    /// 未知/缺省档回落 standard（与 parse 失败语义一致）
+    fn default() -> Self {
+        AppMode::Standard
+    }
+}
+
 /// 子进程策略（v0.4.19-l3，参考 Cerberus：微信 :push / QQ MSF 必须处理）：
 /// Keep = 冻结时保留 :push 类子进程（推送通道保持连接，防断网）
 /// Kill = 冻结时连带杀死 :push 类子进程（通讯类 app 彻底休眠）
@@ -167,6 +174,10 @@ pub struct Policy {
     pub grace_seconds: u64,
     /// 解冻后冷却秒数（防"解冻-立即再冻"抖动）
     pub cooldown_seconds: u64,
+    /// 唤醒节流秒数（v0.4.42-l3，对齐 AStop Probe 60s 限流）：
+    /// 后台唤醒（broadcast/service/pendingintent）触发解冻后，窗口内同包再次唤醒不再解冻
+    /// （防 FCM/广播风暴反复"解冻-再冻"抖动）；0 = 关闭节流；用户交互（focus）不受限
+    pub wake_throttle_seconds: u64,
     /// 强制冻结名单（命中即冻，优先级高于豁免动作，但白名单仍优先）
     pub force: Vec<String>,
     /// 永不冻结白名单
@@ -203,6 +214,7 @@ impl Default for Policy {
             enabled: false,
             grace_seconds: 30,
             cooldown_seconds: 60,
+            wake_throttle_seconds: 60,
             force: Vec::new(),
             whitelist: Vec::new(),
             apps: HashMap::new(),
@@ -280,6 +292,7 @@ fn apply_entry(p: &mut Policy, e: &TomlEntry) {
         ("general", "enabled") => p.enabled = bool_of(val, e, false),
         ("general", "grace_seconds") => p.grace_seconds = int_of(val, e, 30).max(0) as u64,
         ("general", "cooldown_seconds") => p.cooldown_seconds = int_of(val, e, 60).max(0) as u64,
+        ("general", "wake_throttle_seconds") => p.wake_throttle_seconds = int_of(val, e, 60).max(0) as u64,
         ("freeze", "force") => p.force = str_array_of(val, e),
         ("whitelist", "packages") => p.whitelist = str_array_of(val, e),
         ("whitelist", "keep_fg_service") => p.keep_fg_service = bool_of(val, e, true),
@@ -551,6 +564,20 @@ grace_seconds = 120
         assert_eq!(p3.apps["com.example.imp2"].effective_grace(30), 15);
         // 未知档仍回落 standard
         assert_eq!(AppMode::parse("turbo"), None);
+    }
+
+    #[test]
+    fn wake_throttle_parse_v042() {
+        // v0.4.42-l3：wake_throttle_seconds 解析（缺省 60 / 显式覆盖 / 0=关闭）
+        let p = Policy::from_toml("[general]\nenabled = true", 1).unwrap();
+        assert_eq!(p.wake_throttle_seconds, 60); // 缺省 60（对齐 AStop Probe 限流）
+        let p2 = Policy::from_toml("[general]\nwake_throttle_seconds = 120", 2).unwrap();
+        assert_eq!(p2.wake_throttle_seconds, 120);
+        let p3 = Policy::from_toml("[general]\nwake_throttle_seconds = 0", 3).unwrap();
+        assert_eq!(p3.wake_throttle_seconds, 0); // 0 = 关闭节流
+        // 坏值回落缺省（失败安全）
+        let p4 = Policy::from_toml("[general]\nwake_throttle_seconds = -5", 4).unwrap();
+        assert_eq!(p4.wake_throttle_seconds, 0); // 负数钳 0
     }
 
     #[test]

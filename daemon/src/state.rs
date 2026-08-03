@@ -319,6 +319,7 @@ impl DaemonState {
             freeze_ops,
             unfreeze_ops,
             wakeup_thaws,
+            wake_throttled,
         ) = (
             eng.policy.enabled,
             eng.policy.revision,
@@ -328,6 +329,7 @@ impl DaemonState {
             eng.freeze_ops,
             eng.unfreeze_ops,
             eng.wakeup_thaws,
+            eng.wake_throttled,
         );
         drop(eng);
         format!(
@@ -359,6 +361,7 @@ impl DaemonState {
                 "\"freeze_ops\":{freeze_ops},",
                 "\"unfreeze_ops\":{unfreeze_ops},",
                 "\"wakeup_thaws\":{wakeup_thaws},",
+                "\"wake_throttled\":{wake_throttled},",
                 "\"uptime_s\":{uptime},",
                 "\"config_reloads\":{reloads},",
                 "\"connections_served\":{conns}",
@@ -386,6 +389,7 @@ impl DaemonState {
             freeze_ops = freeze_ops,
             unfreeze_ops = unfreeze_ops,
             wakeup_thaws = wakeup_thaws,
+            wake_throttled = wake_throttled,
             uptime = self.uptime_secs(),
             reloads = self.config_reloads.load(Ordering::Relaxed),
             conns = self.connections_served.load(Ordering::Relaxed),

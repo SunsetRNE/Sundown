@@ -431,9 +431,10 @@ fn handle_event(state: &DaemonState, arg: &str) -> String {
                     );
                 }
             }
-            // L3：冻结中 → 解冻 + 冷却（防唤醒失效）
+            // L3：冻结中 → 解冻 + 冷却（防唤醒失效）；v0.4.42-l3 携带唤醒源供节流判定
             if let Some(pkg) = kv("pkg") {
-                state.engine.lock().unwrap().on_wakeup(&pkg);
+                let src = kv("reason").unwrap_or_else(|| "?".to_string());
+                state.engine.lock().unwrap().on_wakeup(&pkg, &src);
             }
             "{\"ok\":1}".to_string()
         }

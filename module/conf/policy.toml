@@ -14,6 +14,9 @@
 #   无副作用 → 全程无 ANR/崩溃；微信/QQ 后台唤醒仅记录不冻结
 #
 # [general]   enabled 总开关 / grace_seconds 退后台宽限秒数 / cooldown_seconds 解冻后冷却秒数
+#             wake_throttle_seconds 唤醒节流秒数（v0.4.42-l3，对齐 AStop Probe 60s 限流）：
+#               后台唤醒（broadcast/service/pendingintent）触发解冻后，窗口内同包再次唤醒
+#               不解冻（防 FCM/广播风暴反复解冻-再冻抖动）；0=关闭；用户交互（focus）不受限
 # [freeze]    force 立即冻结包（不走 grace）
 # [whitelist] packages 豁免包（退后台不冻结）/ keep_fg_service 前台服务豁免 / keep_media 媒体播放豁免
 #             keep_location 定位活动豁免（v0.4.20-l3：dex 侧 AppOps 判定 loc=1，定位使用中不冻）

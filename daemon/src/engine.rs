@@ -39,6 +39,11 @@ pub struct EngineState {
     pub grace: HashMap<String, (Instant, u64)>,
     /// pkg → 冷却截止时刻（解冻后免冻窗口）
     pub cooldown: HashMap<String, Instant>,
+    /// pkg → 唤醒节流截止时刻（v0.4.42-l3：后台唤醒解冻后窗口内同包不再解冻——
+    /// 防 FCM/广播风暴反复"解冻-再冻"抖动，对齐 AStop Probe 60s 限流）
+    pub wake_throttle: HashMap<String, Instant>,
+    /// 被节流的唤醒次数（status 观测：wake_throttled）
+    pub wake_throttled: u64,
     /// pkg → 最近一次豁免判定（focus 事件携带）
     pub exempt: HashMap<String, ExemptFlags>,
     /// 当前前台（恒不冻结）
@@ -69,6 +74,8 @@ impl Default for EngineState {
             last_persist: None,
             grace: HashMap::new(),
             cooldown: HashMap::new(),
+            wake_throttle: HashMap::new(),
+            wake_throttled: 0,
             exempt: HashMap::new(),
             last_focus: None,
             pkg_uids: HashMap::new(),
@@ -155,7 +162,10 @@ impl EngineState {
     /// event wakeup pkg=P reason=...
     /// v0.4.19-l3：per-app keep_wakeup=false 时忽略唤醒（不解冻不取消 grace——
     /// FCM/交互唤醒风暴 app 保持冻结；事件留痕 reason=wakeup_ignored）。
-    pub fn on_wakeup(&mut self, pkg: &str) {
+    /// v0.4.42-l3：wake_throttle_seconds 节流——后台唤醒解冻后窗口内同包再次唤醒
+    /// 不解冻（事件留痕 reason=wakeup_throttled），对齐 AStop Probe 60s 限流。
+    /// source：唤醒源（dex 上行 reason=broadcast|service|pendingintent；缺省 "?"）。
+    pub fn on_wakeup(&mut self, pkg: &str, source: &str) {
         if !self.keep_wakeup(pkg) {
             logi!("L3 唤醒忽略（keep_wakeup=false）: {}", pkg);
             self.events.push_app(
@@ -168,10 +178,40 @@ impl EngineState {
             return;
         }
         let now = Instant::now();
+        // v0.4.42-l3：唤醒节流——冻结中且窗口内已解冻过 → 本唤醒不解冻（防风暴抖动）。
+        // 只拦"解冻动作"，grace 取消照常（进程确实活跃）。用户交互（focus）不走此路径。
+        let throttle = self.policy.wake_throttle_seconds;
+        if throttle > 0 && self.frozen.contains_key(pkg) {
+            if let Some(&until) = self.wake_throttle.get(pkg) {
+                if now < until {
+                    self.wake_throttled += 1;
+                    logi!(
+                        "L3 唤醒节流: {} source={}（{}s 窗口内，已节流 {} 次）",
+                        pkg,
+                        source,
+                        throttle,
+                        self.wake_throttled
+                    );
+                    self.events.push_app(
+                        EvLevel::Info,
+                        EvAction::Exempt,
+                        pkg,
+                        Some("wakeup_throttled"),
+                        Some(source),
+                    );
+                    return;
+                }
+            }
+        }
         if self.frozen.remove(pkg).is_some() {
             if freezer::unfreeze_pkg(pkg) {
                 self.unfreeze_ops += 1;
                 self.wakeup_thaws += 1;
+                // v0.4.42-l3：节流窗口从"实际解冻"起算（仅当开启时记录）
+                if throttle > 0 {
+                    self.wake_throttle
+                        .insert(pkg.to_string(), now + Duration::from_secs(throttle));
+                }
                 logi!("L3 唤醒解冻: {}（累计 {} 次）", pkg, self.wakeup_thaws);
                 self.events.push_app(
                     EvLevel::Event,
@@ -1033,5 +1073,65 @@ impl EngineState {
         let mut v: Vec<String> = self.grace.keys().cloned().collect();
         v.sort();
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// v0.4.42-l3：唤醒节流——窗口内同包后台唤醒不解冻（防 FCM/广播风暴抖动）。
+    /// 不依赖真实 cgroup：直接预置 wake_throttle 窗口，验证 frozen 表/计数/事件留痕。
+    #[test]
+    fn wake_throttle_v042() {
+        let mut e = EngineState::default();
+        e.policy.wake_throttle_seconds = 60;
+
+        // ① 冻结中 + 窗口内（模拟刚解冻过）→ 唤醒被节流：frozen 保留、计数 +1、事件 wakeup_throttled
+        e.frozen.insert("com.storm.app".to_string(), Instant::now());
+        e.wake_throttle
+            .insert("com.storm.app".to_string(), Instant::now() + Duration::from_secs(60));
+        e.on_wakeup("com.storm.app", "broadcast");
+        assert!(e.frozen.contains_key("com.storm.app"), "窗口内不解冻");
+        assert_eq!(e.wake_throttled, 1);
+        let j = e.events.to_json(8);
+        assert!(j.contains("wakeup_throttled"), "事件留痕: {}", j);
+        assert!(j.contains("broadcast"), "携带唤醒源: {}", j);
+
+        // ② 窗口过期 → 唤醒放行解冻（frozen 移除；unfreeze 在测试环境失败不影响 frozen 清理）
+        e.wake_throttle.insert(
+            "com.storm.app".to_string(),
+            Instant::now() - Duration::from_secs(1),
+        );
+        e.on_wakeup("com.storm.app", "pendingintent");
+        assert!(!e.frozen.contains_key("com.storm.app"), "窗口过期后解冻");
+
+        // ③ throttle=0（关闭节流）→ 即使窗口有记录也不拦
+        let mut e2 = EngineState::default();
+        e2.policy.wake_throttle_seconds = 0;
+        e2.frozen.insert("com.storm.app".to_string(), Instant::now());
+        e2.wake_throttle
+            .insert("com.storm.app".to_string(), Instant::now() + Duration::from_secs(60));
+        e2.on_wakeup("com.storm.app", "service");
+        assert!(!e2.frozen.contains_key("com.storm.app"), "关闭节流不拦");
+        assert_eq!(e2.wake_throttled, 0);
+
+        // ④ keep_wakeup=false 优先于节流（直接忽略）
+        let mut e3 = EngineState::default();
+        e3.policy.wake_throttle_seconds = 60;
+        e3.policy.apps.insert(
+            "com.storm.app".to_string(),
+            crate::policy::AppPolicy {
+                mode: AppMode::Standard,
+                keep_wakeup: Some(false),
+                ..Default::default()
+            },
+        );
+        e3.frozen.insert("com.storm.app".to_string(), Instant::now());
+        e3.on_wakeup("com.storm.app", "broadcast");
+        assert!(e3.frozen.contains_key("com.storm.app"));
+        assert_eq!(e3.wake_throttled, 0);
+        let j3 = e3.events.to_json(8);
+        assert!(j3.contains("wakeup_ignored"), "keep_wakeup=false 走 ignored: {}", j3);
     }
 }
