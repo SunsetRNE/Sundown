@@ -12,7 +12,7 @@ SOCK_PATH="$SUNDOWN_DIR/sundownd.sock"
 UPDATE_DIR="$SUNDOWN_DIR/update"
 PENDING_DIR="$UPDATE_DIR/pending"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.4.35-l3"
+VERSION="0.4.36-l3"
 
 # ---------- 工具函数 ----------
 

@@ -72,14 +72,113 @@ fn uid_freeze_path(uid: u32) -> String {
     format!("/sys/fs/cgroup/apps/uid_{}/cgroup.freeze", uid)
 }
 
-/// 冻结整个 app（uid 级）。成功 true；目录缺失/写失败 false（进程未运行或路径不存在）
-pub fn freeze_uid(uid: u32) -> bool {
-    write_freeze(&uid_freeze_path(uid), "1")
+// ---------------- SIGSTOP 兜底（v0.4.36-l3，对齐 AStop SIGSTOP fallback） ----------------
+// 场景：cgroup.freeze 写入失败（目录缺失/内核路径异常）→ 降级 SIGSTOP 停进程，
+// 保证"冻结语义"不因 cgroup 故障而失效。解冻走 SIGCONT（对未停止进程是幂等 no-op，
+// 无状态也安全）；daemon 启动时全量 SIGCONT 兜底清理崩溃残留（与 thaw_all_residual 同哲学）。
+// 配套：Sundown DefenseHooks 的 ANR 隐身保证 SIGSTOP 进程不会被 system_server 判 ANR。
+
+/// 收集 uid 下全部存活 pid（遍历 pid_* 子目录 cgroup.procs；pid 归属二次核验防复用）
+pub fn uid_pids(uid: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let base = format!("/sys/fs/cgroup/apps/uid_{}", uid);
+    let Ok(rd) = std::fs::read_dir(&base) else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("pid_") {
+            continue;
+        }
+        let Ok(pid) = name[4..].parse::<u32>() else {
+            continue;
+        };
+        // 读 cgroup.procs 确认 pid 仍归属该 cgroup（防 pid 复用误操作）
+        let procs = entry.path().join("cgroup.procs");
+        let owned = std::fs::read_to_string(&procs)
+            .map(|s| s.lines().any(|l| l.trim() == pid.to_string()))
+            .unwrap_or(false);
+        if owned {
+            out.push(pid);
+        }
+    }
+    // 兜底：旧结构直接挂 uid 层（cgroup.procs 顶层）
+    if let Ok(s) = std::fs::read_to_string(format!("{}/cgroup.procs", base)) {
+        for l in s.lines() {
+            if let Ok(pid) = l.trim().parse::<u32>() {
+                out.push(pid);
+            }
+        }
+    }
+    out
 }
 
-/// 解冻整个 app（uid 级）
+/// SIGSTOP 冻结（cgroup 不可用时的降级通道）：停止 uid 全部进程，返回停止数
+pub fn sigstop_freeze_uid(uid: u32) -> usize {
+    let pids = uid_pids(uid);
+    let mut n = 0usize;
+    for pid in pids {
+        if unsafe { libc::kill(pid as i32, libc::SIGSTOP) } == 0 {
+            n += 1;
+        }
+    }
+    if n > 0 {
+        logw!("SIGSTOP 兜底冻结: uid={} 停止 {} 个进程", uid, n);
+    }
+    n
+}
+
+/// SIGCONT 解冻（幂等：对未停止进程为 no-op）：恢复 uid 全部进程，返回恢复数
+pub fn sigcont_uid(uid: u32) -> usize {
+    let pids = uid_pids(uid);
+    let mut n = 0usize;
+    for pid in pids {
+        if unsafe { libc::kill(pid as i32, libc::SIGCONT) } == 0 {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// 启动残留清理兜底：对全部 app uid 发 SIGCONT（daemon 崩溃时 SIGSTOP 进程无 cgroup
+/// 痕迹可扫，只能全量恢复；SIGCONT 幂等无害）。返回恢复进程总数。
+/// 注意：不自动调用（v0.4.29 误解冻教训——虽然 SIGCONT 不碰 cgroup 冻结，机制无冲突，
+/// 仍保守留给管理面命令接入，如 sunctl thaw-sigstop）。
+#[allow(dead_code)]
+pub fn sigcont_all_apps() -> usize {
+    let mut n = 0usize;
+    let Ok(rd) = std::fs::read_dir("/sys/fs/cgroup/apps") else {
+        return n;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(uid_s) = name.strip_prefix("uid_") {
+            if let Ok(uid) = uid_s.parse::<u32>() {
+                n += sigcont_uid(uid);
+            }
+        }
+    }
+    if n > 0 {
+        logw!("启动 SIGCONT 残留清理: 恢复 {} 个进程（SIGSTOP 兜底残留）", n);
+    }
+    n
+}
+
+/// 冻结整个 app（uid 级）。成功 true；cgroup 写失败 → SIGSTOP 兜底降级（仍算冻结成功）。
+pub fn freeze_uid(uid: u32) -> bool {
+    if write_freeze(&uid_freeze_path(uid), "1") {
+        return true;
+    }
+    // v0.4.36-l3：cgroup 不可用 → SIGSTOP 兜底（对齐 AStop fallback 语义）
+    sigstop_freeze_uid(uid) > 0
+}
+
+/// 解冻整个 app（uid 级）：cgroup 写 0 + SIGCONT 幂等恢复（双通道，SIGSTOP 兜底可解）
 pub fn unfreeze_uid(uid: u32) -> bool {
-    write_freeze(&uid_freeze_path(uid), "0")
+    let ok = write_freeze(&uid_freeze_path(uid), "0");
+    sigcont_uid(uid);
+    ok
 }
 
 /// 查询 uid 冻结状态：Some(true)=冻结中，Some(false)=未冻结，None=路径不可读（未运行）
