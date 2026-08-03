@@ -89,6 +89,8 @@ impl EvSubject {
 /// 一条结构化事件
 #[derive(Debug, Clone)]
 pub struct Event {
+    /// 全局序号（EventBuffer.total 单调分配；持久化增量水位的排序键，环形覆盖后仍唯一）
+    pub seq: u64,
     /// epoch 秒（日志时间轴排序键）
     pub ts: u64,
     pub level: EvLevel,
@@ -112,6 +114,7 @@ impl Event {
         msg: Option<String>,
     ) -> Self {
         Self {
+            seq: 0, // push 时由 EventBuffer 分配
             ts: now_epoch_secs(),
             level,
             action,
@@ -124,8 +127,10 @@ impl Event {
 
     /// JSON 序列化（可选字段省略而非 null——紧凑，前端解析容错）
     pub fn to_json(&self) -> String {
-        let mut s = String::with_capacity(96);
-        s.push_str("{\"ts\":");
+        let mut s = String::with_capacity(112);
+        s.push_str("{\"seq\":");
+        s.push_str(&self.seq.to_string());
+        s.push_str(",\"ts\":");
         s.push_str(&self.ts.to_string());
         s.push_str(",\"level\":\"");
         s.push_str(self.level.as_str());
@@ -160,6 +165,8 @@ pub struct EventBuffer {
     buf: VecDeque<Event>,
     /// 累计产生事件数（覆盖后仍单调递增，诊断丢事件率用）
     pub total: u64,
+    /// 已持久化水位（P1⑩ 事件审计：seq <= flushed_seq 的事件已写入 JSONL）
+    flushed_seq: u64,
 }
 
 impl Default for EventBuffer {
@@ -167,18 +174,54 @@ impl Default for EventBuffer {
         Self {
             buf: VecDeque::with_capacity(EVENT_CAPACITY),
             total: 0,
+            flushed_seq: 0,
         }
     }
 }
 
 impl EventBuffer {
-    /// 写入一条事件；容量满时覆盖最旧
-    pub fn push(&mut self, e: Event) {
+    /// 写入一条事件；容量满时覆盖最旧。seq 全局单调分配（持久化水位排序键）。
+    pub fn push(&mut self, mut e: Event) {
         self.total += 1;
+        e.seq = self.total;
         if self.buf.len() >= EVENT_CAPACITY {
             self.buf.pop_front();
         }
         self.buf.push_back(e);
+    }
+
+    // ---------------- 持久化审计（P1⑩，对齐 AStop firewall_events 时间线） ----------------
+
+    /// 追加落盘新事件到 JSONL（一行一 JSON；增量水位 flushed_seq，幂等）。
+    /// 文件超阈值自动滚动（保留最近 MAX_EVENT_LOGS 份）。失败安全：写失败只留痕不崩溃，
+    /// 水位不推进（下轮 tick 重试）；滚动失败不阻塞（继续追加当前文件）。
+    pub fn persist_new(&mut self, path: &str) -> usize {
+        let mut n = 0usize;
+        let mut text = String::new();
+        for e in self.buf.iter() {
+            if e.seq > self.flushed_seq {
+                text.push_str(&e.to_json());
+                text.push('\n');
+                n += 1;
+            }
+        }
+        if n == 0 {
+            return 0;
+        }
+        if let Err(e) = append_jsonl(path, &text) {
+            crate::logw!("事件审计落盘失败: {}（{}）", path, e);
+            return 0;
+        }
+        // 落盘成功才推进水位（失败重试语义）
+        if let Some(last) = self.buf.iter().rev().find(|e| e.seq > self.flushed_seq) {
+            self.flushed_seq = last.seq;
+        }
+        n
+    }
+
+    /// 当前待落盘事件数（诊断用；0 = 已同步）
+    pub fn pending_persist(&self) -> usize {
+        self.buf.iter().filter(|e| e.seq > self.flushed_seq).count()
     }
 
     /// 便捷构造：App 主体事件（包名必有）
@@ -247,6 +290,40 @@ impl EventBuffer {
         s.push(']');
         s
     }
+}
+
+/// JSONL 滚动保留份数（events.jsonl + events.1..N；超出删最旧）
+const MAX_EVENT_LOGS: usize = 3;
+/// 单份 JSONL 滚动阈值（2MB ≈ 2 万+条事件；观测数据可损失，daemon 不膨胀）
+const EVENT_LOG_ROTATE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// 追加写 JSONL：文件超阈值先滚动（events.jsonl → events.1.jsonl → … → 删最旧），
+/// 再 append。滚动/写失败返回 Err（调用方留痕，不崩溃）。
+fn append_jsonl(path: &str, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    // 滚动检查（仅当前文件超阈值时）
+    if let Ok(md) = std::fs::metadata(path) {
+        if md.len() >= EVENT_LOG_ROTATE_BYTES {
+            rotate_jsonl(path);
+        }
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    f.write_all(text.as_bytes())
+}
+
+/// 滚动：events.jsonl → events.1.jsonl → events.2.jsonl → 删 events.3.jsonl
+/// （只保留 MAX_EVENT_LOGS 份历史）。失败静默（下次滚动重试；当前文件继续追加）。
+fn rotate_jsonl(path: &str) {
+    for i in (1..MAX_EVENT_LOGS).rev() {
+        let from = format!("{}.{}", path, i);
+        let to = format!("{}.{}", path, i + 1);
+        let _ = std::fs::rename(&from, &to);
+    }
+    let _ = std::fs::rename(path, format!("{}.1", path));
+    crate::logw!("事件审计日志滚动: {}", path);
 }
 
 fn now_epoch_secs() -> u64 {
@@ -328,5 +405,61 @@ mod tests {
         let j = b.to_json(0);
         assert!(j.contains("\"pkg\":\"a\\\"b\\\\c\""));
         assert!(j.contains("行\\n\\t"));
+    }
+
+    #[test]
+    fn seq_assigned_and_serialized() {
+        let mut b = EventBuffer::default();
+        b.push_app(EvLevel::Event, EvAction::Freeze, "com.a", Some("grace_expired"), None);
+        b.push_app(EvLevel::Event, EvAction::Freeze, "com.b", Some("grace_expired"), None);
+        let j = b.to_json(0);
+        // seq 从 1 开始单调
+        assert!(j.contains("\"seq\":1"));
+        assert!(j.contains("\"seq\":2"));
+        let all = b.recent(0);
+        assert_eq!(all[0].seq, 1);
+        assert_eq!(all[1].seq, 2);
+    }
+
+    #[test]
+    fn persist_new_incremental_and_idempotent() {
+        let dir = std::env::temp_dir().join("sundown_events_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let p = path.to_str().unwrap();
+
+        let mut b = EventBuffer::default();
+        b.push_app(EvLevel::Event, EvAction::Freeze, "com.a", Some("grace_expired"), None);
+        b.push_app(EvLevel::Event, EvAction::Unfreeze, "com.b", Some("wakeup"), None);
+
+        // 首次落盘 2 条
+        assert_eq!(b.persist_new(p), 2);
+        assert_eq!(b.pending_persist(), 0);
+        let txt = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(txt.lines().count(), 2);
+        assert!(txt.lines().all(|l| l.starts_with('{') && l.ends_with('}')));
+
+        // 幂等：无新事件不再写
+        assert_eq!(b.persist_new(p), 0);
+        assert_eq!(std::fs::read_to_string(&p).unwrap().lines().count(), 2);
+
+        // 新增 1 条 → 只追加 1 条
+        b.push_app(EvLevel::Warn, EvAction::Exempt, "com.c", Some("tick_exempt"), None);
+        assert_eq!(b.persist_new(p), 1);
+        assert_eq!(b.pending_persist(), 0);
+        let txt2 = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(txt2.lines().count(), 3);
+        assert!(txt2.lines().last().unwrap().contains("\"pkg\":\"com.c\""));
+
+        // 环形覆盖后水位仍正确：灌满 +50，落盘应只写未覆盖的新事件
+        for i in 0..(EVENT_CAPACITY + 50) {
+            b.push_app(EvLevel::Event, EvAction::Freeze, &format!("com.pkg.{}", i), None, None);
+        }
+        let n = b.persist_new(p);
+        assert!(n > 0);
+        assert_eq!(b.pending_persist(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
