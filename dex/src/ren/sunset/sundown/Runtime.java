@@ -242,8 +242,20 @@ final class Runtime {
         String expected = emptyToNull(hello.optString("expected_dex_hash", null));
         Log.i(TAG, "hello-dex 完成: v" + version + " expected=" + expected + " match=" + match);
         // 自愈：daemon 期望版本与本地不一致 → 拉取最新 dex 字节并切换
+        // v0.4.28-l3：自愈换代延迟 3-10s（随机）——实机事故（2026-08-03）：daemon 重启后
+        // dex 立即重连 fetch-dex 换代，新代类加载（DefineClass→SetupClass）触发 lsplant
+        // SetClassStatus hook 空指针 → system_server SIGSEGV。延迟错开 daemon 启动脆弱
+        // 窗口（inotify/事件风暴期），降低换代与系统初始化竞态概率。失败保留旧代，下轮
+        // hello 重连天然重试（自愈语义不变）。
         if (match == 0 && expected != null && !expected.equals(version)) {
-            Log.i(TAG, "本地版本落后（v" + version + " → " + expected + "），fetch-dex 自愈");
+            long delay = 3000 + (System.nanoTime() & 0x7fffffff) % 7000; // 3-10s
+            Log.i(TAG, "本地版本落后（v" + version + " → " + expected + "），延迟 " + delay
+                    + "ms 后 fetch-dex 自愈");
+            try {
+                Thread.sleep(delay);
+            } catch (InterruptedException e) {
+                return; // shutdown
+            }
             byte[] dex = DaemonLink.fetchDex(socketName);
             if (dex != null) swapTo(dex, expected);
         }
