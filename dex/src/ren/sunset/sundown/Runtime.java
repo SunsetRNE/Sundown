@@ -137,6 +137,12 @@ final class Runtime {
                 l.connect();
                 link = l;
                 JSONObject hello = l.helloDex(version);
+                // v0.4.32-l3：等待系统启动完成再换代/装 hook——2026-08-03 实机
+                // tombstone_12：system_server 启动早期（2s）LSPlant Init/Dobby inline
+                // patch 与并发类加载竞态 → trampoline 撕裂 pc=0 SIGSEGV。等待
+                // sys.boot_completed 把换代与 hook 安装挪到类加载低峰期。
+                // 观望模式下 hook 晚装无功能损失（事件流自 boot 后开始）。
+                waitForBootCompleted();
                 // L2b 引导代 → 工作代自热切换（桩冷启 gen0 无 canonical NativeBridge 父链；
                 // hop 后本代 shutdown，由新代重装全部机制——见 LsPlantBridge 类加载拓扑）
                 if (LsPlantBridge.needsGenerationHop()) {
@@ -377,5 +383,28 @@ final class Runtime {
 
     private static String emptyToNull(String s) {
         return (s == null || s.isEmpty()) ? null : s;
+    }
+
+    /** v0.4.32-l3：等待系统启动完成（sys.boot_completed=1），最长 180s。
+     *  用于把"引导代换代 + LSPlant Init/hook 安装"推迟到类加载低峰期——
+     *  2026-08-03 实机 tombstone_12：启动早期 inline patch 与并发类加载竞态
+     *  → trampoline 撕裂 pc=0 SIGSEGV。观望模式下 hook 晚装无功能损失。
+     *  超时后继续（不阻塞 dex 生命周期）；shutdown 时立即返回。 */
+    private static void waitForBootCompleted() {
+        for (int i = 0; i < 90; i++) { // 90 × 2s = 180s
+            try {
+                if ("1".equals(android.os.SystemProperties.get("sys.boot_completed"))) {
+                    return;
+                }
+            } catch (Throwable ignored) {
+                return; // SystemProperties 不可用（非标准环境）→ 不阻塞
+            }
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                return; // shutdown
+            }
+        }
+        Log.w(TAG, "等待 boot_completed 超时（180s），继续（hook 早装有概率风险）");
     }
 }

@@ -25,10 +25,26 @@ L2 的 native 机制层（docs/l2b-plan.md §0.2 裁决）。由 dex 层 `System
 
 - LSPlant 官方 AAR 只发布 C++ API（`lsplant.hpp`）；Java 桥（`NativeBridge`/`Hooker`）
   按官方 test 模式 vendor 在 `dex/src/ren/sunset/sundown/hook/NativeBridge.java`
-- LGPL-3.0 合规：本模块**动态链接**且不修改 LSPlant；LSPlant 源码：
-  https://github.com/LSPosed/LSPlant （用户可自行重新构建替换 `liblsplant.so`）
+- LGPL-3.0 合规：本模块**动态链接**；LSPlant 源码与修改见下方「LSPlant patch 说明」；
+  LSPlant 上游源码：https://github.com/LSPosed/LSPlant （用户可自行重新构建替换 `liblsplant.so`）
 - art 符号解析为自研 `mini_art_elf`（官方 lsparself 为 submodule 不分发；
   需求面 = maps 基址 + 磁盘 ELF `.dynsym`/`.symtab`）
+
+## LSPlant patch 说明（v0.4.32 起）
+
+对 LSPlant pinned commit `84256d4` 应用了一个 patch（`lsplant-patches/0001-classstatus-null-guard.patch`）：
+
+- **背景**：ColorOS/Android 16 实机（2026-08-03）system_server 连续软重启——
+  任意线程（HANS/osense.memory/OPPO 服务初始化/换代窗口）并发类加载时，
+  `SetClassStatus` hook 的 `TrivialHandle<Class>`（非 GC-root 指针）可能失效/为空，
+  直接 `GetClassDef_` 解引用 → 空指针 SIGSEGV（tombstone_08/10/12）。
+- **修改**：四个 SetClassStatus 重载（`SetClassStatus_`/`SetStatus_`/`TrivialSetStatus_`/
+  `ClassSetStatus_`）在调用 `BackupClassMethods` 前对 Class 指针判空；为空跳过备份
+  （仅损失该类的初始化备份，绝不崩溃；备份缺失时 `PopBackup` 返回空表，UnHook 走
+  Dobby 恢复路径兜底）。
+- **LGPL-3.0 合规**：修改以 patch 形式随仓库分发（用户可获取 patch 与完整源码重构建）；
+  仍为动态链接；CI 在构建 liblsplant.so 前自动应用 patch（`git apply`，失败即中止）。
+- **上游同步**：若上游修复此竞态（或发布新 pinned commit），移除 patch 并更新本说明。
 
 ## 构建（CI `build-bridge` job；本地需 NDK）
 

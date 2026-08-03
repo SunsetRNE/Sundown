@@ -1,0 +1,52 @@
+diff --git a/lsplant/src/main/jni/art/mirror/class.cxx b/lsplant/src/main/jni/art/mirror/class.cxx
+index a73f3d0..3f9b1d6 100644
+--- a/lsplant/src/main/jni/art/mirror/class.cxx
++++ b/lsplant/src/main/jni/art/mirror/class.cxx
+@@ -61,7 +61,10 @@ private:
+         <Backup auto backup>
+         (TrivialHandle<Class> h, uint8_t new_status, Thread *self) static -> void {
+             if (new_status == initialized_status) {
+-                BackupClassMethods(GetClassDef_(h.Get()), self);
++                // Sundown patch: 并发类加载竞态防护（TrivialHandle 非 GC-root，实机 SIGSEGV）
++                if (Class *klass = h.Get(); klass != nullptr) {
++                    BackupClassMethods(GetClassDef_(klass), self);
++                }
+             }
+             return backup(h, new_status, self);
+         };
+@@ -71,7 +74,10 @@ private:
+         <Backup auto backup>
+          (Handle<Class> h, int new_status, Thread *self) static -> void {
+             if (new_status == static_cast<int>(initialized_status)) {
+-                BackupClassMethods(GetClassDef_(h.Get()), self);
++                // Sundown patch: 同上
++                if (Class *klass = h.Get(); klass != nullptr) {
++                    BackupClassMethods(GetClassDef_(klass), self);
++                }
+             }
+             return backup(h, new_status, self);
+         };
+@@ -81,7 +87,10 @@ private:
+         <Backup auto backup>
+         (TrivialHandle<Class> h, uint32_t new_status, Thread *self) static -> void {
+             if (new_status == initialized_status) {
+-                BackupClassMethods(GetClassDef_(h.Get()), self);
++                // Sundown patch: 同上
++                if (Class *klass = h.Get(); klass != nullptr) {
++                    BackupClassMethods(GetClassDef_(klass), self);
++                }
+             }
+             return backup(h, new_status, self);
+         };
+@@ -91,7 +100,10 @@ private:
+         <MemBackup auto backup>
+         (Class *thiz, int new_status, Thread *self) static -> void {
+             if (new_status == static_cast<int>(initialized_status)) {
+-                BackupClassMethods(GetClassDef_(thiz), self);
++                // Sundown patch: 同上
++                if (thiz != nullptr) {
++                    BackupClassMethods(GetClassDef_(thiz), self);
++                }
+             }
+             return backup(thiz, new_status, self);
+         };
