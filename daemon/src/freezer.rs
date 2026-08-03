@@ -8,7 +8,7 @@
 //! pkg→uid 全量映射（含未运行包）。包表带 mtime 缓存，变更自动重读。
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::{loge, logi, logw, paths};
@@ -167,18 +167,102 @@ pub fn sigcont_all_apps() -> usize {
 
 /// 冻结整个 app（uid 级）。成功 true；cgroup 写失败 → SIGSTOP 兜底降级（仍算冻结成功）。
 pub fn freeze_uid(uid: u32) -> bool {
-    if write_freeze(&uid_freeze_path(uid), "1") {
-        return true;
+    let ok = if write_freeze(&uid_freeze_path(uid), "1") {
+        true
+    } else {
+        // v0.4.36-l3：cgroup 不可用 → SIGSTOP 兜底（对齐 AStop fallback 语义）
+        sigstop_freeze_uid(uid) > 0
+    };
+    // v0.4.37-l3：冻结成功 → OOM 保护（防 LMK 杀冻结进程）
+    if ok {
+        protect_oom(uid);
     }
-    // v0.4.36-l3：cgroup 不可用 → SIGSTOP 兜底（对齐 AStop fallback 语义）
-    sigstop_freeze_uid(uid) > 0
+    ok
 }
 
 /// 解冻整个 app（uid 级）：cgroup 写 0 + SIGCONT 幂等恢复（双通道，SIGSTOP 兜底可解）
 pub fn unfreeze_uid(uid: u32) -> bool {
     let ok = write_freeze(&uid_freeze_path(uid), "0");
     sigcont_uid(uid);
+    restore_oom(uid);
     ok
+}
+
+// ---------------- OOM 保护（v0.4.37-l3，对齐 AStop custom_oom_adj） ----------------
+// 场景：cgroup 冻结 ≠ 免疫 LMK/OOM——冻结 app 通常已 cached（adj≈900），内存压力下
+// 会被 LMK 优先杀死，解冻即"白冻"。冻结期把 oom_score_adj 锁到保护值（-1000 =
+// OOM_DISABLE 等效，LMK 永不杀），解冻恢复原值。记录存内存 HashMap<pid,原值>；
+// daemon 重启后记录丢失（进程级保护随 daemon 重建，冻结表对账会重新 freeze →
+// 重新 protect；残留高 adj 进程由系统正常回收，无安全风险）。
+
+/// 冻结保护值：OOM_DISABLE 等效（LMK/内存压力均不杀）
+const OOM_PROTECT: i32 = -1000;
+
+/// pid → 冻结前原 oom_score_adj（解冻恢复用；进程死亡/pid 复用自动失效）
+static OOM_BACKUP: LazyLock<Mutex<HashMap<u32, i32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn read_oom_adj(pid: u32) -> Option<i32> {
+    std::fs::read_to_string(format!("/proc/{}/oom_score_adj", pid))
+        .ok()?
+        .trim()
+        .parse::<i32>()
+        .ok()
+}
+
+fn write_oom_adj(pid: u32, val: i32) -> bool {
+    std::fs::write(format!("/proc/{}/oom_score_adj", pid), val.to_string().as_bytes()).is_ok()
+}
+
+/// 冻结保护：uid 全部进程写保护 adj（记录原值；已保护进程跳过）。返回新保护数。
+pub fn protect_oom(uid: u32) -> usize {
+    let mut n = 0usize;
+    for pid in uid_pids(uid) {
+        // pid 复用防护：若该 pid 已被记录且当前 adj 已是保护值 → 跳过
+        let backup_exists = OOM_BACKUP.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&pid);
+        if backup_exists {
+            continue;
+        }
+        match read_oom_adj(pid) {
+            Some(orig) if orig != OOM_PROTECT => {
+                if write_oom_adj(pid, OOM_PROTECT) {
+                    OOM_BACKUP.lock().unwrap_or_else(|e| e.into_inner()).insert(pid, orig);
+                    n += 1;
+                }
+            }
+            Some(_) => {} // 已是保护值（重复 protect 幂等）
+            None => {}    // 进程刚死，跳过
+        }
+    }
+    if n > 0 {
+        logw!("OOM 保护: uid={} 锁定 {} 个进程 adj={}", uid, n, OOM_PROTECT);
+    }
+    n
+}
+
+/// 解冻恢复：恢复全部已记录 pid 的原 adj（写失败 = 进程已死，清记录幂等）。
+/// 返回恢复数（0 = 无记录，正常）。
+pub fn restore_oom(uid: u32) -> usize {
+    let mut n = 0usize;
+    let mut done = Vec::new();
+    {
+        let mut guard = OOM_BACKUP.lock().unwrap_or_else(|e| e.into_inner());
+        for pid in uid_pids(uid) {
+            if let Some(orig) = guard.get(&pid).copied() {
+                if write_oom_adj(pid, orig) {
+                    n += 1;
+                }
+                // 无论写成功与否都清记录（进程死了记录无意义；成功则恢复完成）
+                done.push(pid);
+            }
+        }
+        for pid in done {
+            guard.remove(&pid);
+        }
+    }
+    if n > 0 {
+        logw!("OOM 恢复: uid={} 还原 {} 个进程 adj", uid, n);
+    }
+    n
 }
 
 /// 查询 uid 冻结状态：Some(true)=冻结中，Some(false)=未冻结，None=路径不可读（未运行）
