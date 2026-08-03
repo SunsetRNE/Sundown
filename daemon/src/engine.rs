@@ -33,6 +33,8 @@ pub struct EngineState {
     pub policy: Policy,
     /// pkg → 冻结时刻（当前冻结表）
     pub frozen: HashMap<String, Instant>,
+    /// v0.4.29-l3：上次持久化的冻结快照（(pkg, uid) 列表，排序去重）——变化才写盘
+    last_persist: Option<Vec<(String, u32)>>,
     /// pkg → (grace 开始时刻, 该包 grace 秒数)——per-app 各自时长（strict 8s / 覆盖值）
     pub grace: HashMap<String, (Instant, u64)>,
     /// pkg → 冷却截止时刻（解冻后免冻窗口）
@@ -64,6 +66,7 @@ impl Default for EngineState {
         Self {
             policy: Policy::default(),
             frozen: HashMap::new(),
+            last_persist: None,
             grace: HashMap::new(),
             cooldown: HashMap::new(),
             exempt: HashMap::new(),
@@ -431,6 +434,36 @@ impl EngineState {
         out
     }
 
+    /// v0.4.29-l3：冻结集持久化（frozen 表变化才写盘）——启动归属对账的权威源。
+    /// 行式 `pkg:uid`（零依赖，无 JSON 库）；tick 末尾统一捕获所有 frozen 变化路径
+    /// （freeze_now/on_focus/wakeup/force_stop/热更新解冻/网络唤醒/进程核验清理）。
+    fn persist_frozen_if_changed(&mut self) {
+        let mut snap: Vec<(String, u32)> = Vec::new();
+        for pkg in self.frozen.keys() {
+            let uid = self
+                .pkg_uids
+                .get(pkg)
+                .copied()
+                .or_else(|| crate::freezer::pkg_uid(pkg));
+            if let Some(u) = uid {
+                snap.push((pkg.clone(), u));
+            }
+        }
+        snap.sort();
+        snap.dedup();
+        if self.last_persist.as_ref() == Some(&snap) {
+            return;
+        }
+        let mut text = String::new();
+        for (p, u) in &snap {
+            text.push_str(&format!("{}:{}\n", p, u));
+        }
+        if std::fs::write(crate::paths::STATE_FROZEN_FILE, text).is_err() {
+            logw!("冻结集持久化写盘失败: {}", crate::paths::STATE_FROZEN_FILE);
+        }
+        self.last_persist = Some(snap);
+    }
+
     /// 周期性推进：grace 到期冻结 / 冷却清理 / 策略关闭全量解冻 / 进程核验
     pub fn tick(&mut self) {
         let now = Instant::now();
@@ -454,6 +487,7 @@ impl EngineState {
             self.frozen.clear();
             self.grace.clear();
             self.cooldown.clear();
+            self.persist_frozen_if_changed(); // v0.4.29-l3：清空冻结集持久化
             return;
         }
 
@@ -579,32 +613,12 @@ impl EngineState {
             );
         }
 
-        // v0.4.22-l3：冻结表与实际 cgroup 状态对账（每 30 tick ≈9s）——
-        // 残留冻结（表无记录但实际冻着）一律解冻，防"冻着却无记录"的僵尸状态。
-        // （daemon 重启残留由 main 启动清理兜底；此处覆盖运行期异常）
+        // v0.4.22-l3 对账（v0.4.29-l3 修复）：原实现扫描 cgroup **全部**冻结 uid 并把
+        // 表外冻结一律解冻——HANS/系统冻结的后台进程被误当残留解冻（2026-08-03 实机：
+        // enabled=true 时每 9s 解冻微信等 HANS 冻结集，与 HANS 打架）。修复：表外冻结
+        // **不动作**（无归属证据不碰，归属判定=冻结集持久化 + 启动对账，见 main.rs）；
+        // 表内一致性由下一段"冻结记录清理（uid 无进程）"与冻结集持久化兜底。
         self.tick_count += 1;
-        if self.tick_count % 30 == 0 {
-            let frozen_uids = freezer::frozen_uids();
-            if !frozen_uids.is_empty() {
-                let mut kept: std::collections::HashSet<u32> = std::collections::HashSet::new();
-                for pkg in self.frozen.keys() {
-                    if let Some(uid) = freezer::pkg_uid(pkg) {
-                        kept.insert(uid);
-                    }
-                }
-                for uid in frozen_uids {
-                    if !kept.contains(&uid) && freezer::unfreeze_uid(uid) {
-                        logw!("L3 对账解冻残留冻结: uid={}", uid);
-                        self.events.push_system(
-                            EvLevel::Warn,
-                            EvAction::Unfreeze,
-                            Some("residual"),
-                            Some(&format!("uid={}", uid)),
-                        );
-                    }
-                }
-            }
-        }
 
         // v0.4.23-l3：冻结中网络唤醒（对齐 AStop allow_network_wakeup）——keep_network
         // 开启的 app 被冻结后，若内核侧仍有网络流量（rx 计数：外部发包/心跳/隧道流量，
@@ -638,6 +652,9 @@ impl EngineState {
                 );
             }
         }
+
+        // v0.4.29-l3：冻结集持久化（frozen 表变化 → 写盘；启动归属对账的权威源）
+        self.persist_frozen_if_changed();
     }
 
     // ---------------- 决策 ----------------

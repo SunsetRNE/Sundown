@@ -118,21 +118,59 @@ fn main() {
     let state = Arc::new(DaemonState::new());
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    // v0.4.22-l3：启动残留冻结清理——daemon 崩溃/重启后 cgroup.freeze 状态保留
-    // （内核态），frozen 表却已清空；不清则残留冻结 app 切前台也不会被解冻
-    // （"能打开但点击无响应"→ ANR 闪退，实机反馈）。启动即全量解冻，重新开始决策。
+    // v0.4.29-l3：启动归属对账（替代 v0.4.22-l3 全量解冻——误解冻 HANS 冻结集：
+    // 2026-08-03 实机，enabled=true 时对账把微信等 HANS 冻结进程当残留解冻，与 HANS 打架）。
+    // 归属判定：冻结集持久化（frozen.state）是"上次会话 Sundown 冻结集"的权威源，
+    // 只恢复/清理有归属证据的冻结；HANS/系统冻结（无持久化记录）一律不碰。
     {
+        use std::collections::HashSet;
+        use std::time::Instant;
         use crate::events::{EvAction, EvLevel};
-        let n = freezer::thaw_all_residual();
-        if n > 0 {
-            logw!("启动残留冻结清理：解冻 {} 个 uid（上次退出异常遗留）", n);
-            state.engine.lock().unwrap().events.push_system(
-                EvLevel::Warn,
-                EvAction::Unfreeze,
-                Some("startup_thaw"),
-                Some(&format!("{} uids", n)),
-            );
+        let persisted = freezer::read_frozen_state();
+        let cgroup_frozen: HashSet<u32> = freezer::frozen_uids().into_iter().collect();
+        let mut restored = 0usize;
+        let mut thawed = 0usize;
+        {
+            let mut eng = state.engine.lock().unwrap();
+            for (pkg, uid) in &persisted {
+                if !cgroup_frozen.contains(uid) {
+                    continue; // 已解冻（正常会话结束/外部解冻）→ 忽略
+                }
+                if freezer::uid_has_procs(*uid) {
+                    // 上次会话 Sundown 冻结且进程仍在 → 恢复管理（防"冻着无记录"ANR）
+                    eng.frozen.insert(pkg.clone(), Instant::now());
+                    restored += 1;
+                } else if freezer::unfreeze_uid(*uid) {
+                    // 进程已死 → 僵尸冻结清理
+                    thawed += 1;
+                    logw!("启动归属对账：解冻僵尸冻结 uid={}（{}，进程已死）", uid, pkg);
+                    eng.events.push_system(
+                        EvLevel::Warn,
+                        EvAction::Unfreeze,
+                        Some("startup_zombie"),
+                        Some(&format!("uid={}", uid)),
+                    );
+                }
+            }
         }
+        if restored > 0 {
+            logi!("启动归属对账：恢复 {} 个 Sundown 冻结（上次会话遗留，进程仍在）", restored);
+        }
+        if thawed > 0 {
+            logw!("启动归属对账：共解冻 {} 个僵尸冻结（进程已死）", thawed);
+        }
+        if !persisted.is_empty() {
+            logi!("启动归属对账：持久化 {} 项，cgroup 冻结 {} 个 uid；表外冻结不动作（HANS/系统）",
+                persisted.len(), cgroup_frozen.len());
+        }
+        freezer::clear_frozen_state(); // 本会话从零开始（恢复项由 persist 重新落盘）
+    }
+
+    // v0.4.29-l3：网络统计源启动自检（keep_network 数据源可验证性；enabled=false 也跑）
+    {
+        let mut eng = state.engine.lock().unwrap();
+        let src = eng.net.probe_source();
+        logi!("网络统计源: {}（keep_network 数据源自检）", src);
     }
 
     // L3.1 结构化事件：daemon 启动

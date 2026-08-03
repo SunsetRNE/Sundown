@@ -458,9 +458,39 @@ pub fn frozen_uids() -> Vec<u32> {
     out
 }
 
+/// v0.4.29-l3：读上次会话冻结集持久化（行式 `pkg:uid`）——启动归属对账的权威源。
+/// 文件由 engine 冻结表变化时落盘（tick 末尾 persist_frozen_if_changed）。
+pub fn read_frozen_state() -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    let Ok(text) = std::fs::read_to_string(crate::paths::STATE_FROZEN_FILE) else {
+        return out;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((pkg, uid_s)) = line.split_once(':') {
+            if let Ok(uid) = uid_s.trim().parse::<u32>() {
+                out.push((pkg.trim().to_string(), uid));
+            }
+        }
+    }
+    out
+}
+
+/// v0.4.29-l3：清空冻结集持久化（启动归属对账完成后；本会话从零开始）
+pub fn clear_frozen_state() {
+    let _ = std::fs::remove_file(crate::paths::STATE_FROZEN_FILE);
+}
+
 /// 启动/异常恢复：解冻全部残留冻结（uid 层 + pid 子层写 0）→ 返回解冻 uid 数。
 /// daemon 崩溃/重启后 cgroup.freeze 状态保留（内核态），frozen 表却已清空——
 /// 若不清理，残留冻结的 app 切前台也不会被解冻（表现为"能打开但点击无响应"）。
+/// v0.4.29-l3 起**不再使用**（误解冻 HANS 冻结集——2026-08-03 实机教训）：
+/// 归属对账见 main.rs 启动段（read_frozen_state + 持久化匹配才动作）。
+/// 保留实现供回归参考（历史缺陷对照），故允许 dead_code。
+#[allow(dead_code)]
 pub fn thaw_all_residual() -> usize {
     let mut n = 0usize;
     let Ok(rd) = std::fs::read_dir("/sys/fs/cgroup/apps") else {

@@ -101,6 +101,22 @@ impl NetSampler {
         active
     }
 
+    /// v0.4.29-l3：启动自检——主动探测可用数据源（enabled=false 也能验证 keep_network
+    /// 数据源是否可用；用 uid=0 触发探测——系统 uid 流量真实存在，探测成本一次）
+    pub fn probe_source(&mut self) -> &'static str {
+        if self.uid_bytes(0).is_some() {
+            match self.source {
+                Some(NetSource::PinFile) => "pinfile",
+                Some(NetSource::UidStat) => "uid_stat",
+                Some(NetSource::XtQtaguid) => "xt_qtaguid",
+                Some(NetSource::Bpf) => "bpf",
+                None => "unknown",
+            }
+        } else {
+            "unavailable"
+        }
+    }
+
     /// 读取 uid 累计网络字节（收发合计）。多源探测，缓存可用源。
     fn uid_bytes(&mut self, uid: u32) -> Option<u64> {
         match self.source {
