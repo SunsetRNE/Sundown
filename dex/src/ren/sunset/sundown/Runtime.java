@@ -393,7 +393,12 @@ final class Runtime {
     private static void waitForBootCompleted() {
         for (int i = 0; i < 90; i++) { // 90 × 2s = 180s
             try {
-                if ("1".equals(android.os.SystemProperties.get("sys.boot_completed"))) {
+                // android.os.SystemProperties 是 @hide API，公开 android.jar 不含
+                // （CI javac -bootclasspath 会报 cannot find symbol，2026-08-03
+                // v0.4.32-l3 首次 CI 失败实证）——必须反射调用。
+                Class<?> sp = Class.forName("android.os.SystemProperties");
+                Method get = sp.getMethod("get", String.class);
+                if ("1".equals(get.invoke(null, "sys.boot_completed"))) {
                     return;
                 }
             } catch (Throwable ignored) {
