@@ -48,12 +48,15 @@ pub const POLICY_FILE: &str = "/data/adb/sundown/conf/policy.toml";
 pub const ACTION_FILE: &str = "/data/adb/sundown/conf/action.toml";
 /// 包→uid 映射表（root 可读，`pkg uid ...` 行式；冻结执行 uid 定位用）
 pub const PACKAGES_LIST: &str = "/data/system/packages.list";
+/// 冻结集持久化目录（v0.4.30-l3 补建：v0.4.29 起 persist 写盘一直失败——
+/// 该目录未在 ensure_dirs 中创建，实测 daemon 日志 "冻结集持久化写盘失败"）
+pub const STATE_DIR: &str = "/data/adb/sundown/state";
 /// 冻结集持久化（v0.4.29-l3）：daemon 冻结表落盘（行式 `pkg:uid`），
 /// 启动归属对账的"上次会话 Sundown 冻结集"权威源——区分 HANS/系统冻结（无归属证据不碰）
 pub const STATE_FROZEN_FILE: &str = "/data/adb/sundown/state/frozen.state";
 
 /// 守护进程版本（与 module.prop version 同步，策略见主 README「版本号策略」）
-pub const VERSION_NAME: &str = "0.4.30-l3";
+pub const VERSION_NAME: &str = "0.4.31-l3";
 /// 单调递增的发布号：service.sh readiness 校验依据（installed.json vs daemon.ready）
 /// daemon 二进制任何变更必须 +1（只加不改）
-pub const RELEASE_NO: u32 = 37;
+pub const RELEASE_NO: u32 = 38;

@@ -56,6 +56,7 @@ fn ensure_dirs() -> std::io::Result<()> {
         paths::UPDATE_DIR,
         paths::PROBE_DIR,
         paths::PROBE_OAT_DIR,
+        paths::STATE_DIR, // v0.4.30-l3：冻结集持久化目录（此前缺失导致写盘失败）
     ] {
         std::fs::create_dir_all(d)?;
     }
@@ -171,6 +172,27 @@ fn main() {
         let mut eng = state.engine.lock().unwrap();
         let src = eng.net.probe_source();
         logi!("网络统计源: {}（keep_network 数据源自检）", src);
+    }
+
+    // v0.4.30-l3：dex 字节源一致性自检（2026-08-03 软重启事故防御）——
+    // 启动即比对 root 侧字节源版本 vs 模块期望 hash；不一致 → 立即告警
+    // （部署漏同步 root 侧 / 软重启不跑 post-fs-data.sh 时，此处是第一个显式信号；
+    // fetch-dex 熔断在首次拉取时二次拦截，双保险防换代风暴）。
+    {
+        let expected = state.expected_dex_hash();
+        if let Some(h) = expected {
+            let actual = std::fs::read(paths::PROBE_DEX)
+                .ok()
+                .and_then(|b| crate::sock::extract_dex_version(&b));
+            match actual {
+                Some(a) if a == h => logi!("dex 字节源自检: root 侧 {} = 期望 {} ✅", a, h),
+                Some(a) => logw!(
+                    "dex 字节源自检 ⚠️: root 侧 {} ≠ 期望 {}（请同步六位一体：模块/magic-mount/root 侧三源一致，再重启 system_server 冷启动）",
+                    a, h
+                ),
+                None => logw!("dex 字节源自检 ⚠️: root 侧字节解析失败（probe.dex 缺失或损坏？）"),
+            }
+        }
     }
 
     // L3.1 结构化事件：daemon 启动

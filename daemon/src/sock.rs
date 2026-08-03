@@ -750,7 +750,7 @@ fn serve_dex_bytes(writer: &mut UnixStream, state: &DaemonState) -> std::io::Res
 /// 7 位小写 hex，与模块 probe.dex.hash 同语义同源）。
 /// 轻量 DEX 格式解析（零依赖）：header.string_ids_size/off → 遍历 string_id →
 /// 读 MUTF-8 字符串 → 匹配 7 位小写 hex 即返回。解析失败返回 None（调用方放行不误伤）。
-fn extract_dex_version(bytes: &[u8]) -> Option<String> {
+pub(crate) fn extract_dex_version(bytes: &[u8]) -> Option<String> {
     if bytes.len() < 0x70 || &bytes[0..4] != b"dex\n" {
         return None;
     }
