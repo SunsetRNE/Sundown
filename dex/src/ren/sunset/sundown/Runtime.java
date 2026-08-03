@@ -293,7 +293,10 @@ final class Runtime {
         }
     }
 
-    /** 旧代自杀：断订阅连接（打断读循环）+ 卸 hook + 停发送线程 + 清静态引用（使旧 ClassLoader 可卸载） */
+    /** 旧代自杀：断订阅连接（打断读循环）+ 卸 hook + 停全部线程 + 清静态引用（使旧 ClassLoader 可卸载）。
+     *  v0.4.25-l3：必须停 ExemptMonitor/eventThread 并 join——否则旧代线程仍在已释放的
+     *  dex 内存上 nterp 解释执行 → SIGSEGV 崩 system_server（2026-08-03 实机事故：热切换
+     *  后旧代 SundownDex-Exempt 线程 new-array 崩溃，见报告文档）。 */
     synchronized void shutdown() {
         stopped = true;
         try {
@@ -302,9 +305,18 @@ final class Runtime {
             Log.w(TAG, "hook 卸载异常: " + t);
         }
         senderThread.interrupt();
+        exemptMonitor.stop();
+        eventThread.interrupt();
         DaemonLink l = link;
         link = null;
         if (l != null) l.close();
+        // 等监视线程退出（binder 调用中 interrupt 不立即生效，3s 兜底足够）；
+        // 线程全停后才允许清 active → 旧 ClassLoader/ByteBuffer 方可安全回收。
+        try {
+            exemptMonitor.join(3000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         synchronized (Runtime.class) {
             if (active == this) active = null;
         }

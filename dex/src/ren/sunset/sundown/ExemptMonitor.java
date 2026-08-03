@@ -97,6 +97,11 @@ public final class ExemptMonitor {
         }
     }
 
+    /** 监视线程引用（start 时保存；stop/join 用。热切换换代时旧代必须停干净） */
+    private volatile Thread thread;
+    /** 停止标志（stop 置位；loop 每轮检查，防 interrupt 竞态漏网） */
+    private volatile boolean stopped;
+
     void start() {
         Thread t = new Thread(new Runnable() {
             @Override
@@ -105,11 +110,32 @@ public final class ExemptMonitor {
             }
         }, "SundownDex-Exempt");
         t.setDaemon(true);
+        thread = t;
         t.start();
     }
 
+    /** 停止监视线程：置位 + interrupt（loop 的 sleep 立即被打断退出）。
+     *  v0.4.25-l3：热切换换代必须停旧代线程——否则旧代 ExemptMonitor 继续在
+     *  已释放的 dex 内存上解释执行（nterp new-array）→ SIGSEGV 崩 system_server
+     *  （2026-08-03 实机事故，见 Sundown-实机崩溃排查与热切换缺陷报告.md）。 */
+    void stop() {
+        stopped = true;
+        Thread t = thread;
+        if (t != null) {
+            t.interrupt();
+        }
+    }
+
+    /** 等待监视线程退出（带超时）。调用方应在 stop() 后、释放 ClassLoader 引用前调用。 */
+    void join(long ms) throws InterruptedException {
+        Thread t = thread;
+        if (t != null) {
+            t.join(ms);
+        }
+    }
+
     private void loop() {
-        while (true) {
+        while (!stopped) {
             try {
                 Thread.sleep(INTERVAL_MS);
             } catch (InterruptedException e) {
