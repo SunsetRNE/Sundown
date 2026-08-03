@@ -246,6 +246,21 @@ impl DaemonState {
         notified
     }
 
+    /// v0.4.27-l3 行广播：向所有 dex 订阅连接写一行下行事件（frozen-sync 等，无字节帧）；
+    /// 写失败连接剔除。返回成功数量。
+    pub fn broadcast_line(&self, line: &str) -> usize {
+        let mut notified = 0usize;
+        let bytes = line.as_bytes();
+        self.dex_clients.lock().unwrap().retain_mut(|(_, s)| {
+            let ok = s.write_all(bytes).and_then(|_| s.flush()).is_ok();
+            if ok {
+                notified += 1;
+            }
+            ok
+        });
+        notified
+    }
+
     /// 兼容 sunctl-spec 的 status JSON（socket 应答版）。
     /// L1 起 probe_stub_loaded / probe_stub_build_hash 填真实值；
     /// L2 起 probe_dex_version 填真实值并新增 probe_dex_hash_match（契约只增不改）。

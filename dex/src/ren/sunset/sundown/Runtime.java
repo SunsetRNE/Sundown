@@ -206,6 +206,26 @@ final class Runtime {
 
     /** hello-dex 应答处理：安装 hook（一次性）+ 版本落后则 fetch-dex 自愈 */
     private void onHello(JSONObject hello) {
+        // v0.4.27-l3：hello 应答携带 Sundown 冻结 uid 集 → 初始化 DefenseHooks 权威集
+        // （此后以 frozen-sync 增量更新；HANS 类拦截只认权威集）
+        try {
+            org.json.JSONArray arr = hello.optJSONArray("frozen_uids");
+            if (arr != null) {
+                java.util.Set<Integer> fresh = new java.util.HashSet<Integer>();
+                for (int i = 0; i < arr.length(); i++) {
+                    try {
+                        fresh.add(Integer.valueOf(arr.getInt(i)));
+                    } catch (Throwable ignored) {
+                    }
+                }
+                ren.sunset.sundown.hook.DefenseHooks d = ren.sunset.sundown.hook.DefenseHooks.INSTANCE;
+                if (d != null) {
+                    d.updateSundownSet(fresh);
+                    Log.i(TAG, "hello frozen_uids 初始化: " + fresh.size() + " uid");
+                }
+            }
+        } catch (Throwable ignored) {
+        }
         // L3：每次成功握手（含 daemon 重启后的重连）都重置豁免上报状态——
         // daemon 重启清空其 exempt 表，本侧判定值未变化时不会自发重发；
         // 重置 sent 后下一节拍全量重报，保证新 daemon 豁免表完整（防误冻）。
@@ -229,9 +249,31 @@ final class Runtime {
         }
     }
 
-    /** 订阅事件分发：dex-push（头行 + 字节帧）+ L2b 上行命令应答（静默吞掉） */
+    /** 订阅事件分发：frozen-sync（行协议下行）/ dex-push（头行 + 字节帧）+ L2b 上行命令应答 */
     private void onEvent(DaemonLink l, String line) {
         try {
+            // v0.4.27-l3：daemon 冻结集下行同步（行协议，非 JSON）——
+            // "event frozen-sync uid=10001,10002"（空集 = "uid="）；更新 DefenseHooks 权威集
+            if (line.startsWith("event frozen-sync")) {
+                String uidPart = line.substring(line.indexOf("uid=") + 4).trim();
+                java.util.Set<Integer> fresh = new java.util.HashSet<Integer>();
+                if (!uidPart.isEmpty()) {
+                    for (String s : uidPart.split(",")) {
+                        String t = s.trim();
+                        if (t.isEmpty()) continue;
+                        try {
+                            fresh.add(Integer.valueOf(Integer.parseInt(t)));
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+                ren.sunset.sundown.hook.DefenseHooks d = ren.sunset.sundown.hook.DefenseHooks.INSTANCE;
+                if (d != null) {
+                    d.updateSundownSet(fresh);
+                }
+                Log.i(TAG, "frozen-sync 更新: [" + uidPart + "]（" + fresh.size() + " uid）");
+                return;
+            }
             JSONObject ev = new JSONObject(line);
             if (!ev.has("event")) {
                 // event/report-bridge 的上行应答行（{"ok":1} / {"ok":1,"bridge_hash_match":N}）；

@@ -753,12 +753,25 @@ fn dex_hello_response(state: &DaemonState) -> String {
         None => "null".to_string(),
     };
     let dex_present = std::path::Path::new(paths::PROBE_DEX_MOUNT).exists();
+    // v0.4.27-l3：应答携带 Sundown 冻结 uid 集（dex 初始化用；之后以 frozen-sync 增量更新）
+    let frozen_uids_json = {
+        let eng = state.engine.lock().unwrap();
+        let uids = eng.sundown_frozen_uids();
+        format!(
+            "[{}]",
+            uids.iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
     format!(
-        "{{\"ok\":1,\"dex_hash_match\":{},\"expected_dex_hash\":{},\"dex_path\":\"{}\",\"dex_present\":{}}}",
+        "{{\"ok\":1,\"dex_hash_match\":{},\"expected_dex_hash\":{},\"dex_path\":\"{}\",\"dex_present\":{},\"frozen_uids\":{}}}",
         hash_match,
         expected_json,
         paths::PROBE_DEX_MOUNT,
         dex_present as i32,
+        frozen_uids_json,
     )
 }
 

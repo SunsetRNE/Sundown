@@ -42,7 +42,7 @@ import ren.sunset.sundown.hook.NativeBridge.MethodCallback;
  *   - 过滤场景：修改实参（List 引用）后 invokeOriginalOrDefault 放行原语义；
  *   - hook 单点失败仅 logw（hookAllOverloads 纪律），不拖垮其他 hook。
  */
-final class DefenseHooks implements HookEngine {
+public final class DefenseHooks implements HookEngine {
 
     private static final String TAG = "SundownDex";
     private static final String CGROUP_APPS = "/sys/fs/cgroup/apps";
@@ -74,12 +74,24 @@ final class DefenseHooks implements HookEngine {
         }
     }
 
+    /** v0.4.27-l3 双源冻结集：
+     *  - sundownFrozen：daemon frozen-sync 推送的权威集（Sundown 自己冻的）——
+     *    HANS 解冻/冻结拦截只信这个（防误伤：HANS 解冻它自己冻的 app 必须放行，
+     *    2026-08-03 误伤事故：误拦 HANS 解冻微信致卡冻结）
+     *  - cgroupFrozen：cgroup 扫描兜底（daemon 断连时；ANR/Activity 保护用并集——
+     *    cgroup 冻着 = 系统视角冻结，ANR 判断应豁免，无论谁冻的）
+     * 本代实例经 INSTANCE 暴露给 Runtime（frozen-sync 事件/hello 应答更新）。 */
+    public static volatile DefenseHooks INSTANCE;
+
+    private final Object sundownLock = new Object();
+    private volatile Set<Integer> sundownFrozen = new HashSet<Integer>();
     private final FrozenSet frozen = new FrozenSet();
     private final List<Hooker> hookers = new ArrayList<>();
     private final Thread scannerThread;
     private volatile boolean stopped;
 
     DefenseHooks() {
+        INSTANCE = this; // 本代实例注册（Runtime 经此更新 frozen-sync 权威集）
         scannerThread = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -87,6 +99,23 @@ final class DefenseHooks implements HookEngine {
             }
         }, "SundownDex-FrozenScan");
         scannerThread.setDaemon(true);
+    }
+
+    /** v0.4.27-l3：daemon frozen-sync 权威集更新（Runtime 事件线程调用；原子替换零锁） */
+    public void updateSundownSet(Set<Integer> fresh) {
+        synchronized (sundownLock) {
+            sundownFrozen = (fresh == null) ? new HashSet<Integer>() : fresh;
+        }
+    }
+
+    /** Sundown 自己冻结的 uid（权威集；HANS 解冻/冻结拦截专用判定） */
+    private boolean sundownFrozen(int uid) {
+        return sundownFrozen.contains(Integer.valueOf(uid));
+    }
+
+    /** 并集判定（cgroup 兜底 ∪ daemon 权威）：系统视角冻结即命中（ANR/Activity 保护用） */
+    private boolean anyFrozen(int uid) {
+        return frozen.contains(uid) || sundownFrozen(uid);
     }
 
     @Override
@@ -246,7 +275,7 @@ final class DefenseHooks implements HookEngine {
         try {
             for (Object a : cb.args) {
                 Integer uid = extractUid(a);
-                if (uid != null && frozen.contains(uid.intValue())) {
+                if (uid != null && anyFrozen(uid.intValue())) {
                     Log.i(TAG, "ANR 阻断（冻结中 uid=" + uid + "）: " + cb.target.getName());
                     return cb.defaultReturn(); // void → null：阻断 ANR 判定
                 }
@@ -269,7 +298,7 @@ final class DefenseHooks implements HookEngine {
                         int removed = 0;
                         List<Integer> keep = new ArrayList<Integer>();
                         for (Integer pid : list) {
-                            if (pidFrozen(pid.intValue())) {
+                            if (pidFrozenAny(pid.intValue())) {
                                 removed++;
                             } else {
                                 keep.add(pid);
@@ -295,7 +324,7 @@ final class DefenseHooks implements HookEngine {
         try {
             for (Object a : cb.args) {
                 Integer uid = extractUid(a);
-                if (uid != null && frozen.contains(uid.intValue())) {
+                if (uid != null && anyFrozen(uid.intValue())) {
                     Log.i(TAG, "serviceTimeout 豁免（冻结中 uid=" + uid + "）");
                     return cb.defaultReturn();
                 }
@@ -311,7 +340,7 @@ final class DefenseHooks implements HookEngine {
         try {
             for (Object a : cb.args) {
                 Integer uid = serviceRecordUid(a);
-                if (uid != null && frozen.contains(uid.intValue())) {
+                if (uid != null && anyFrozen(uid.intValue())) {
                     Log.i(TAG, "serviceForegroundTimeout 豁免（冻结中 uid=" + uid + "）");
                     return cb.defaultReturn();
                 }
@@ -327,7 +356,7 @@ final class DefenseHooks implements HookEngine {
         try {
             Object self = cb.args.length > 0 ? cb.args[0] : null;
             Integer uid = extractUid(self);
-            if (uid != null && frozen.contains(uid.intValue())) {
+            if (uid != null && anyFrozen(uid.intValue())) {
                 Log.i(TAG, "ProcessErrorStateRecord 二次拦截（冻结中 uid=" + uid + "）");
                 return cb.defaultReturn();
             }
@@ -342,7 +371,7 @@ final class DefenseHooks implements HookEngine {
         try {
             for (Object a : cb.args) {
                 Integer uid = extractUid(a);
-                if (uid != null && frozen.contains(uid.intValue())) {
+                if (uid != null && anyFrozen(uid.intValue())) {
                     Log.i(TAG, "CachedAppOptimizer.freezeApp 拦截（冻结中 uid=" + uid + "）");
                     return Boolean.FALSE; // 返回 false = 未冻结（阻断系统二次冻结）
                 }
@@ -358,7 +387,7 @@ final class DefenseHooks implements HookEngine {
         try {
             Object self = cb.args.length > 0 ? cb.args[0] : null;
             Integer uid = activityUid(self);
-            if (uid != null && frozen.contains(uid.intValue())) {
+            if (uid != null && anyFrozen(uid.intValue())) {
                 Log.i(TAG, "ActivityRecord.destroyImmediately 拦截（冻结中 uid=" + uid + "）");
                 return Boolean.FALSE;
             }
@@ -380,18 +409,18 @@ final class DefenseHooks implements HookEngine {
                     int v = ((Integer) a).intValue();
                     if (v > 0) {
                         // uid 语义（>=10000 普通 app）或 pid 语义（TargetPid/进程）任一命中即拦
-                        if (v >= 10000 && frozen.contains(v)) {
+                        if (v >= 10000 && sundownFrozen(v)) {
                             Log.i(TAG, "系统 freeze 拦截（冻结中 uid=" + v + "）: " + cb.target.getName());
                             return cb.defaultReturn();
                         }
-                        if (pidFrozen(v)) {
+                        if (pidFrozenSundown(v)) {
                             Log.i(TAG, "系统 freeze 拦截（冻结中 pid=" + v + "）: " + cb.target.getName());
                             return cb.defaultReturn();
                         }
                     }
                 } else {
                     Integer uid = extractUid(a);
-                    if (uid != null && uid.intValue() >= 10000 && frozen.contains(uid.intValue())) {
+                    if (uid != null && uid.intValue() >= 10000 && sundownFrozen(uid.intValue())) {
                         Log.i(TAG, "系统 freeze 拦截（冻结中 uid=" + uid + "）: " + cb.target.getName());
                         return cb.defaultReturn();
                     }
@@ -412,18 +441,18 @@ final class DefenseHooks implements HookEngine {
                 if (a instanceof Integer) {
                     int v = ((Integer) a).intValue();
                     if (v > 0) {
-                        if (frozen.contains(v)) {
+                        if (sundownFrozen(v)) {
                             Log.i(TAG, "HANS unfreeze 拦截（冻结中 uid=" + v + "）");
                             return cb.defaultReturn();
                         }
-                        if (pidFrozen(v)) {
+                        if (pidFrozenSundown(v)) {
                             Log.i(TAG, "HANS unfreeze 拦截（冻结中 pid=" + v + "）");
                             return cb.defaultReturn();
                         }
                     }
                 } else {
                     Integer uid = extractUid(a);
-                    if (uid != null && frozen.contains(uid.intValue())) {
+                    if (uid != null && sundownFrozen(uid.intValue())) {
                         Log.i(TAG, "HANS unfreeze 拦截（冻结中 uid=" + uid + "）");
                         return cb.defaultReturn();
                     }
@@ -440,7 +469,7 @@ final class DefenseHooks implements HookEngine {
         try {
             for (Object a : cb.args) {
                 Integer uid = extractUid(a);
-                if (uid != null && uid.intValue() >= 10000 && frozen.contains(uid.intValue())) {
+                if (uid != null && uid.intValue() >= 10000 && sundownFrozen(uid.intValue())) {
                     Log.i(TAG, "HANS isProxyed 拦截（冻结中 uid=" + uid + "）");
                     return Boolean.FALSE;
                 }
@@ -463,9 +492,16 @@ final class DefenseHooks implements HookEngine {
 
     // ---------------- 工具 ----------------
 
-    private boolean pidFrozen(int pid) {
+    /** pid → uid → 并集判定（ANR firstPids 过滤等：cgroup 冻着即豁免，无论谁冻的） */
+    private boolean pidFrozenAny(int pid) {
         Integer uid = pidUid(pid);
-        return uid != null && frozen.contains(uid.intValue());
+        return uid != null && anyFrozen(uid.intValue());
+    }
+
+    /** pid → uid → Sundown 权威集判定（HANS 解冻/冻结拦截：只认 Sundown 自己冻的） */
+    private boolean pidFrozenSundown(int pid) {
+        Integer uid = pidUid(pid);
+        return uid != null && sundownFrozen(uid.intValue());
     }
 
     /** /proc/<pid>/status 的 Uid 首字段（真实 uid） */

@@ -59,7 +59,6 @@ pub struct EngineState {
     /// tick 计数（v0.4.22-l3：低频对账节拍用）
     pub tick_count: u64,
 }
-
 impl Default for EngineState {
     fn default() -> Self {
         Self {
@@ -410,6 +409,27 @@ impl EngineState {
     }
 
     // ---------------- 定时驱动（main 主循环 tick 调用） ----------------
+
+    /// Sundown 冻结 uid 集（frozen-sync 下行同步源）：冻结表 pkg → uid（pkg_uids 优先，
+    /// 包表兜底）；排序去重保证签名稳定。v0.4.27-l3：dex 侧据此区分"HANS 自己冻的"
+    /// 与"Sundown 冻的"（两者共用 cgroup.freeze，归属判定是 HANS 防御正确性的前提——
+    /// 2026-08-03 误伤事故：误拦 HANS 解冻微信致卡冻结，见 Sundown-HANS误伤事故报告）。
+    pub fn sundown_frozen_uids(&self) -> Vec<u32> {
+        let mut out: Vec<u32> = Vec::new();
+        for pkg in self.frozen.keys() {
+            let uid = self
+                .pkg_uids
+                .get(pkg)
+                .copied()
+                .or_else(|| crate::freezer::pkg_uid(pkg));
+            if let Some(u) = uid {
+                out.push(u);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
 
     /// 周期性推进：grace 到期冻结 / 冷却清理 / 策略关闭全量解冻 / 进程核验
     pub fn tick(&mut self) {
