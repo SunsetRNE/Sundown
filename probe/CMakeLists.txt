@@ -8,7 +8,7 @@ project(sunprobe CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CXX_FLAGS "-fno-exceptions -fno-rtti -fvisibility=hidden -fvisibility-inlines-hidden")
+set(CXX_FLAGS "-fno-exceptions -fno-rtti -fvisibility=hidden -fvisibility-inlines-hidden -fno-threadsafe-statics")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CXX_FLAGS}")
 
 if(NOT DEFINED PROBE_BUILD_HASH)

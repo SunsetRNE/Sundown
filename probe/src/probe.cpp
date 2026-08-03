@@ -241,4 +241,30 @@ private:
     }
 };
 
-REGISTER_ZYGISK_MODULE(SunProbe)
+// ---- tombstone_15 根治：自定义 zygisk_module_entry（2026-08-03）----
+// 事故：zygote64 启动 4s SIGSEGV（pc=0x4ab00 = .plt 基址偏移，未加映射基址）。
+// 根因：rezygisk 在 zygote fork 早期的加载路径跳过 .init_array 且 JUMP_SLOT GOT
+//       未完成基址修正（lazy 占位 = plt0 偏移）。原 REGISTER_ZYGISK_MODULE 宏展开的
+//       entry_impl<clazz>() 内含三个 static 局部变量（Api/T/module_abi），其 guard
+//       初始化触发 `bl __cxa_guard_acquire@plt` —— 首次 PLT 调用即跳到未加基址的
+//       plt0 → SIGSEGV。运行期（后台线程）GOT 已解析，故仅入口早期窗口会炸。
+// 修复：入口零 PLT 依赖——全局对象（bss 零初始化，无 .init_array/无 guard）、
+//       abi 栈上构造（构造函数体为成员赋值 + 无捕获 lambda，零外部符号）、
+//       仅间接调用（api_table 函数指针表 + 虚函数，均经 RELRO RELATIVE 重定位）。
+// 双保险：CMakeLists 增加 -fno-threadsafe-statics（未来 static 局部也不生成 guard）。
+namespace {
+SunProbe g_probe; // 静态存储期：零初始化先于一切（NSDMI 与零值语义等价，见下注释）
+// do_unload 注意：NSDMI=true 依赖构造执行；若 .init_array 未执行，零初始化=false。
+// 语义校验：preAppSpecialize 无条件设 DLCLOSE（app 卸载路径不依赖 do_unload）；
+// postServerSpecialize 仅 system_server 走，do_unload=false 恰为所需值。安全。
+}
+
+extern "C" __attribute__((visibility("default")))
+void zygisk_module_entry(zygisk::internal::api_table *table, JNIEnv *env) {
+    // 复刻 zygisk::internal::entry_impl 语义，但去掉全部 static 局部（零 guard PLT）
+    Api api;               // 平凡构造（无成员初始化代码）
+    api.tbl = table;
+    internal::module_abi abi(&g_probe); // 栈上构造：成员赋值 + 无捕获 lambda，零 PLT
+    if (!table->registerModule(table, &abi)) return;
+    g_probe.onLoad(&api, env);
+}
