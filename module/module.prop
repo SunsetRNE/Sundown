@@ -1,6 +1,6 @@
 id=sundown
 name=Sundown
-version=v0.4.43-l3
-versionCode=53
+version=v0.4.44-l3
+versionCode=54
 author=SunsetREN
 description=🌇 日落而息 · 墓碑调度 | L3 策略引擎（per-app 策略分级 + 结构化事件缓冲 + TOML 热加载 + cgroup freezer 冻结 + 豁免判定，发布默认观望模式，Android 16 适配链）| 刷入后请重启激活

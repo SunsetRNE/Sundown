@@ -432,10 +432,15 @@ fn handle_event(state: &DaemonState, arg: &str) -> String {
                 }
             }
             // L3：冻结中 → 解冻 + 冷却（防唤醒失效）；v0.4.42-l3 携带唤醒源供节流判定，
-            // v0.4.43-l3 携带广播 action 供 Receiver gate 门控（可选，缺省 "?"）
+            // v0.4.43-l3 携带广播 action 供 Receiver gate 门控（可选，缺省 "?"）；
+            // v0.4.44-l3 观测增强：日志带 action（action 仅在 gate 命中时落盘事件，
+            // 平时无观测点——日志补全运行时可见性）
             if let Some(pkg) = kv("pkg") {
                 let src = kv("reason").unwrap_or_else(|| "?".to_string());
                 let action = kv("action").unwrap_or_else(|| "?".to_string());
+                if action != "?" {
+                    logi!("唤醒事件(action): pkg={} src={} action={}", pkg, src, action);
+                }
                 state.engine.lock().unwrap().on_wakeup(&pkg, &src, &action);
             }
             "{\"ok\":1}".to_string()

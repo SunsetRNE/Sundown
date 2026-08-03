@@ -63,6 +63,8 @@ public final class DefenseHooks implements HookEngine {
     // v0.4.39-l3：P1⑨ 防御补全（对齐 AStop OomAdjusterHooks / SystemDefenseHooks / DeviceIdleWhitelistHooks）
     private static final String OOM_ADJUSTER = "com.android.server.am.OomAdjuster";
     private static final String DEVICE_IDLE = "com.android.server.deviceidle.DeviceIdleController";
+    // v0.4.44-l3：P2⑮ break_network（对齐 AStop OplusDeepSleepHooks——ColorOS 深度睡眠 uid 断网）
+    private static final String OPLUS_DEEPSLEEP = "com.oplus.deepsleep.ControllerCenter";
 
     /** 冻结 uid 快照（扫描线程原子替换，hook 线程只读，零锁） */
     private static final class FrozenSet {
@@ -196,6 +198,14 @@ public final class DefenseHooks implements HookEngine {
         //     防 Doze 维护期把冻结 app 当非白名单清理（对齐 AStop DeviceIdleWhitelistHooks）
         hookAllOverloads(findClass(DEVICE_IDLE), "getAppIdWhitelistInternal", callback("onAppIdWhitelist"));
         hookAllOverloads(findClass(DEVICE_IDLE), "getAppIdUserWhitelistInternal", callback("onAppIdWhitelist"));
+
+        // 11. v0.4.44-l3 P2⑮ break_network：ColorOS Oplus 深度睡眠 uid 断网判定——
+        //     冻结集内 uid → true（系统对其断网），其余保持系统默认。
+        //     对齐 AStop OplusDeepSleepHooks（无条件断网），裁剪为冻结集防御：
+        //     非冻结 app 不受影响；断网随冻结生命周期自动开/关（冻结→断网，解冻→恢复）。
+        //     实机校准：PJD110/Android16 若方法名/类名不符 → hook 失败留痕不崩溃（失败安全）。
+        hookAllOverloads(findClass(OPLUS_DEEPSLEEP), "isNeedUidDisconnectNetwork",
+                callback("onNeedUidDisconnect"));
 
         // 启动冻结集扫描线程（install 一次；uninstall 停）
         if (!scannerThread.isAlive()) {
@@ -496,6 +506,25 @@ public final class DefenseHooks implements HookEngine {
             }
         } catch (Throwable t) {
             Log.w(TAG, "HANS isProxyed 拦截异常（放行）: " + t);
+        }
+        return cb.invokeOriginalOrDefault();
+    }
+
+    /** v0.4.44-l3 P2⑮ break_network：ColorOS Oplus 深度睡眠 uid 断网判定——
+     * 冻结集内 uid → true（系统对其断网，墓碑彻底休眠）；其余保持系统默认。
+     * 对齐 AStop OplusDeepSleepHooks（无条件断网）裁剪为冻结集防御：
+     * 非冻结 app 不受影响；断网随冻结生命周期自动开/关（冻结→断网，解冻→恢复）。 */
+    public Object onNeedUidDisconnect(MethodCallback cb) {
+        try {
+            for (Object a : cb.args) {
+                Integer uid = extractUid(a);
+                if (uid != null && uid.intValue() >= 10000 && sundownFrozen(uid.intValue())) {
+                    Log.i(TAG, "break_network 命中（冻结中 uid=" + uid + "）");
+                    return Boolean.TRUE;
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "break_network 判定异常（放行）: " + t);
         }
         return cb.invokeOriginalOrDefault();
     }
