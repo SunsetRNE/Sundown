@@ -455,6 +455,20 @@ impl EngineState {
                 self.grace.remove(&pkg);
                 continue;
             }
+            // v0.4.24-l3：内置关键包二次校验（防 focus 噪声/时序漏洞把关键包
+            // 放进 grace 后到期冻结——critical 优先级高于一切豁免）
+            if self.policy.is_critical(&pkg) {
+                logi!("L3 tick critical 豁免跳过: {}", pkg);
+                self.events.push_app(
+                    EvLevel::Info,
+                    EvAction::Exempt,
+                    &pkg,
+                    Some("tick_critical"),
+                    None,
+                );
+                self.grace.remove(&pkg);
+                continue;
+            }
             // v0.4.22-l3：VPN 保护（策略热更新后 keep_vpn 开启、VPN 包已在 grace 表）
             if self.is_vpn_protected(&pkg) {
                 self.grace.remove(&pkg);
@@ -653,9 +667,10 @@ impl EngineState {
         }
     }
 
-    /// 新策略下永不冻结的包（白名单 / VPN 保护 / per-app exempt）——热更新对账用
+    /// 新策略下永不冻结的包（critical / 白名单 / VPN 保护 / per-app exempt）——热更新对账用
     fn should_never_freeze(&self, pkg: &str) -> bool {
-        self.policy.is_whitelisted(pkg)
+        self.policy.is_critical(pkg)
+            || self.policy.is_whitelisted(pkg)
             || self.is_vpn_protected(pkg)
             || self
                 .policy
@@ -736,6 +751,19 @@ impl EngineState {
     fn decide_leave(&mut self, pkg: &str, now: Instant) {
         if !self.policy.enabled {
             return; // 观测模式
+        }
+        // v0.4.24-l3：内置关键包硬豁免（优先级最高——白名单/force/豁免链之前；
+        // 编译期内置清单，配置文件不可覆盖，对齐 AStop critical_apps.txt）
+        if self.policy.is_critical(pkg) {
+            logi!("L3 critical 保护豁免: {}", pkg);
+            self.events.push_app(
+                EvLevel::Info,
+                EvAction::Exempt,
+                pkg,
+                Some("critical"),
+                None,
+            );
+            return;
         }
         if self.policy.is_whitelisted(pkg) {
             return; // 白名单永不冻结
@@ -861,6 +889,19 @@ impl EngineState {
     /// reason: "grace_expired"（tick 到期）| "force"（force 列表立即冻结）——事件语义区分
     /// v0.4.19-l3：push_mode 分派——Keep=选择性冻结（:push 保留）/ Kill=连带杀死 :push
     fn freeze_now(&mut self, pkg: &str, now: Instant, reason: &str) {
+        // v0.4.24-l3 最终防线：内置关键包拒绝冻结（防 force/异常路径绕过——critical 优先级最高）
+        if self.policy.is_critical(pkg) {
+            logw!("L3 critical 保护拒绝冻结: {}", pkg);
+            self.events.push_app(
+                EvLevel::Warn,
+                EvAction::Exempt,
+                pkg,
+                Some("critical"),
+                None,
+            );
+            self.grace.remove(pkg);
+            return;
+        }
         // v0.4.22-l3 最终防线：VPN 保护拒绝冻结（防 force 路径绕过）
         if self.is_vpn_protected(pkg) {
             logw!("L3 VPN 保护拒绝冻结: {}", pkg);

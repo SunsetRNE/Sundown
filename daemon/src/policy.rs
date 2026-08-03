@@ -114,6 +114,42 @@ impl AppPolicy {
     }
 }
 
+/// 内置关键包清单（v0.4.24-l3，对齐 AStop critical_apps.txt 防呆哲学）。
+///
+/// 命中者**任何情况下不可冻结**——launcher/系统UI/电话/设置/输入法/VPN 授权/
+/// 权限控制器被冻 = 系统故障、无法输入、全网断网（v0.4.22-l3 实机教训：VPN 被冻
+/// → 全网断网 13 分钟）。该清单是内核级最低保护：
+///   - 编译期内置，policy.toml 无法增删（防呆：UI/配置文件都改不掉）；
+///   - 优先级最高：白名单/force/per-app/豁免链之前检查（含 freeze_now 最终防线）；
+///   - 热更新对账：命中者已冻结 → 立即解冻。
+pub const CRITICAL_PACKAGES: &[&str] = &[
+    // launcher 族（切桌面黑屏 / 无法返回桌面）
+    "com.android.launcher3",
+    "com.android.launcher",
+    "com.oplus.launcher",
+    "com.coloros.launcher",
+    "com.android.launcher2",
+    // 系统关键 UI / 框架（冻结 = 状态栏/通知/设置/拨号全挂）
+    "com.android.systemui",
+    "com.android.settings",
+    "com.android.phone",
+    "com.android.shell",
+    "com.android.permissioncontroller",
+    // 输入法（冻结 = 无法打字；覆盖 AOSP/OPPO/百度/豆包/搜狗/讯飞）
+    "com.android.inputmethod.latin",
+    "com.oplus.inputmethod",
+    "com.baidu.input_oppo",
+    "com.baidu.input",
+    "com.sohu.inputmethod.sogou",
+    "com.iflytek.inputmethod",
+    "com.bytedance.android.doubaoime",
+    // VPN 授权对话框（AStop critical_apps.txt 实证：UI 层防呆也改不掉）
+    "com.android.vpndialogs",
+    // 系统通信（短信/存储提供者——冻结影响系统功能）
+    "com.android.mms",
+    "com.android.providers.media",
+];
+
 /// 策略默认值（policy.toml 缺失/解析失败时的兜底：策略关闭，观测优先）
 #[derive(Debug, Clone)]
 pub struct Policy {
@@ -210,6 +246,12 @@ impl Policy {
     /// 白名单判定
     pub fn is_whitelisted(&self, pkg: &str) -> bool {
         self.whitelist.iter().any(|w| w == pkg)
+    }
+
+    /// 内置关键包判定（v0.4.24-l3，对齐 AStop critical_apps.txt）——
+    /// 编译期内置清单命中 = 任何情况下不可冻结（优先级最高，配置文件不可覆盖）
+    pub fn is_critical(&self, pkg: &str) -> bool {
+        CRITICAL_PACKAGES.iter().any(|c| *c == pkg)
     }
 
     /// 强制冻结名单判定
@@ -629,5 +671,46 @@ keep_network = 1
         assert!(Policy::default().apps.get("x").is_none());
         let p2 = Policy::from_toml("[apps.\"com.x.y\"]\nmode = \"strict\"", 15).unwrap();
         assert_eq!(p2.apps["com.x.y"].keep_network, None);
+    }
+
+    #[test]
+    fn critical_list_v0424() {
+        // v0.4.24-l3：内置关键包清单——编译期常量判定，与配置无关（防呆核心）
+        let p = Policy::default();
+        // launcher / 系统 UI / 电话 / 设置 / 输入法 / VPN 授权 / 权限控制器
+        for c in [
+            "com.android.launcher3",
+            "com.android.launcher",
+            "com.oplus.launcher",
+            "com.coloros.launcher",
+            "com.android.systemui",
+            "com.android.settings",
+            "com.android.phone",
+            "com.android.shell",
+            "com.android.permissioncontroller",
+            "com.android.inputmethod.latin",
+            "com.baidu.input_oppo",
+            "com.bytedance.android.doubaoime",
+            "com.android.vpndialogs",
+            "com.android.mms",
+            "com.android.providers.media",
+        ] {
+            assert!(p.is_critical(c), "{} 应在 critical 清单", c);
+        }
+        // 普通包不受影响（即使配置里显式写 force 也不行——引擎层已先于 force 检查）
+        assert!(!p.is_critical("com.example.normal"));
+        assert!(!p.is_critical("com.tencent.mm"));
+        // 配置无法覆盖：解析任意 policy 后 critical 判定不变
+        let p2 = Policy::from_toml(
+            "[freeze]\nforce = [\"com.android.systemui\"]\n[general]\nenabled = true",
+            16,
+        )
+        .unwrap();
+        assert!(p2.is_forced("com.android.systemui"));
+        assert!(p2.is_critical("com.android.systemui")); // critical 仍命中（引擎检查顺序 critical > force）
+        // 白名单语义独立
+        let p3 = Policy::from_toml("[whitelist]\npackages = [\"com.tencent.mm\"]", 17).unwrap();
+        assert!(p3.is_whitelisted("com.tencent.mm"));
+        assert!(!p3.is_critical("com.tencent.mm"));
     }
 }

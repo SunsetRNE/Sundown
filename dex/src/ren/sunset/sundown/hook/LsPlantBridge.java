@@ -99,6 +99,8 @@ public final class LsPlantBridge {
         List<HookEngine> engines = new ArrayList<>();
         engines.add(new FocusHooks(dispatcher, monitor));
         engines.add(new WakeupHooks(dispatcher));
+        // v0.4.24-l3 P0：防御 hook 组（ANR 隐身 / 系统 freezer 防双冻结 / Activity 保护）
+        engines.add(new DefenseHooks());
         return new CompositeEngine(engines);
     }
 

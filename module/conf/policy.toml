@@ -38,7 +38,11 @@
 #   push_mode = "keep"|"kill"  per-app 子进程策略（v0.4.19-l3，缺省跟随全局 push_policy）
 #   unfreeze_window = "HH:MM-HH:MM"  per-app 定时解冻窗口（v0.4.19-l3：窗口内退后台不冻结；
 #                              不支持跨零点，如 22:00-23:59；缺省无窗口）
-# [defense]   防御 hook 组（本期仅解析，不启用——L3.1）
+# [defense]   防御 hook 组（v0.4.24-l3：L2 dex 侧 ANR 隐身/系统 freezer 防双冻结/Activity 保护
+#              ——随 probe.dex 热更新生效，无需本段开关；本段仅解析兼容旧配置）
+# [critical]  内置关键包清单（v0.4.24-l3：launcher/systemUI/电话/设置/输入法/VPN 授权/
+#             权限控制器等编译期内置，任何配置/UI 均不可冻结——防呆，对齐 AStop
+#             critical_apps.txt；清单不可增删，参见 daemon/src/policy.rs CRITICAL_PACKAGES）
 # [vpn]       VPN 守护进程保护（v0.4.22-l3）：
 #   keep_vpn = true|false  true = 自动探测的 tun 隧道持有者永不冻结（缺省 true）
 #             ——VPN app 被冻结 = 隧道断开 = 全网 app 断网（实机反馈），
