@@ -19,6 +19,10 @@
 #               不解冻（防 FCM/广播风暴反复解冻-再冻抖动）；0=关闭；用户交互（focus）不受限
 # [freeze]    force 立即冻结包（不走 grace）
 # [whitelist] packages 豁免包（退后台不冻结）/ keep_fg_service 前台服务豁免 / keep_media 媒体播放豁免
+#             receiver_gate 广播门控白名单（v0.4.43-l3，对齐 AStop Receiver gate 裁剪版）：
+#               非空时冻结 app 仅白名单广播 action 触发解冻（其余留痕 receiver_gated 不解冻）；
+#               空 = 全部放行（默认零风险）；仅约束 broadcast 源（service/pendingintent 不受限）；
+#               IMPORTANT 档 app 不受门控（保持"重要"语义）
 #             keep_location 定位活动豁免（v0.4.20-l3：dex 侧 AppOps 判定 loc=1，定位使用中不冻）
 #             keep_high_network 高网络负载豁免（v0.4.19-l3，daemon 侧流量采样判定）
 #             keep_network 网络豁免（v0.4.23-l3，对齐 AStop force_network_exemption）：

@@ -159,13 +159,17 @@ impl EngineState {
         self.last_focus = Some(pkg.to_string());
     }
 
-    /// event wakeup pkg=P reason=...
+    /// event wakeup pkg=P reason=... action=...
     /// v0.4.19-l3：per-app keep_wakeup=false 时忽略唤醒（不解冻不取消 grace——
     /// FCM/交互唤醒风暴 app 保持冻结；事件留痕 reason=wakeup_ignored）。
     /// v0.4.42-l3：wake_throttle_seconds 节流——后台唤醒解冻后窗口内同包再次唤醒
     /// 不解冻（事件留痕 reason=wakeup_throttled），对齐 AStop Probe 60s 限流。
+    /// v0.4.43-l3：receiver_gate 广播门控——冻结中 broadcast 源且 action 不在白名单
+    /// → 不解冻（留痕 reason=receiver_gated）；service/pendingintent 不受门控；
+    /// IMPORTANT 档 app 不受门控（保持"重要"语义）。门控优先于节流。
     /// source：唤醒源（dex 上行 reason=broadcast|service|pendingintent；缺省 "?"）。
-    pub fn on_wakeup(&mut self, pkg: &str, source: &str) {
+    /// action：广播 action（仅 broadcast 源携带；dex 未上报或缺省 "?"）。
+    pub fn on_wakeup(&mut self, pkg: &str, source: &str, action: &str) {
         if !self.keep_wakeup(pkg) {
             logi!("L3 唤醒忽略（keep_wakeup=false）: {}", pkg);
             self.events.push_app(
@@ -178,6 +182,25 @@ impl EngineState {
             return;
         }
         let now = Instant::now();
+        // v0.4.43-l3：广播门控——冻结中 + broadcast 源 + action 不在白名单 → 不解冻。
+        // 白名单空 = 全部放行（默认零风险）；IMPORTANT 档绕过（保持"重要"语义）；
+        // service/pendingintent 源绕过（门控只管广播）。
+        let gated = source == "broadcast"
+            && !self.policy.receiver_gate.is_empty()
+            && self.mode_of(pkg) != AppMode::Important
+            && self.frozen.contains_key(pkg)
+            && !self.policy.receiver_gate.iter().any(|a| a == action);
+        if gated {
+            logi!("L3 广播门控: {} action={}（白名单外不解冻）", pkg, action);
+            self.events.push_app(
+                EvLevel::Info,
+                EvAction::Exempt,
+                pkg,
+                Some("receiver_gated"),
+                Some(action),
+            );
+            return;
+        }
         // v0.4.42-l3：唤醒节流——冻结中且窗口内已解冻过 → 本唤醒不解冻（防风暴抖动）。
         // 只拦"解冻动作"，grace 取消照常（进程确实活跃）。用户交互（focus）不走此路径。
         let throttle = self.policy.wake_throttle_seconds;
@@ -794,6 +817,15 @@ impl EngineState {
         }
     }
 
+    /// per-app 档位（v0.4.43-l3，Receiver gate 判定用；无配置 = Standard）
+    fn mode_of(&self, pkg: &str) -> AppMode {
+        self.policy
+            .apps
+            .get(pkg)
+            .map(|ap| ap.mode)
+            .unwrap_or(AppMode::Standard)
+    }
+
     /// 子进程策略（per-app 覆盖优先，缺省回落全局 push_policy）
     fn push_mode(&self, pkg: &str) -> PushMode {
         match self.policy.apps.get(pkg) {
@@ -1091,7 +1123,7 @@ mod tests {
         e.frozen.insert("com.storm.app".to_string(), Instant::now());
         e.wake_throttle
             .insert("com.storm.app".to_string(), Instant::now() + Duration::from_secs(60));
-        e.on_wakeup("com.storm.app", "broadcast");
+        e.on_wakeup("com.storm.app", "broadcast", "android.intent.action.SCREEN_ON");
         assert!(e.frozen.contains_key("com.storm.app"), "窗口内不解冻");
         assert_eq!(e.wake_throttled, 1);
         let j = e.events.to_json(8);
@@ -1103,7 +1135,7 @@ mod tests {
             "com.storm.app".to_string(),
             Instant::now() - Duration::from_secs(1),
         );
-        e.on_wakeup("com.storm.app", "pendingintent");
+        e.on_wakeup("com.storm.app", "pendingintent", "?");
         assert!(!e.frozen.contains_key("com.storm.app"), "窗口过期后解冻");
 
         // ③ throttle=0（关闭节流）→ 即使窗口有记录也不拦
@@ -1112,7 +1144,7 @@ mod tests {
         e2.frozen.insert("com.storm.app".to_string(), Instant::now());
         e2.wake_throttle
             .insert("com.storm.app".to_string(), Instant::now() + Duration::from_secs(60));
-        e2.on_wakeup("com.storm.app", "service");
+        e2.on_wakeup("com.storm.app", "service", "?");
         assert!(!e2.frozen.contains_key("com.storm.app"), "关闭节流不拦");
         assert_eq!(e2.wake_throttled, 0);
 
@@ -1128,10 +1160,60 @@ mod tests {
             },
         );
         e3.frozen.insert("com.storm.app".to_string(), Instant::now());
-        e3.on_wakeup("com.storm.app", "broadcast");
+        e3.on_wakeup("com.storm.app", "broadcast", "?");
         assert!(e3.frozen.contains_key("com.storm.app"));
         assert_eq!(e3.wake_throttled, 0);
         let j3 = e3.events.to_json(8);
         assert!(j3.contains("wakeup_ignored"), "keep_wakeup=false 走 ignored: {}", j3);
+    }
+
+    /// v0.4.43-l3：Receiver gate 广播门控——白名单外 broadcast 不解冻；
+    /// 空白名单全放行（零风险默认）；IMPORTANT 档绕过；service 源不受门控。
+    #[test]
+    fn receiver_gate_v043() {
+        // ① gate 为空（默认）→ broadcast 正常解冻（现状兼容）
+        let mut e = EngineState::default();
+        e.frozen.insert("com.gate.app".to_string(), Instant::now());
+        e.on_wakeup("com.gate.app", "broadcast", "android.intent.action.ANY");
+        assert!(!e.frozen.contains_key("com.gate.app"), "空门控全放行");
+        assert_eq!(e.events.to_json(8).matches("receiver_gated").count(), 0);
+
+        // ② gate 非空 + 白名单 action → 解冻
+        let mut e2 = EngineState::default();
+        e2.policy.receiver_gate = vec!["android.intent.action.USER_PRESENT".to_string()];
+        e2.frozen.insert("com.gate.app".to_string(), Instant::now());
+        e2.on_wakeup("com.gate.app", "broadcast", "android.intent.action.USER_PRESENT");
+        assert!(!e2.frozen.contains_key("com.gate.app"), "白名单 action 放行");
+
+        // ③ gate 非空 + 非白名单 action → 不解冻 + receiver_gated 留痕
+        let mut e3 = EngineState::default();
+        e3.policy.receiver_gate = vec!["android.intent.action.USER_PRESENT".to_string()];
+        e3.frozen.insert("com.gate.app".to_string(), Instant::now());
+        e3.on_wakeup("com.gate.app", "broadcast", "com.vendor.SPAM");
+        assert!(e3.frozen.contains_key("com.gate.app"), "白名单外不解冻");
+        let j3 = e3.events.to_json(8);
+        assert!(j3.contains("receiver_gated"), "留痕 receiver_gated: {}", j3);
+        assert!(j3.contains("com.vendor.SPAM"), "携带 action: {}", j3);
+
+        // ④ gate 非空 + IMPORTANT 档 → 绕过门控解冻（保持"重要"语义）
+        let mut e4 = EngineState::default();
+        e4.policy.receiver_gate = vec!["android.intent.action.USER_PRESENT".to_string()];
+        e4.policy.apps.insert(
+            "com.tencent.mm".to_string(),
+            crate::policy::AppPolicy {
+                mode: AppMode::Important,
+                ..Default::default()
+            },
+        );
+        e4.frozen.insert("com.tencent.mm".to_string(), Instant::now());
+        e4.on_wakeup("com.tencent.mm", "broadcast", "com.vendor.SPAM");
+        assert!(!e4.frozen.contains_key("com.tencent.mm"), "IMPORTANT 档绕过门控");
+
+        // ⑤ gate 非空 + service 源 → 不受门控（门控只管广播）
+        let mut e5 = EngineState::default();
+        e5.policy.receiver_gate = vec!["android.intent.action.USER_PRESENT".to_string()];
+        e5.frozen.insert("com.gate.app".to_string(), Instant::now());
+        e5.on_wakeup("com.gate.app", "service", "?");
+        assert!(!e5.frozen.contains_key("com.gate.app"), "service 源不受门控");
     }
 }

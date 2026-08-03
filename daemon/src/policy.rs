@@ -178,6 +178,11 @@ pub struct Policy {
     /// 后台唤醒（broadcast/service/pendingintent）触发解冻后，窗口内同包再次唤醒不再解冻
     /// （防 FCM/广播风暴反复"解冻-再冻"抖动）；0 = 关闭节流；用户交互（focus）不受限
     pub wake_throttle_seconds: u64,
+    /// 广播门控白名单（v0.4.43-l3，对齐 AStop Receiver gate 裁剪版）：
+    /// 非空时，冻结 app 仅白名单广播 action 触发解冻（其余留痕 receiver_gated 不解冻）；
+    /// 空 = 全部放行（保持既有行为，零风险默认）。仅约束 broadcast 源；
+    /// service/pendingintent 唤醒不受门控；IMPORTANT 档 app 不受门控（保持"重要"语义）
+    pub receiver_gate: Vec<String>,
     /// 强制冻结名单（命中即冻，优先级高于豁免动作，但白名单仍优先）
     pub force: Vec<String>,
     /// 永不冻结白名单
@@ -215,6 +220,7 @@ impl Default for Policy {
             grace_seconds: 30,
             cooldown_seconds: 60,
             wake_throttle_seconds: 60,
+            receiver_gate: Vec::new(),
             force: Vec::new(),
             whitelist: Vec::new(),
             apps: HashMap::new(),
@@ -295,6 +301,7 @@ fn apply_entry(p: &mut Policy, e: &TomlEntry) {
         ("general", "wake_throttle_seconds") => p.wake_throttle_seconds = int_of(val, e, 60).max(0) as u64,
         ("freeze", "force") => p.force = str_array_of(val, e),
         ("whitelist", "packages") => p.whitelist = str_array_of(val, e),
+        ("whitelist", "receiver_gate") => p.receiver_gate = str_array_of(val, e),
         ("whitelist", "keep_fg_service") => p.keep_fg_service = bool_of(val, e, true),
         ("whitelist", "keep_media") => p.keep_media = bool_of(val, e, true),
         ("whitelist", "keep_location") => p.keep_location = bool_of(val, e, true),
@@ -578,6 +585,22 @@ grace_seconds = 120
         // 坏值回落缺省（失败安全）
         let p4 = Policy::from_toml("[general]\nwake_throttle_seconds = -5", 4).unwrap();
         assert_eq!(p4.wake_throttle_seconds, 0); // 负数钳 0
+    }
+
+    #[test]
+    fn receiver_gate_parse_v043() {
+        // v0.4.43-l3：receiver_gate 广播门控白名单解析（缺省空 = 全放行）
+        let p = Policy::from_toml("[general]\nenabled = true", 1).unwrap();
+        assert!(p.receiver_gate.is_empty());
+        let src = "[whitelist]\nreceiver_gate = [\"android.intent.action.USER_PRESENT\", \"android.intent.action.BOOT_COMPLETED\"]";
+        let p2 = Policy::from_toml(src, 2).unwrap();
+        assert_eq!(
+            p2.receiver_gate,
+            vec![
+                "android.intent.action.USER_PRESENT".to_string(),
+                "android.intent.action.BOOT_COMPLETED".to_string()
+            ]
+        );
     }
 
     #[test]

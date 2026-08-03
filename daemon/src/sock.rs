@@ -431,10 +431,12 @@ fn handle_event(state: &DaemonState, arg: &str) -> String {
                     );
                 }
             }
-            // L3：冻结中 → 解冻 + 冷却（防唤醒失效）；v0.4.42-l3 携带唤醒源供节流判定
+            // L3：冻结中 → 解冻 + 冷却（防唤醒失效）；v0.4.42-l3 携带唤醒源供节流判定，
+            // v0.4.43-l3 携带广播 action 供 Receiver gate 门控（可选，缺省 "?"）
             if let Some(pkg) = kv("pkg") {
                 let src = kv("reason").unwrap_or_else(|| "?".to_string());
-                state.engine.lock().unwrap().on_wakeup(&pkg, &src);
+                let action = kv("action").unwrap_or_else(|| "?".to_string());
+                state.engine.lock().unwrap().on_wakeup(&pkg, &src, &action);
             }
             "{\"ok\":1}".to_string()
         }

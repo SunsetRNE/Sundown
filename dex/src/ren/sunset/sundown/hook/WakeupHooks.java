@@ -68,7 +68,7 @@ final class WakeupHooks implements HookEngine {
 
     // ---------------- hook 回调 ----------------
 
-    /** 广播投递：参数中找 Intent（直参或 BroadcastRecord.intent 字段） */
+    /** 广播投递：参数中找 Intent（直参或 BroadcastRecord.intent 字段）；v0.4.43-l3 携带 action 供 Receiver gate 门控 */
     public Object onBroadcast(MethodCallback cb) {
         Object res = cb.invokeOriginalOrDefault();
         try {
@@ -78,7 +78,9 @@ final class WakeupHooks implements HookEngine {
                 if (intent != null) break;
             }
             if (intent != null) {
-                reportWakeup(pkgOf(intent), "broadcast");
+                String action = intent.getAction();
+                reportWakeup(pkgOf(intent), "broadcast",
+                        (action != null) ? action : "?");
             }
         } catch (Throwable t) {
             Log.w(TAG, "广播事件提取失败: " + t);
@@ -126,6 +128,11 @@ final class WakeupHooks implements HookEngine {
 
     private void reportWakeup(String pkg, String reason) {
         dispatcher.dispatch("event wakeup pkg=" + pkg + " reason=" + reason);
+    }
+
+    /** v0.4.43-l3：带广播 action（Receiver gate 门控数据源；仅 broadcast 源携带） */
+    private void reportWakeup(String pkg, String reason, String action) {
+        dispatcher.dispatch("event wakeup pkg=" + pkg + " reason=" + reason + " action=" + action);
     }
 
     private static String pkgOf(Intent intent) {
