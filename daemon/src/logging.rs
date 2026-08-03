@@ -4,33 +4,33 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::paths;
 
 static LOG_LOCK: Mutex<()> = Mutex::new(());
 
 fn now_stamp() -> String {
-    // 避免引入 chrono：用 epoch 秒 + 简易 UTC 分解（日志对时区不敏感）
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+    // 本地时区时间戳（v0.4.33-l3：弃用简易 UTC 分解——排障需 +8 换算易错；
+    // 复用 engine.rs 已验证的 libc::localtime_r 零依赖方案，时区随系统 TZ）
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let days = secs / 86400;
-    let tod = secs % 86400;
-    let (h, m, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
-    // 儒略日 -> 年月日（标准算法）
-    let mut z = days as i64 + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    z = if mo <= 2 { y + 1 } else { y };
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}Z", z, mo, d, h, m, s)
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&now, &mut tm).is_null() {
+            return format!("[{}Z]", now); // 失败兜底：epoch 秒
+        }
+        format!(
+            "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}]",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
+    }
 }
 
 pub fn log(level: &str, msg: &str) {

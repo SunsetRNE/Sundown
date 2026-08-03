@@ -691,7 +691,18 @@ fn serve_dex_bytes(writer: &mut UnixStream, state: &DaemonState) -> std::io::Res
             let consistent = match (&expected, &actual) {
                 (Some(h), Some(a)) => *a == *h,
                 (Some(_), None) => {
-                    logw!("fetch-dex：dex 字节版本解析失败（放行，dex 侧防空转兜底）");
+                    // v0.4.33-l3：解析失败打印诊断细节（dex 大小 + 头部 hex），
+                    // 供排障区分"非 dex 文件 / 截断 / 构建信息格式异常"
+                    let head: String = bytes
+                        .iter()
+                        .take(16)
+                        .map(|b| format!("{:02x}", b))
+                        .collect();
+                    logw!(
+                        "fetch-dex：dex 字节版本解析失败（放行，dex 侧防空转兜底）size={} head16={}",
+                        bytes.len(),
+                        head
+                    );
                     true
                 }
                 (None, _) => true, // 模块无期望 hash（dev 场景）→ 放行
