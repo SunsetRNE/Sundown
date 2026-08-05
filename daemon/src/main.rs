@@ -243,13 +243,17 @@ fn main() {
     // 主循环：响应退出标志（信号 / socket stop 命令）+ L3 策略引擎定时推进
     // v0.4.27-l3：每 tick 比较 Sundown 冻结集签名，变化即广播 frozen-sync 给 dex 订阅者
     // （dex 侧冻结集归属判定的权威源；区分"HANS 自己冻的"与"Sundown 冻的"）
+    // v0.4.48-l3：新增 candidate-sync（候选池 = 冻结+grace+adj_keep 并集）——
+    // dex 侧系统冻结器拦截（onSystemFreeze）判定用，防系统在 grace 期抢冻候选 app
     let mut last_frozen_sig = String::new();
+    let mut last_candidate_sig = String::new();
     loop {
         if SHUTDOWN.load(Ordering::Relaxed) {
             break;
         }
         // L3：grace 到期冻结 / 冷却清理 / 策略关闭全量解冻（300ms 节拍）
         let mut sig = String::new();
+        let mut cand_sig = String::new();
         {
             let mut eng = state.engine.lock().unwrap();
             eng.tick();
@@ -261,12 +265,26 @@ fn main() {
                     .collect::<Vec<_>>()
                     .join(",");
             }
+            let cand = eng.sundown_candidate_uids();
+            if !cand.is_empty() {
+                cand_sig = cand
+                    .iter()
+                    .map(|u| u.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+            }
         }
         if sig != last_frozen_sig {
             last_frozen_sig = sig.clone();
             let line = format!("event frozen-sync uid={}\n", sig);
             let n = state.broadcast_line(&line);
             logi!("frozen-sync 广播: [{}] → {} 订阅者", sig, n);
+        }
+        if cand_sig != last_candidate_sig {
+            last_candidate_sig = cand_sig.clone();
+            let line = format!("event candidate-sync uid={}\n", cand_sig);
+            let n = state.broadcast_line(&line);
+            logi!("candidate-sync 广播: [{}] → {} 订阅者", cand_sig, n);
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
     }

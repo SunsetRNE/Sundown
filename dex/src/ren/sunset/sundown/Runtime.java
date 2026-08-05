@@ -232,6 +232,26 @@ final class Runtime {
             }
         } catch (Throwable ignored) {
         }
+        // v0.4.48-l3：hello 应答携带候选池 uid 集 → 初始化 DefenseHooks 候选集
+        // （此后以 candidate-sync 增量更新；系统冻结器拦截判定用——防系统在 grace 期抢冻）
+        try {
+            org.json.JSONArray arr2 = hello.optJSONArray("candidate_uids");
+            if (arr2 != null) {
+                java.util.Set<Integer> fresh2 = new java.util.HashSet<Integer>();
+                for (int i = 0; i < arr2.length(); i++) {
+                    try {
+                        fresh2.add(Integer.valueOf(arr2.getInt(i)));
+                    } catch (Throwable ignored) {
+                    }
+                }
+                ren.sunset.sundown.hook.DefenseHooks d2 = ren.sunset.sundown.hook.DefenseHooks.INSTANCE;
+                if (d2 != null) {
+                    d2.updateCandidateSet(fresh2);
+                    Log.i(TAG, "hello candidate_uids 初始化: " + fresh2.size() + " uid");
+                }
+            }
+        } catch (Throwable ignored) {
+        }
         // L3：每次成功握手（含 daemon 重启后的重连）都重置豁免上报状态——
         // daemon 重启清空其 exempt 表，本侧判定值未变化时不会自发重发；
         // 重置 sent 后下一节拍全量重报，保证新 daemon 豁免表完整（防误冻）。
@@ -289,6 +309,29 @@ final class Runtime {
                     d.updateSundownSet(fresh);
                 }
                 Log.i(TAG, "frozen-sync 更新: [" + uidPart + "]（" + fresh.size() + " uid）");
+                return;
+            }
+            // v0.4.48-l3：候选池下行同步（行协议，同 frozen-sync 格式）——
+            // "event candidate-sync uid=10001,10002"；更新 DefenseHooks 候选集
+            // （系统冻结器 onSystemFreeze/HANS 冻结/杀进程拦截的判定依据）
+            if (line.startsWith("event candidate-sync")) {
+                String uidPart = line.substring(line.indexOf("uid=") + 4).trim();
+                java.util.Set<Integer> fresh = new java.util.HashSet<Integer>();
+                if (!uidPart.isEmpty()) {
+                    for (String s : uidPart.split(",")) {
+                        String t = s.trim();
+                        if (t.isEmpty()) continue;
+                        try {
+                            fresh.add(Integer.valueOf(Integer.parseInt(t)));
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+                ren.sunset.sundown.hook.DefenseHooks d = ren.sunset.sundown.hook.DefenseHooks.INSTANCE;
+                if (d != null) {
+                    d.updateCandidateSet(fresh);
+                }
+                Log.i(TAG, "candidate-sync 更新: [" + uidPart + "]（" + fresh.size() + " uid）");
                 return;
             }
             JSONObject ev = new JSONObject(line);

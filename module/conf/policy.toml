@@ -64,6 +64,7 @@
 enabled = false
 grace_seconds = 30
 cooldown_seconds = 60
+wake_throttle_seconds = 60
 
 [freeze]
 force = []
@@ -123,3 +124,4 @@ push_policy = "keep"
 [defense]
 anr_protect = false
 cached_app_optimizer = false
+

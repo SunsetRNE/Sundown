@@ -9,7 +9,7 @@
 //!
 //! 失败安全：冻结写失败只留痕不崩溃；策略解析失败保留旧表（policy.rs）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::events::{EvAction, EvLevel, EventBuffer};
@@ -39,6 +39,10 @@ pub struct EngineState {
     pub grace: HashMap<String, (Instant, u64)>,
     /// pkg → 冷却截止时刻（解冻后免冻窗口）
     pub cooldown: HashMap<String, Instant>,
+    /// v0.4.47-l3：保持 OOM 保护（adj=-1000）的候选池——退后台进 grace 即锁定，
+    /// 防系统 AppFreezer 抢先 pid 级冻结（与 Sundown 拉锯 → 黑屏，2026-08-05 实机）；
+    /// 确认回前台（last_focus）后由 tick 还原 adj 并移出。
+    pub adj_keep: std::collections::HashSet<String>,
     /// pkg → 唤醒节流截止时刻（v0.4.42-l3：后台唤醒解冻后窗口内同包不再解冻——
     /// 防 FCM/广播风暴反复"解冻-再冻"抖动，对齐 AStop Probe 60s 限流）
     pub wake_throttle: HashMap<String, Instant>,
@@ -48,6 +52,16 @@ pub struct EngineState {
     pub exempt: HashMap<String, ExemptFlags>,
     /// 当前前台（恒不冻结）
     pub last_focus: Option<String>,
+    /// v0.4.49-l3：动态系统 app 保护集合（pm list packages -s 枚举，启动/热重载刷新）——
+    /// 系统组件冻结 = 隐式 Intent/凭据/安装/文件选择等链路黑屏（2026-08-05 相机事故），
+    /// 与编译期 CRITICAL_PACKAGES 双保险（pm 失败时回落编译期名单）
+    pub system_apps: HashSet<String>,
+    /// v0.4.50-l3：android.process.media 的 uid（进程名动态解析——pm 查不到进程，
+    /// 相机打开必查 MediaStore → 媒体进程被系统 pid 级冻结 → binder EPIPE → 黑屏；
+    /// 启动/热重载时解析，None = 未找到/解析失败）
+    pub media_uid: Option<u32>,
+    /// v0.4.50-l3：系统链路组件 OOM 锁定去重日志（防 1.5s 周期刷屏）
+    pub system_chain_locked: bool,
     /// pkg → 最近一次 proc-add 携带的 uid（包表兜底补充）
     pub pkg_uids: HashMap<String, u32>,
     /// pkg → 存活 pid 集合（proc-add/remove 维护；force-stop/进程核验用）
@@ -74,10 +88,14 @@ impl Default for EngineState {
             last_persist: None,
             grace: HashMap::new(),
             cooldown: HashMap::new(),
+            adj_keep: std::collections::HashSet::new(),
             wake_throttle: HashMap::new(),
             wake_throttled: 0,
             exempt: HashMap::new(),
             last_focus: None,
+            system_apps: HashSet::new(),
+            media_uid: None,
+            system_chain_locked: false,
             pkg_uids: HashMap::new(),
             pkg_pids: HashMap::new(),
             events: EventBuffer::default(),
@@ -108,8 +126,12 @@ impl EngineState {
         // 新前台冻结中 → 解冻 + 冷却
         let was_frozen = self.frozen.remove(pkg).is_some();
         if was_frozen {
-            if freezer::unfreeze_pkg(pkg) {
+            // v0.4.47-l3：解冻保持 OOM 保护（adj 暂不还原）——app 已回前台，
+            // 系统 OomAdjuster 会立即重算前台 adj（0），此间防系统 AppFreezer 重冻；
+            // tick 确认前台后还原（见 tick 段 adj_keep 清理）
+            if freezer::unfreeze_pkg_keep_oom(pkg) {
                 self.unfreeze_ops += 1;
+                self.adj_keep.insert(pkg.to_string());
                 logi!("L3 前台解冻: {}（解冻累计 {}）", pkg, self.unfreeze_ops);
                 self.events.push_app(
                     EvLevel::Event,
@@ -133,8 +155,9 @@ impl EngineState {
             // v0.4.22-l3 兜底：frozen 表无记录但 uid 实际冻结（daemon 重启残留 /
             // 事件丢失导致的表状态失真）→ 仍解冻，防"能打开但点击无响应"（ANR）
             if let Some(uid) = freezer::pkg_uid(pkg) {
-                if freezer::uid_has_frozen_procs(uid) && freezer::unfreeze_pkg(pkg) {
+                if freezer::uid_has_frozen_procs(uid) && freezer::unfreeze_pkg_keep_oom(pkg) {
                     self.unfreeze_ops += 1;
+                    self.adj_keep.insert(pkg.to_string());
                     logw!("L3 前台兜底解冻（残留冻结）: {}", pkg);
                     self.events.push_app(
                         EvLevel::Warn,
@@ -227,9 +250,11 @@ impl EngineState {
             }
         }
         if self.frozen.remove(pkg).is_some() {
-            if freezer::unfreeze_pkg(pkg) {
+            // v0.4.47-l3：keep_oom 解冻（防系统 AppFreezer 立即重冻，见 on_focus 注释）
+            if freezer::unfreeze_pkg_keep_oom(pkg) {
                 self.unfreeze_ops += 1;
                 self.wakeup_thaws += 1;
+                self.adj_keep.insert(pkg.to_string());
                 // v0.4.42-l3：节流窗口从"实际解冻"起算（仅当开启时记录）
                 if throttle > 0 {
                     self.wake_throttle
@@ -315,6 +340,8 @@ impl EngineState {
         self.frozen.remove(pkg);
         self.grace.remove(pkg);
         self.cooldown.remove(pkg);
+        // v0.4.47-l3：force-stop → 移出候选池（保险解冻会还原 adj）
+        self.adj_keep.remove(pkg);
         self.pkg_pids.remove(pkg);
         self.pkg_uids.remove(pkg);
         // 保险解冻（幂等写 0；进程已死写失败无害）
@@ -329,10 +356,108 @@ impl EngineState {
         );
     }
 
+    /// v0.4.49-l3：动态系统 app 保护集合刷新（pm list packages -s 枚举）——
+    /// 系统组件冻结 = 隐式 Intent/凭据/安装/文件选择链路黑屏（2026-08-05 相机事故）。
+    /// pm 失败 → 空集（回落编译期 CRITICAL_PACKAGES，零风险降级）。
+    pub fn refresh_system_apps(&mut self) {
+        let mut fresh = HashSet::new();
+        match std::process::Command::new("pm")
+            .args(["list", "packages", "-s"])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    if let Some(pkg) = line.trim().strip_prefix("package:") {
+                        let pkg = pkg.trim();
+                        if !pkg.is_empty() {
+                            fresh.insert(pkg.to_string());
+                        }
+                    }
+                }
+                logi!("系统 app 保护清单刷新: {} 个（pm 枚举）", fresh.len());
+            }
+            _ => {
+                logw!("系统 app 枚举失败（回落编译期 critical 名单）");
+            }
+        }
+        self.system_apps = fresh;
+        // v0.4.50-l3：android.process.media uid 解析（进程名匹配 /proc cmdline——
+        // pm 查不到进程；相机打开必查 MediaStore → 该进程被系统 pid 级冻结 →
+        // binder EPIPE(-32) → CameraDeviceImpl onDeviceError → 黑屏，2026-08-05 实锤）
+        self.media_uid = Self::resolve_media_uid();
+        if let Some(uid) = self.media_uid {
+            logi!("android.process.media uid 解析: {}", uid);
+        } else {
+            logw!("android.process.media uid 解析失败（进程未运行？）");
+        }
+    }
+
+    /// 从 /proc 解析 android.process.media 的 uid（cmdline 首字段匹配 + status Uid）
+    fn resolve_media_uid() -> Option<u32> {
+        let rd = std::fs::read_dir("/proc").ok()?;
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            // 非数字目录（acpi/cpu/...）跳过，不能提前返回（2026-08-05 v0.4.50 实测 bug）
+            let pid: u32 = match name.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let cmdline =
+                std::fs::read_to_string(format!("/proc/{}/cmdline", pid)).unwrap_or_default();
+            let first = cmdline.split('\0').next().unwrap_or("");
+            if first == "android.process.media" {
+                let status =
+                    std::fs::read_to_string(format!("/proc/{}/status", pid)).unwrap_or_default();
+                for line in status.lines() {
+                    if let Some(rest) = line.strip_prefix("Uid:") {
+                        if let Some(uid) = rest.split_whitespace().next() {
+                            if let Ok(u) = uid.parse::<u32>() {
+                                return Some(u);
+                            }
+                        }
+                    }
+                }
+                return None;
+            }
+        }
+        None
+    }
+
+    /// v0.4.50-l3：系统链路组件 OOM 锁定（相机黑屏根治）——
+    /// 系统 AppFreezer 只冻 adj≥900 的 cached app；对相机交互链路组件（媒体进程/
+    /// Intent 解析/凭据/联系人/安装器/相册/相机等）锁 adj=-1000 → 系统冻结逻辑
+    /// 直接跳过它们 → 相机打开不再向冻结组件发 binder → 不再 EPIPE 黑屏。
+    /// 名单 = CRITICAL_PACKAGES（编译期全量系统组件）+ android.process.media。
+    /// protect_oom 幂等：已保护跳过；被 OomAdjuster 覆盖则重写回 -1000。
+    fn lock_system_chain_oom(&mut self) {
+        for pkg in crate::policy::CRITICAL_PACKAGES {
+            if let Some(uid) = freezer::pkg_uid(pkg) {
+                freezer::protect_oom(uid);
+                // v0.4.50-l3 补丁：防御性解冻残留（保持 -1000）——锁定防"未来冻结"，
+                // 但系统在锁定生效前已 pid 级冻结的组件不会自动解（2026-08-05 实测：
+                // mms adj=-1000 但 cgroup freeze=1 残留）；双通道 = 锁 + 清残留
+                freezer::unfreeze_uid_keep_oom(uid);
+            }
+        }
+        if let Some(uid) = self.media_uid {
+            freezer::protect_oom(uid);
+            freezer::unfreeze_uid_keep_oom(uid);
+        }
+        if !self.system_chain_locked {
+            self.system_chain_locked = true;
+            logi!("系统链路 OOM 锁定已启用（{} 个编译期组件 + media uid={:?}）",
+                crate::policy::CRITICAL_PACKAGES.len(), self.media_uid);
+        }
+    }
+
     /// 策略重载（config.rs reload 回调）：成功替换；失败保留旧表。
     /// 预设表随热加载一并刷新（action.toml 变更即时生效）；生效中预设仍存在则
     /// 重放覆盖，已删除则回落磁盘参数。
     pub fn reload_policy(&mut self) {
+        // v0.4.49-l3：系统 app 保护清单随热加载一并刷新（pm 枚举；失败回落编译期名单）
+        self.refresh_system_apps();
         // 情景预设表随热加载一并刷新（缺失/解析失败 → 空表，预设功能降级不致命）
         self.presets = PresetTable::load();
         if let Some((p, _)) = Policy::load() {
@@ -497,6 +622,36 @@ impl EngineState {
         out
     }
 
+    /// v0.4.48-l3 候选池 uid（candidate-sync 下行同步源）：冻结表 + grace 表 + adj_keep 表
+    /// 的并集（对齐 AStop hookSystemFreezer 的"被管 app"语义——系统冻结器不得冻结任何
+    /// Sundown 正在管理的 app，防止系统在 grace 期抢先 pid 级冻结 → freeze_binder 挂起 →
+    /// 黑屏，2026-08-05 实机根因）。排序去重保证签名稳定。
+    pub fn sundown_candidate_uids(&self) -> Vec<u32> {
+        let mut out: Vec<u32> = Vec::new();
+        let mut push_pkg = |pkg: &String| {
+            let uid = self
+                .pkg_uids
+                .get(pkg)
+                .copied()
+                .or_else(|| crate::freezer::pkg_uid(pkg));
+            if let Some(u) = uid {
+                out.push(u);
+            }
+        };
+        for pkg in self.frozen.keys() {
+            push_pkg(pkg);
+        }
+        for pkg in self.grace.keys() {
+            push_pkg(pkg);
+        }
+        for pkg in self.adj_keep.iter() {
+            push_pkg(pkg);
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// v0.4.29-l3：冻结集持久化（frozen 表变化才写盘）——启动归属对账的权威源。
     /// 行式 `pkg:uid`（零依赖，无 JSON 库）；tick 末尾统一捕获所有 frozen 变化路径
     /// （freeze_now/on_focus/wakeup/force_stop/热更新解冻/网络唤醒/进程核验清理）。
@@ -530,6 +685,12 @@ impl EngineState {
     /// 周期性推进：grace 到期冻结 / 冷却清理 / 策略关闭全量解冻 / 进程核验
     pub fn tick(&mut self) {
         let now = Instant::now();
+        // v0.4.50-l3：系统链路组件 OOM 锁定（相机黑屏根治）——**无条件执行**（放在观测
+        // 模式 return 之前）：系统组件保护与策略开关无关，观望模式也必须锁（2026-08-05
+        // 实测 bug：放在 enabled 分支内导致观望模式永不锁定，组件 adj 保持 999 被系统冻）
+        if self.tick_count % 5 == 0 {
+            self.lock_system_chain_oom();
+        }
         if !self.policy.enabled {
             // 观测模式：全量解冻（幂等），清空状态
             if !self.frozen.is_empty() {
@@ -550,6 +711,8 @@ impl EngineState {
             self.frozen.clear();
             self.grace.clear();
             self.cooldown.clear();
+            // v0.4.47-l3：策略关闭 → 候选池清空（完整解冻已还原 adj）
+            self.adj_keep.clear();
             self.persist_frozen_if_changed(); // v0.4.29-l3：清空冻结集持久化
             // P1⑩（v0.4.38-l3）：观测模式同样落盘事件（全量解冻可审计）
             if self.events.pending_persist() > 0 {
@@ -680,6 +843,36 @@ impl EngineState {
             );
         }
 
+        // v0.4.46-l3 加固：冻结集 OOM 周期重锁（约 1.5s 一次）——防系统 OomAdjuster/
+        // NativeFreezeManager 覆盖冻结 app 的 adj 后脱离保护（被当 cached 反复冻结/被杀）。
+        // protect_oom 幂等：已保护跳过；被覆盖则重写回 -1000（backup 仅首次记账）。
+        // （系统链路锁定在 tick 开头无条件执行，见上）
+        if self.tick_count % 5 == 0 {
+            let frozen_pkgs: Vec<String> = self.frozen.keys().cloned().collect();
+            for p in &frozen_pkgs {
+                if let Some(uid) = freezer::pkg_uid(p) {
+                    freezer::protect_oom(uid);
+                }
+            }
+        }
+
+        // v0.4.47-l3：adj_keep 还原——已确认回前台（last_focus）的包还原 OOM 保护
+        // （adj 回原值）并移出候选池；仍在后台的保持 -1000（防系统 AppFreezer 重冻）。
+        if !self.adj_keep.is_empty() {
+            let mut done: Vec<String> = Vec::new();
+            for p in self.adj_keep.iter() {
+                if self.last_focus.as_deref() == Some(p.as_str()) {
+                    if freezer::restore_oom_pkg(p) {
+                        logi!("L3 OOM 保护还原（已回前台）: {}", p);
+                    }
+                    done.push(p.clone());
+                }
+            }
+            for p in done {
+                self.adj_keep.remove(&p);
+            }
+        }
+
         // v0.4.22-l3 对账（v0.4.29-l3 修复）：原实现扫描 cgroup **全部**冻结 uid 并把
         // 表外冻结一律解冻——HANS/系统冻结的后台进程被误当残留解冻（2026-08-03 实机：
         // enabled=true 时每 9s 解冻微信等 HANS 冻结集，与 HANS 打架）。修复：表外冻结
@@ -701,9 +894,11 @@ impl EngineState {
                 }
             }
             for pkg in wake {
-                if freezer::unfreeze_pkg(&pkg) {
+                // v0.4.47-l3：keep_oom 解冻（网络唤醒的 app 仍在后台，防系统重冻）
+                if freezer::unfreeze_pkg_keep_oom(&pkg) {
                     self.unfreeze_ops += 1;
                     self.wakeup_thaws += 1;
+                    self.adj_keep.insert(pkg.clone());
                     logw!("L3 网络唤醒解冻: {}", pkg);
                 }
                 self.frozen.remove(&pkg);
@@ -781,9 +976,10 @@ impl EngineState {
         }
     }
 
-    /// 新策略下永不冻结的包（critical / 白名单 / VPN 保护 / per-app exempt）——热更新对账用
+    /// 新策略下永不冻结的包（critical / 系统 app / 白名单 / VPN 保护 / per-app exempt）——热更新对账用
     fn should_never_freeze(&self, pkg: &str) -> bool {
         self.policy.is_critical(pkg)
+            || self.system_apps.contains(pkg)
             || self.policy.is_whitelisted(pkg)
             || self.is_vpn_protected(pkg)
             || self
@@ -895,6 +1091,20 @@ impl EngineState {
             );
             return;
         }
+        // v0.4.49-l3：动态系统 app 保护（pm 枚举集合）——系统组件冻结 = 隐式 Intent/
+        // 凭据/安装/文件选择链路黑屏（2026-08-05 相机事故：intentresolver 被冻 →
+        // 第三方调相机黑屏）。优先级仅次于 critical（高于白名单——系统组件永不可冻）
+        if self.system_apps.contains(pkg) {
+            logi!("L3 系统组件保护豁免: {}", pkg);
+            self.events.push_app(
+                EvLevel::Info,
+                EvAction::Exempt,
+                pkg,
+                Some("system_app"),
+                None,
+            );
+            return;
+        }
         if self.policy.is_whitelisted(pkg) {
             return; // 白名单永不冻结
         }
@@ -1001,6 +1211,14 @@ impl EngineState {
         // 离开即计时（已在 grace 中也重置到离开时刻——防止"切回再离开"沿用旧
         // 时刻导致刚离开就被到期冻结）
         self.grace.insert(pkg.to_string(), (now, grace_dur));
+        // v0.4.47-l3：退后台进 grace 即锁 OOM（adj=-1000）——系统 AppFreezer 只冻结
+        // cached（adj≥阈值）app；不锁则系统会抢先 pid 级冻结候选 app（Sundown 解冻后
+        // 系统立即重冻 → 拉锯 → 黑屏，2026-08-05 实机根因）。protect_oom 幂等；
+        // 解冻后由 tick 在确认回前台时还原（见 tick 段 adj_keep 清理）。
+        if let Some(uid) = freezer::pkg_uid(pkg) {
+            freezer::protect_oom(uid);
+        }
+        self.adj_keep.insert(pkg.to_string());
         logi!(
             "L3 退后台计时开始: {}（{}s 后冻结）",
             pkg,
@@ -1027,6 +1245,19 @@ impl EngineState {
                 EvAction::Exempt,
                 pkg,
                 Some("critical"),
+                None,
+            );
+            self.grace.remove(pkg);
+            return;
+        }
+        // v0.4.49-l3 最终防线：动态系统 app 拒绝冻结（防 force/异常路径绕过——与 critical 同级）
+        if self.system_apps.contains(pkg) {
+            logw!("L3 系统组件保护拒绝冻结: {}", pkg);
+            self.events.push_app(
+                EvLevel::Warn,
+                EvAction::Exempt,
+                pkg,
+                Some("system_app"),
                 None,
             );
             self.grace.remove(pkg);

@@ -110,6 +110,8 @@ impl DaemonState {
     /// 情景预设表一并加载（v0.4.18-l3 修复：此前仅 reload 时刷新，重启后为空）
     fn init_engine() -> EngineState {
         let mut e = EngineState::default();
+        // v0.4.49-l3：启动即枚举系统 app 保护清单（pm list packages -s；失败回落编译期名单）
+        e.refresh_system_apps();
         if let Some((p, _)) = crate::policy::Policy::load() {
             logi!(
                 "L3 策略已加载: enabled={} grace={}s cooldown={}s whitelist={} force={} apps={}（revision={}）",

@@ -907,13 +907,27 @@ fn dex_hello_response(state: &DaemonState) -> String {
                 .join(",")
         )
     };
+    // v0.4.48-l3：应答携带候选池 uid 集（dex 初始化用；之后以 candidate-sync 增量更新——
+    // onSystemFreeze/HANS 冻结/杀进程拦截的判定依据）
+    let candidate_uids_json = {
+        let eng = state.engine.lock().unwrap();
+        let uids = eng.sundown_candidate_uids();
+        format!(
+            "[{}]",
+            uids.iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
     format!(
-        "{{\"ok\":1,\"dex_hash_match\":{},\"expected_dex_hash\":{},\"dex_path\":\"{}\",\"dex_present\":{},\"frozen_uids\":{}}}",
+        "{{\"ok\":1,\"dex_hash_match\":{},\"expected_dex_hash\":{},\"dex_path\":\"{}\",\"dex_present\":{},\"frozen_uids\":{},\"candidate_uids\":{}}}",
         hash_match,
         expected_json,
         paths::PROBE_DEX_MOUNT,
         dex_present as i32,
         frozen_uids_json,
+        candidate_uids_json,
     )
 }
 

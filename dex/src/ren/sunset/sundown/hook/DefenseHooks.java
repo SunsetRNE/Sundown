@@ -90,6 +90,11 @@ public final class DefenseHooks implements HookEngine {
 
     private final Object sundownLock = new Object();
     private volatile Set<Integer> sundownFrozen = new HashSet<Integer>();
+    // v0.4.48-l3：候选池（frozen + grace + adj_keep 并集，daemon candidate-sync 下行）——
+    // 对齐 AStop hookSystemFreezer"被管 app"语义：系统冻结器/HANS/杀进程/OOM 防御
+    // 对候选池全部生效（防系统在 grace 期抢冻候选 app → freeze_binder 挂起 → 黑屏）
+    private final Object candidateLock = new Object();
+    private volatile Set<Integer> candidateSet = new HashSet<Integer>();
     private final FrozenSet frozen = new FrozenSet();
     private final List<Hooker> hookers = new ArrayList<>();
     private final Thread scannerThread;
@@ -110,6 +115,13 @@ public final class DefenseHooks implements HookEngine {
     public void updateSundownSet(Set<Integer> fresh) {
         synchronized (sundownLock) {
             sundownFrozen = (fresh == null) ? new HashSet<Integer>() : fresh;
+        }
+    }
+
+    /** v0.4.48-l3：daemon candidate-sync 候选池更新（Runtime 事件线程调用；原子替换零锁） */
+    public void updateCandidateSet(Set<Integer> fresh) {
+        synchronized (candidateLock) {
+            candidateSet = (fresh == null) ? new HashSet<Integer>() : fresh;
         }
     }
 
@@ -430,7 +442,9 @@ public final class DefenseHooks implements HookEngine {
     // ---------------- v0.4.26-l3 ColorOS HANS / 系统 freezer 防御回调 ----------------
 
     /** 系统二次冻结拦截：freezeAppAsync*LSP / freezeBinder / freezePackageCgroup / HANS 冻结入口
-     *  —— 冻结集内 uid（或 pid 参数）→ 阻断（不 invoke 原方法，防双冻结/冻结态错乱） */
+     *  —— 候选池内 uid（或 pid 参数）→ 阻断（不 invoke 原方法，防双冻结/冻结态错乱）
+     *  v0.4.48-l3：判定从"冻结集"扩为"候选池"——对齐 AStop hookSystemFreezer 语义，
+     *  系统冻结器不得冻结任何 Sundown 管理的 app（含 grace 期候选，防抢占黑屏） */
     public Object onSystemFreeze(MethodCallback cb) {
         try {
             for (Object a : cb.args) {
@@ -439,12 +453,12 @@ public final class DefenseHooks implements HookEngine {
                     int v = ((Integer) a).intValue();
                     if (v > 0) {
                         // uid 语义（>=10000 普通 app）或 pid 语义（TargetPid/进程）任一命中即拦
-                        if (v >= 10000 && sundownFrozen(v)) {
-                            Log.i(TAG, "系统 freeze 拦截（冻结中 uid=" + v + "）: " + cb.target.getName());
+                        if (v >= 10000 && candidate(v)) {
+                            Log.i(TAG, "系统 freeze 拦截（候选池 uid=" + v + "）: " + cb.target.getName());
                             return cb.defaultReturn();
                         }
-                        if (pidFrozenSundown(v)) {
-                            Log.i(TAG, "系统 freeze 拦截（冻结中 pid=" + v + "）: " + cb.target.getName());
+                        if (pidCandidate(v)) {
+                            Log.i(TAG, "系统 freeze 拦截（候选池 pid=" + v + "）: " + cb.target.getName());
                             return cb.defaultReturn();
                         }
                     }
@@ -541,14 +555,14 @@ public final class DefenseHooks implements HookEngine {
 
     // ---------------- v0.4.39-l3 P1⑨ 防御补全回调 ----------------
 
-    /** OomAdjuster 计算入口防御：applyOomAdj* 目标是冻结集内 uid → 跳过（内核保持 -1000，
-     *  防系统把 adj 重算回 cached≈900 覆盖 daemon OOM 保护） */
+    /** OomAdjuster 计算入口防御：applyOomAdj* 目标是候选池内 uid → 跳过（内核保持 -1000，
+     *  防系统把 adj 重算回 cached≈900 覆盖 daemon OOM 保护；v0.4.48-l3 冻结集→候选池） */
     public Object onOomAdjCompute(MethodCallback cb) {
         try {
             for (Object a : cb.args) {
                 Integer uid = extractUid(a);
-                if (uid != null && uid.intValue() >= 10000 && sundownFrozen(uid.intValue())) {
-                    Log.i(TAG, "OomAdjuster 计算跳过（冻结中 uid=" + uid + "）: " + cb.target.getName());
+                if (uid != null && uid.intValue() >= 10000 && candidate(uid.intValue())) {
+                    Log.i(TAG, "OomAdjuster 计算跳过（候选池 uid=" + uid + "）: " + cb.target.getName());
                     return cb.defaultReturn();
                 }
             }
@@ -558,7 +572,7 @@ public final class DefenseHooks implements HookEngine {
         return cb.invokeOriginalOrDefault();
     }
 
-    /** OomAdjuster 写入入口防御：setOomAdj(pid, adj, ...) 冻结集内 pid → adj 改写 -1000
+    /** OomAdjuster 写入入口防御：setOomAdj(pid, adj, ...) 候选池内 pid → adj 改写 -1000
      *  （保留系统流程完整，写入值强制为保护值；pid 判定走 /proc 归属核验） */
     public Object onOomAdjApply(MethodCallback cb) {
         try {
@@ -576,8 +590,8 @@ public final class DefenseHooks implements HookEngine {
                 }
             }
             if (pid != null && adjIdx != null && pid.intValue() > 0
-                    && pidFrozenSundown(pid.intValue())) {
-                Log.i(TAG, "OomAdjuster 写入保护（冻结中 pid=" + pid + "，adj 锁 -1000）");
+                    && pidCandidate(pid.intValue())) {
+                Log.i(TAG, "OomAdjuster 写入保护（候选池 pid=" + pid + "，adj 锁 -1000）");
                 cb.args[adjIdx.intValue()] = Integer.valueOf(-1000);
             }
         } catch (Throwable t) {
@@ -649,6 +663,17 @@ public final class DefenseHooks implements HookEngine {
     private boolean pidFrozenSundown(int pid) {
         Integer uid = pidUid(pid);
         return uid != null && sundownFrozen(uid.intValue());
+    }
+
+    /** v0.4.48-l3：候选池判定（系统冻结器/杀进程/OOM/耗电防御统一用——对齐 AStop"被管 app"） */
+    private boolean candidate(int uid) {
+        return candidateSet.contains(Integer.valueOf(uid));
+    }
+
+    /** v0.4.48-l3：pid → uid → 候选池判定（setOomAdj/killProcess 等 pid 参数场景） */
+    private boolean pidCandidate(int pid) {
+        Integer uid = pidUid(pid);
+        return uid != null && candidate(uid.intValue());
     }
 
     /** /proc/<pid>/status 的 Uid 首字段（真实 uid） */

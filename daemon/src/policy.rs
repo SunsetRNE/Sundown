@@ -163,6 +163,28 @@ pub const CRITICAL_PACKAGES: &[&str] = &[
     // 系统通信（短信/存储提供者——冻结影响系统功能）
     "com.android.mms",
     "com.android.providers.media",
+    // v0.4.49-l3 系统组件保护（2026-08-05 相机黑屏事故根因段）：
+    // intentresolver/credentialmanager/packageinstaller 被 Sundown 当普通 app 冻结后，
+    // 第三方 app 调用相机（隐式 Intent）→ IntentResolver 冻结 → freeze_binder 挂起 →
+    // 长时间黑屏且"清后台重开无效"（残留冻结在系统组件层）。同类风险：文件选择/凭据/
+    // 安装/相册/账号/密码本——隐式 Intent 与系统服务链路组件一律不可冻结。
+    "com.android.intentresolver", // Intent 解析器（隐式 Intent/分享/调相机必经）
+    "com.android.credentialmanager", // 凭据管理器（登录/密钥/权限确认链路）
+    "com.android.packageinstaller", // 包安装器（安装/卸载/授权链路）
+    "com.android.documentsui", // 文件选择器（隐式 Intent OPEN_DOCUMENT）
+    "com.android.printspooler", // 打印服务（隐式 Intent 打印链路）
+    "com.android.contacts", // 联系人（拨号/分享/账户链路）
+    "com.android.providers.contacts", // 联系人存储
+    "android.process.media", // 媒体处理（媒体扫描/存储链路）
+    "com.android.providers.media.module", // 媒体存储模块（Android 13+）
+    "com.coloros.gallery3d", // 相册（相机预览回显/分享联动）
+    "com.oplus.camera", // 相机（启动链路敏感，防冻结竞态黑屏）
+    "com.heytap.openid", // HeyTap 账号（登录/云服务链路）
+    "com.coloros.codebook", // 密码本（密码填充/登录链路）
+    "com.android.deskclock", // 闹钟（AOSP）
+    "com.coloros.alarmclock", // 闹钟（ColorOS，系统 AppFreezer 曾冻结 ×2）
+    "com.coloros.calendar", // 日历（ColorOS）
+    "com.android.calendar", // 日历（AOSP）
 ];
 
 /// 策略默认值（policy.toml 缺失/解析失败时的兜底：策略关闭，观测优先）

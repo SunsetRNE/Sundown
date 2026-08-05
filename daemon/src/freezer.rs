@@ -181,11 +181,62 @@ pub fn freeze_uid(uid: u32) -> bool {
 }
 
 /// 解冻整个 app（uid 级）：cgroup 写 0 + SIGCONT 幂等恢复（双通道，SIGSTOP 兜底可解）
+/// v0.4.47-l3：cgroup v2 父子级 freeze 独立——**父级写 0 不会解冻 pid 级残留冻结**
+/// （系统 AppFreezer 用 pid 级冻结后台 app；Sundown 选择性冻结也写 pid 级）。
+/// 2026-08-05 实机根因：解冻只写 uid 级 0 → pid 级残留 1 → 进程实际仍冻结 → 黑屏。
+/// 必须遍历 pid_* 子目录全部写 0，否则解冻不彻底。
 pub fn unfreeze_uid(uid: u32) -> bool {
     let ok = write_freeze(&uid_freeze_path(uid), "0");
+    // pid 级残留解冻（v0.4.47-l3 根治；写失败幂等无害）
+    let base = format!("/sys/fs/cgroup/apps/uid_{}", uid);
+    if let Ok(rd) = std::fs::read_dir(&base) {
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("pid_") {
+                let _ = write_freeze(&entry.path().join("cgroup.freeze").to_string_lossy(), "0");
+            }
+        }
+    }
     sigcont_uid(uid);
     restore_oom(uid);
     ok
+}
+
+/// v0.4.47-l3：解冻但**保持 OOM 保护**（adj 不还原）——用于 focus/wakeup/residual_thaw 等
+/// 运行期解冻路径。背景：系统 AppFreezer 只冻结 cached（adj≥阈值）app；解冻即还原 adj
+/// → app 若仍在后台会被系统立即 pid 级重冻（与 Sundown 拉锯 → 黑屏，2026-08-05 实机）。
+/// 保持 -1000 直到确认回前台（tick 见 engine.rs），由 restore_oom_pkg 显式还原。
+pub fn unfreeze_uid_keep_oom(uid: u32) -> bool {
+    let ok = write_freeze(&uid_freeze_path(uid), "0");
+    let base = format!("/sys/fs/cgroup/apps/uid_{}", uid);
+    if let Ok(rd) = std::fs::read_dir(&base) {
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("pid_") {
+                let _ = write_freeze(&entry.path().join("cgroup.freeze").to_string_lossy(), "0");
+            }
+        }
+    }
+    sigcont_uid(uid);
+    ok
+}
+
+/// v0.4.47-l3：按包还原 OOM 保护（adj 回原值）——确认 app 已回前台后调用。
+pub fn restore_oom_pkg(pkg: &str) -> bool {
+    match pkg_uid(pkg) {
+        Some(uid) => restore_oom(uid) > 0,
+        None => false,
+    }
+}
+
+/// v0.4.47-l3：按包解冻但保持 OOM 保护（见 unfreeze_uid_keep_oom）。
+pub fn unfreeze_pkg_keep_oom(pkg: &str) -> bool {
+    match pkg_uid(pkg) {
+        Some(uid) => unfreeze_uid_keep_oom(uid),
+        None => false,
+    }
 }
 
 // ---------------- OOM 保护（v0.4.37-l3，对齐 AStop custom_oom_adj） ----------------
@@ -214,23 +265,29 @@ fn write_oom_adj(pid: u32, val: i32) -> bool {
 }
 
 /// 冻结保护：uid 全部进程写保护 adj（记录原值；已保护进程跳过）。返回新保护数。
+/// v0.4.46-l3：支持重复调用重锁——若当前 adj 已被系统 OomAdjuster/native freezer 覆盖
+/// （≠保护值），无条件重写回保护值（backup 表仅首次记录原值，解冻恢复用）。
 pub fn protect_oom(uid: u32) -> usize {
     let mut n = 0usize;
     for pid in uid_pids(uid) {
-        // pid 复用防护：若该 pid 已被记录且当前 adj 已是保护值 → 跳过
-        let backup_exists = OOM_BACKUP.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&pid);
-        if backup_exists {
-            continue;
+        // pid 复用防护：backup 已有记录 → 本次仅重锁不重复记账
+        let backup_exists;
+        {
+            let guard = OOM_BACKUP.lock().unwrap_or_else(|e| e.into_inner());
+            backup_exists = guard.contains_key(&pid);
         }
         match read_oom_adj(pid) {
-            Some(orig) if orig != OOM_PROTECT => {
+            Some(cur) if cur == OOM_PROTECT => continue, // 已保护（幂等跳过）
+            Some(cur) => {
                 if write_oom_adj(pid, OOM_PROTECT) {
-                    OOM_BACKUP.lock().unwrap_or_else(|e| e.into_inner()).insert(pid, orig);
+                    if !backup_exists {
+                        let mut guard = OOM_BACKUP.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.insert(pid, cur);
+                    }
                     n += 1;
                 }
             }
-            Some(_) => {} // 已是保护值（重复 protect 幂等）
-            None => {}    // 进程刚死，跳过
+            None => {} // 进程刚死，跳过
         }
     }
     if n > 0 {
@@ -402,6 +459,14 @@ pub fn freeze_pkg_keep_push(pkg: &str) -> bool {
     }
     if kept > 0 {
         logi!("L3 选择性冻结: {}（保留 {} 个 :push 子进程）", pkg, kept);
+    }
+    // v0.4.46-l3 修复：选择性冻结成功后同样必须执行 OOM 保护！
+    // 事故复盘（2026-08-04 23:38 实机）：此前仅 freeze_uid（整冻回落）路径调 protect_oom，
+    // 选择性冻结直接写 pid 级 cgroup 后 return —— 冻结 app 全程无 OOM 保护，adj 保持 cached(905)，
+    // 系统 NativeFreezeManager/AppFreezer 将其当普通 cached app 反复冻结（Sundown 解冻后 14s 内
+    // 被系统重冻 → 黑屏/白屏），并可在 remove task/LMK 中任意被杀。
+    if frozen_any {
+        protect_oom(uid);
     }
     frozen_any
 }
