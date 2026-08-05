@@ -239,6 +239,35 @@ pub fn unfreeze_pkg_keep_oom(pkg: &str) -> bool {
     }
 }
 
+// ---------------- 丢弃（v0.4.52-l3，行为概念《超时丢弃》） ----------------
+// 墓碑该做的不是"永远冻着"，而是"冻住 → 过期 → 丢弃 → 释放内存"。
+// 丢弃 = 冻结的终态之一（与"解冻"并列）：冻结超时 / 内存水位告急 / 开机缓存回收
+// 三种触发，语义均为 SIGKILL 整 uid 释放 RSS。安全护栏（README《超时丢弃》§3）：
+//   - 只作用于 Sundown 自己的冻结集/候选池（白名单/IMPORTANT/critical/VPN/
+//     系统组件/前台豁免由调用方判定面保证，本函数只执行）；
+//   - 丢弃前先解冻写 0（防内核态残留冻结），随后 SIGKILL 归属核验进程
+//     （uid_pids 已做 pid 复用二次核验，见上）；
+//   - 丢弃 = 最终动作不可撤销（用户切回时走冷启动，权衡文档化）。
+
+/// 丢弃 uid 全部进程：先解冻（cgroup 写 0 + SIGCONT + 还原 OOM 保护），
+/// 再 SIGKILL 归属核验后的全部存活进程。返回杀掉进程数（0 = 无进程可杀）。
+/// 失败安全：无进程 / 杀失败均不崩溃，调用方据返回值决定记录清理。
+pub fn discard_uid(uid: u32) -> usize {
+    // 先解冻写 0（防内核态残留：cgroup.freeze=1 残留会导致僵尸冻结记录）
+    unfreeze_uid(uid);
+    let pids = uid_pids(uid);
+    let mut n = 0usize;
+    for pid in pids {
+        if unsafe { libc::kill(pid as i32, libc::SIGKILL) } == 0 {
+            n += 1;
+        }
+    }
+    if n > 0 {
+        logw!("丢弃执行: uid={} SIGKILL {} 个进程（内存释放）", uid, n);
+    }
+    n
+}
+
 // ---------------- OOM 保护（v0.4.37-l3，对齐 AStop custom_oom_adj） ----------------
 // 场景：cgroup 冻结 ≠ 免疫 LMK/OOM——冻结 app 通常已 cached（adj≈900），内存压力下
 // 会被 LMK 优先杀死，解冻即"白冻"。冻结期把 oom_score_adj 锁到保护值（-1000 =

@@ -133,6 +133,10 @@ fn main() {
         let mut thawed = 0usize;
         {
             let mut eng = state.engine.lock().unwrap();
+            // v0.4.52-l3：保存上次会话 Sundown 冻结集 → 开机缓存回收候选
+            // （boot_reclaim 只回收有归属证据的包：上次 Sundown 冻结 + 当前冻结集；
+            //  clear_frozen_state 清盘后此副本是唯一来源）
+            eng.boot_reclaim_candidates = persisted.clone();
             for (pkg, uid) in &persisted {
                 if !cgroup_frozen.contains(uid) {
                     continue; // 已解冻（正常会话结束/外部解冻）→ 忽略

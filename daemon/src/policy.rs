@@ -231,6 +231,22 @@ pub struct Policy {
     /// 防御 hook 组（L3 仅解析+展示，不启用）
     pub defense_anr: bool,
     pub defense_cached_optimizer: bool,
+    /// [discard] 冻结超时丢弃秒数（v0.4.52-l3，行为概念《超时丢弃》）：
+    /// 冻结集条目冻结时长超过该值且期间无任何唤醒命中（节流/门控拦截不算活跃）
+    /// → 升级为丢弃（SIGKILL 整 uid，释放内存）；0 = 关闭（默认 1800 = 30min）
+    pub discard_frozen_timeout_seconds: u64,
+    /// [discard] 内存水位丢弃阈值 MB（v0.4.52-l3）：/proc/meminfo MemAvailable
+    /// 低于该值 → 按 LRU（frozen_since 最旧优先）+ RSS 占用排序，丢弃冻结集
+    /// 直到水位恢复；只作用于 Sundown 冻结集（白名单/IMPORTANT/critical/VPN/
+    /// 系统组件/前台豁免天然不参与）；0 = 关闭（默认 512MB）
+    pub discard_mem_watermark_mb: u64,
+    /// [discard] 开机缓存回收（v0.4.52-l3）：boot_completed 后延迟
+    /// boot_reclaim_delay_seconds 秒，扫描"上次会话 Sundown 冻结集 + 当前冻结集"
+    /// 中 oom_score_adj ≥ 缓存档（900）的包 → 丢弃（"开机时的高缓存"主动回收）；
+    /// 只回收 cache/empty 档，绝不动前台/感知/服务进程；true = 开启（默认）
+    pub discard_boot_reclaim: bool,
+    /// [discard] 开机回收延迟秒数（等系统恢复期结束；默认 120s）
+    pub discard_boot_reclaim_delay_seconds: u64,
     /// 策略文件修订号（mtime 秒；热加载识别用）
     pub revision: u64,
 }
@@ -256,6 +272,12 @@ impl Default for Policy {
             vpn_packages: Vec::new(),
             defense_anr: false,
             defense_cached_optimizer: false,
+            // v0.4.52-l3 超时丢弃：发布默认全部开启（直击"冻结≠释放内存"痛点），
+            // 但受 [general] enabled 总开关约束——观望模式零动作
+            discard_frozen_timeout_seconds: 1800,
+            discard_mem_watermark_mb: 512,
+            discard_boot_reclaim: true,
+            discard_boot_reclaim_delay_seconds: 120,
             revision: 0,
         }
     }
@@ -340,6 +362,11 @@ fn apply_entry(p: &mut Policy, e: &TomlEntry) {
         ("defense", "cached_app_optimizer") => p.defense_cached_optimizer = bool_of(val, e, false),
         ("vpn", "keep_vpn") => p.keep_vpn = bool_of(val, e, true),
         ("vpn", "packages") => p.vpn_packages = str_array_of(val, e),
+        // v0.4.52-l3：超时丢弃段（0=关闭，失败安全回落默认）
+        ("discard", "frozen_timeout_seconds") => p.discard_frozen_timeout_seconds = int_of(val, e, 1800).max(0) as u64,
+        ("discard", "mem_watermark_mb") => p.discard_mem_watermark_mb = int_of(val, e, 512).max(0) as u64,
+        ("discard", "boot_reclaim") => p.discard_boot_reclaim = bool_of(val, e, true),
+        ("discard", "boot_reclaim_delay_seconds") => p.discard_boot_reclaim_delay_seconds = int_of(val, e, 120).max(0) as u64,
         (s, _k) if s.starts_with("apps.") => apply_app_entry(p, &s[5..], e),
         (s, k) => {
             if !s.is_empty() {
@@ -521,6 +548,41 @@ anr_protect = true
     fn unknown_key_ignored() {
         let p = Policy::from_toml("[general]\nenabled = true\nfuture_key = 1", 1).unwrap();
         assert!(p.enabled);
+    }
+
+    /// v0.4.52-l3：[discard] 段解析——超时/水位/开机回收四参数 + 缺省回落 + 0=关闭
+    #[test]
+    fn discard_parse_v052() {
+        let src = r#"
+[general]
+enabled = true
+
+[discard]
+frozen_timeout_seconds = 3600
+mem_watermark_mb = 256
+boot_reclaim = false
+boot_reclaim_delay_seconds = 60
+"#;
+        let p = Policy::from_toml(src, 99).unwrap();
+        assert!(p.enabled);
+        assert_eq!(p.discard_frozen_timeout_seconds, 3600);
+        assert_eq!(p.discard_mem_watermark_mb, 256);
+        assert!(!p.discard_boot_reclaim);
+        assert_eq!(p.discard_boot_reclaim_delay_seconds, 60);
+
+        // 缺省回落（发布默认全部开启，受 enabled 总开关约束）
+        let d = Policy::default();
+        assert_eq!(d.discard_frozen_timeout_seconds, 1800);
+        assert_eq!(d.discard_mem_watermark_mb, 512);
+        assert!(d.discard_boot_reclaim);
+        assert_eq!(d.discard_boot_reclaim_delay_seconds, 120);
+
+        // 0 = 关闭（钳 0 不解析为负）
+        let src2 = "[discard]\nfrozen_timeout_seconds = 0\nmem_watermark_mb = 0";
+        let p2 = Policy::from_toml(src2, 1).unwrap();
+        assert_eq!(p2.discard_frozen_timeout_seconds, 0);
+        assert_eq!(p2.discard_mem_watermark_mb, 0);
+        assert!(p2.discard_boot_reclaim, "boot_reclaim 未指定回落默认 true");
     }
 
     #[test]

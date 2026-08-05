@@ -59,12 +59,41 @@
 #             其主进程非 :push 类，选择性冻结/软豁免都保不住，必须硬豁免。
 #   packages = [ ... ]     手动兜底列表：自动探测失效（非标准 tun fd 实现）时
 #             直接把 VPN app 包名列在这里，命中即受保护（优先级最高）。
+# [discard]   超时丢弃（v0.4.52-l3，行为概念《墓碑行为对齐之超时丢弃》——直击
+#             "冻结 ≠ 释放内存"痛点：cgroup freezer 只暂停调度，RSS 仍占内存；
+#             墓碑该做的是"冻住 → 过期 → 丢弃 → 释放内存"）：
+#   frozen_timeout_seconds = N   冻结超时丢弃秒数（缺省 1800 = 30min；0 = 关闭）：
+#             冻结时长超该值且期间无任何唤醒命中 → 升级为丢弃（SIGKILL 整 uid）。
+#             语义：30 分钟没被唤醒的冻结 app ≈ 用户不需要 → 丢弃释放内存；
+#             "期间零活跃"口径：被唤醒节流/广播门控拦截的唤醒**不算活跃**
+#             （防 FCM 风暴把超时无限续期）；任何实际解冻会重置超时。
+#   mem_watermark_mb = N     内存水位丢弃阈值 MB（缺省 512；0 = 关闭）：
+#             /proc/meminfo MemAvailable 低于该值 → 按 LRU（最旧优先）+ RSS 占用
+#             排序，丢弃冻结集直到水位恢复（超时未到但内存告急 → 提前丢弃）。
+#   boot_reclaim = true|false  开机缓存回收（缺省 true）：boot_completed 后延迟
+#             boot_reclaim_delay_seconds 秒，扫描"上次会话 Sundown 冻结集 +
+#             当前冻结集"中 oom_score_adj ≥ 缓存档（900）的包 → 丢弃——
+#             "开机时的高缓存"由 Sundown 主动回收，不再等系统慢慢杀。
+#   boot_reclaim_delay_seconds = N  开机回收延迟秒数（缺省 120，等系统恢复期结束）
+#   ⚠️ 安全护栏（三机制共同）：只作用于 Sundown 自己的冻结集/候选池；白名单 /
+#      per-app exempt / IMPORTANT / critical 内置 / 动态系统组件 / VPN 硬豁免 /
+#      前台 app 一律不参与（daemon 侧 discard_ineligible 判定面保证）；
+#      丢弃前 cgroup.procs 归属核验防 pid 复用误杀；丢弃 = 最终动作不可撤销
+#      （用户切回时走冷启动）；事件留痕 discard pkg=... reason=... + JSONL 审计 +
+#      status discard_ops / discarded_packages / discard_reasons 观测。
+#      发布默认全部开启，但受 [general] enabled 总开关约束——观望模式零动作。
 
 [general]
 enabled = false
 grace_seconds = 30
 cooldown_seconds = 60
 wake_throttle_seconds = 60
+
+[discard]
+frozen_timeout_seconds = 1800
+mem_watermark_mb = 512
+boot_reclaim = true
+boot_reclaim_delay_seconds = 120
 
 [freeze]
 force = []

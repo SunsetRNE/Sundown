@@ -79,6 +79,24 @@ pub struct EngineState {
     pub wakeup_thaws: u64,
     /// tick 计数（v0.4.22-l3：低频对账节拍用）
     pub tick_count: u64,
+    /// v0.4.52-l3 超时丢弃（行为概念《超时丢弃》）：
+    /// 墓碑该做的不是"永远冻着"，而是"冻住 → 过期 → 丢弃 → 释放内存"。
+    /// 丢弃 = 冻结终态之一（与"解冻"并列），SIGKILL 整 uid 释放 RSS。
+    /// 累计丢弃次数（status discard_ops 观测）
+    pub discard_ops: u64,
+    /// 各触发原因累计（status discard_reasons 观测）
+    pub discard_frozen_timeout: u64,
+    pub discard_mem_watermark: u64,
+    pub discard_boot_reclaim: u64,
+    /// 最近丢弃的包名（去重，上限 20；status discarded_packages 观测）
+    pub discarded: Vec<String>,
+    /// boot_completed 检测时刻（v0.4.52-l3 开机缓存回收；None = 未检测到）
+    pub boot_completed_at: Option<Instant>,
+    /// 开机缓存回收是否已执行（只执行一次，防重复回收）
+    pub boot_reclaim_done: bool,
+    /// 上次会话 Sundown 冻结集（main.rs 启动对账注入）——
+    /// boot_reclaim 候选之一（"开机恢复的冻结候选"：有归属证据，Sundown 有权回收）
+    pub boot_reclaim_candidates: Vec<(String, u32)>,
 }
 impl Default for EngineState {
     fn default() -> Self {
@@ -106,6 +124,14 @@ impl Default for EngineState {
             unfreeze_ops: 0,
             wakeup_thaws: 0,
             tick_count: 0,
+            discard_ops: 0,
+            discard_frozen_timeout: 0,
+            discard_mem_watermark: 0,
+            discard_boot_reclaim: 0,
+            discarded: Vec::new(),
+            boot_completed_at: None,
+            boot_reclaim_done: false,
+            boot_reclaim_candidates: Vec::new(),
         }
     }
 }
@@ -843,6 +869,74 @@ impl EngineState {
             );
         }
 
+        // ============ v0.4.52-l3 超时丢弃（行为概念《超时丢弃》）============
+        // 墓碑该做的不是"永远冻着"，而是"冻住 → 过期 → 丢弃 → 释放内存"。
+        // 三种触发（均只作用于 Sundown 冻结集，白名单/IMPORTANT/critical/VPN/
+        // 系统组件/前台豁免由 discard_pkg 调用前的判定面保证）：
+        //   1) frozen_timeout：冻结时长超 [discard] frozen_timeout_seconds 且期间
+        //      无任何唤醒命中——"期间零活跃"语义：任何实际解冻（前台/唤醒/网络唤醒）
+        //      都会移除 frozen 条目 → 超时自然清零；被节流/门控拦截的唤醒不解冻
+        //      → 条目保留 → 超时继续走（防 FCM 风暴把超时无限续期）。
+        //   2) mem_watermark：MemAvailable 低于水位 → 按 LRU+RSS 丢弃直到恢复。
+        //   3) boot_reclaim：boot_completed 后延迟一次回收 cache 档"开机恢复候选"。
+
+        // 1) 冻结超时丢弃（每 10 tick ≈3s 检查；1800s 默认超时，±3s 粒度可接受）
+        if self.tick_count % 10 == 0 && self.policy.discard_frozen_timeout_seconds > 0 {
+            let expired = self.expired_discard_candidates(now);
+            for pkg in expired {
+                self.discard_pkg(&pkg, "frozen_timeout");
+            }
+        }
+
+        // 2) 内存水位丢弃（每 20 tick ≈6s 采样 meminfo；低于水位 → LRU+RSS 丢弃）
+        if self.tick_count % 20 == 0
+            && self.policy.discard_mem_watermark_mb > 0
+            && !self.frozen.is_empty()
+        {
+            let watermark_kb = self.policy.discard_mem_watermark_mb.saturating_mul(1024);
+            if let Some(avail) = Self::mem_available_kb() {
+                if avail < watermark_kb {
+                    logw!(
+                        "内存水位告急: MemAvailable={}MB < 阈值 {}MB，按 LRU+RSS 丢弃冻结集",
+                        avail / 1024,
+                        self.policy.discard_mem_watermark_mb
+                    );
+                    let candidates = self.sort_discard_candidates();
+                    for pkg in candidates {
+                        // 每丢一个重查水位；已恢复 → 停
+                        if Self::mem_available_kb()
+                            .map(|a| a >= watermark_kb)
+                            .unwrap_or(true)
+                        {
+                            break;
+                        }
+                        self.discard_pkg(&pkg, "mem_watermark");
+                    }
+                }
+            }
+        }
+
+        // 3) 开机缓存回收（每 100 tick ≈30s 轮询 boot_completed；延迟后执行一次）
+        if self.tick_count % 100 == 0 && self.boot_completed_at.is_none() {
+            if Self::boot_completed() {
+                self.boot_completed_at = Some(Instant::now());
+                logi!(
+                    "boot_completed 检测到，安排开机缓存回收（{}s 后）",
+                    self.policy.discard_boot_reclaim_delay_seconds
+                );
+            }
+        }
+        if self.policy.discard_boot_reclaim && !self.boot_reclaim_done {
+            if let Some(at) = self.boot_completed_at {
+                if now.duration_since(at)
+                    >= Duration::from_secs(self.policy.discard_boot_reclaim_delay_seconds)
+                {
+                    self.boot_reclaim_execute();
+                    self.boot_reclaim_done = true;
+                }
+            }
+        }
+
         // v0.4.46-l3 加固：冻结集 OOM 周期重锁（约 1.5s 一次）——防系统 OomAdjuster/
         // NativeFreezeManager 覆盖冻结 app 的 adj 后脱离保护（被当 cached 反复冻结/被杀）。
         // protect_oom 幂等：已保护跳过；被覆盖则重写回 -1000（backup 仅首次记账）。
@@ -927,6 +1021,207 @@ impl EngineState {
                 logi!("事件审计: 落盘 {} 条（待同步 {}）", n, self.events.pending_persist());
             }
         }
+    }
+
+    // ---------------- 超时丢弃（v0.4.52-l3，行为概念《超时丢弃》） ----------------
+
+    /// 冻结超时丢弃候选：冻结时长 ≥ [discard] frozen_timeout_seconds 的包。
+    /// 纯逻辑（frozen 表 + 配置），单测直接覆盖。
+    /// 防呆：timeout=0（关闭）→ 恒空（调用方 tick 已前置检查，此处双保险）。
+    fn expired_discard_candidates(&self, now: Instant) -> Vec<String> {
+        let timeout = self.policy.discard_frozen_timeout_seconds;
+        if timeout == 0 {
+            return Vec::new();
+        }
+        self.frozen
+            .iter()
+            .filter(|(_, since)| now.duration_since(**since) >= Duration::from_secs(timeout))
+            .map(|(p, _)| p.clone())
+            .collect()
+    }
+
+    /// 内存水位丢弃候选排序：LRU（frozen_since 最旧优先）+ RSS 占用（大→小）。
+    /// RSS 读取失败（测试环境/进程刚死）按 0 计——排序退化为纯 LRU，安全。
+    fn sort_discard_candidates(&self) -> Vec<String> {
+        let mut items: Vec<(String, Instant, u64)> = Vec::new();
+        for (pkg, since) in &self.frozen {
+            let uid = freezer::pkg_uid(pkg).unwrap_or(0);
+            let rss = if uid != 0 { Self::uid_rss_kb(uid) } else { 0 };
+            items.push((pkg.clone(), *since, rss));
+        }
+        // 主：frozen_since 旧 → 新（最旧优先丢）；次：RSS 大 → 小（占内存多的先丢）
+        items.sort_by(|a, b| a.1.cmp(&b.1).then(b.2.cmp(&a.2)));
+        items.into_iter().map(|(p, _, _)| p).collect()
+    }
+
+    /// 丢弃资格判定（安全护栏，纯逻辑可单测）：命中者任何丢弃机制不得触碰——
+    /// 白名单 / per-app exempt / critical 内置 / 动态系统组件 / VPN 硬豁免 /
+    /// IMPORTANT 档 / 当前前台。复用 v0.4.49 三处接入的既有判定面。
+    fn discard_ineligible(&self, pkg: &str) -> bool {
+        self.should_never_freeze(pkg)
+            || self.mode_of(pkg) == AppMode::Important
+            || self.last_focus.as_deref() == Some(pkg)
+    }
+
+    /// 执行丢弃一个包（终态：SIGKILL 整 uid 释放内存，不可撤销）。
+    /// 失败安全：
+    ///   - uid 定位失败（包表未知）→ 清理记录不动作（包已不存在）；
+    ///   - 归属核验无进程 → 清理记录（无尸体可丢，等价 no_procs 清理语义）；
+    ///   - SIGKILL 后竞态无进程 → 同样清理记录。
+    /// 成功 → 清理全部相关记录（frozen/grace/cooldown/adj_keep）+ 计数 + 事件留痕
+    /// （discard pkg=P reason=...，JSONL 审计随事件持久化落盘）。
+    fn discard_pkg(&mut self, pkg: &str, reason: &str) -> bool {
+        // 最终防线：安全护栏（调用方通常已过滤，这里兜底防 force/异常路径绕过）
+        if self.discard_ineligible(pkg) {
+            logw!("L3 丢弃护栏拒绝: {}（reason={}）", pkg, reason);
+            return false;
+        }
+        let Some(uid) = freezer::pkg_uid(pkg) else {
+            logw!("L3 丢弃跳过（包表未知）: {}", pkg);
+            self.frozen.remove(pkg);
+            return false;
+        };
+        if !freezer::uid_has_procs(uid) {
+            // 无尸体可丢（进程已死）——清理记录（与 no_procs 同语义）
+            self.frozen.remove(pkg);
+            return false;
+        }
+        let killed = freezer::discard_uid(uid);
+        if killed == 0 {
+            // 归属核验后仍无进程（竞态）→ 清理记录
+            self.frozen.remove(pkg);
+            return false;
+        }
+        self.frozen.remove(pkg);
+        self.grace.remove(pkg);
+        self.cooldown.remove(pkg);
+        self.adj_keep.remove(pkg);
+        self.discard_ops += 1;
+        match reason {
+            "frozen_timeout" => self.discard_frozen_timeout += 1,
+            "mem_watermark" => self.discard_mem_watermark += 1,
+            "boot_reclaim" => self.discard_boot_reclaim += 1,
+            _ => {}
+        }
+        // 最近丢弃列表（去重，上限 20）
+        self.discarded.retain(|p| p != pkg);
+        self.discarded.push(pkg.to_string());
+        if self.discarded.len() > 20 {
+            self.discarded.remove(0);
+        }
+        logw!(
+            "L3 丢弃: {} uid={} reason={}（SIGKILL {} 进程，累计丢弃 {}）",
+            pkg,
+            uid,
+            reason,
+            killed,
+            self.discard_ops
+        );
+        self.events.push_app(
+            EvLevel::Warn,
+            EvAction::Discard,
+            pkg,
+            Some(reason),
+            Some(&format!("uid={} killed={}", uid, killed)),
+        );
+        true
+    }
+
+    /// 开机缓存回收执行（boot_completed + 延迟到期后调用一次）：
+    /// 候选 = 上次会话 Sundown 冻结集（启动对账注入，有归属证据）∪ 当前冻结集；
+    /// 只回收 cache/empty 档（包全部存活进程 oom_score_adj ≥ 900）——当前冻结集
+    /// 已被 OOM 锁定 -1000 天然排除（防"刚冻就被开机回收杀"），主要命中开机时
+    /// 系统自动恢复的"上次冻结过的包"（高缓存痛点直击）。
+    fn boot_reclaim_execute(&mut self) {
+        if self.boot_reclaim_candidates.is_empty() && self.frozen.is_empty() {
+            logi!("开机缓存回收：无候选（上次会话无冻结集）");
+            return;
+        }
+        // 候选集合（去重）
+        let mut set: HashSet<String> = HashSet::new();
+        for (p, _) in &self.boot_reclaim_candidates {
+            set.insert(p.clone());
+        }
+        for p in self.frozen.keys() {
+            set.insert(p.clone());
+        }
+        // 安全护栏过滤 + cache 档判定
+        let mut reclaim: Vec<String> = Vec::new();
+        for p in set {
+            if self.discard_ineligible(&p) {
+                continue;
+            }
+            if !Self::pkg_is_cache_adj(&p) {
+                continue; // 非 cache/empty 档（前台/感知/服务/已 OOM 锁定）不动
+            }
+            reclaim.push(p);
+        }
+        if reclaim.is_empty() {
+            logi!("开机缓存回收：无 cache 档候选，跳过");
+            return;
+        }
+        reclaim.sort();
+        logw!("开机缓存回收：{} 个 cache 档候选（{}）", reclaim.len(), reclaim.join(","));
+        for pkg in reclaim {
+            self.discard_pkg(&pkg, "boot_reclaim");
+        }
+    }
+
+    /// /proc/meminfo MemAvailable（kB）。Android 内核普遍存在；读不到 → None
+    /// （水位丢弃跳过，保守不动作）。
+    fn mem_available_kb() -> Option<u64> {
+        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                return rest.split_whitespace().next()?.parse().ok();
+            }
+        }
+        None
+    }
+
+    /// uid 全部进程 RSS 合计（kB）：/proc/<pid>/statm 第二字段（resident pages）× 4KB
+    /// （arm64 固定 page size；读失败按 0——排序退化纯 LRU，安全）
+    fn uid_rss_kb(uid: u32) -> u64 {
+        let mut total = 0u64;
+        for pid in freezer::uid_pids(uid) {
+            if let Ok(s) = std::fs::read_to_string(format!("/proc/{}/statm", pid)) {
+                if let Some(res) = s.split_whitespace().nth(1) {
+                    if let Ok(pages) = res.parse::<u64>() {
+                        total += pages.saturating_mul(4);
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    /// 包是否整体处于 cache/empty 档（所有存活进程 oom_score_adj ≥ 缓存档阈值 900）。
+    /// 读不到（无进程/未知 uid/adj 不可读）→ false（不回收，保守）。
+    fn pkg_is_cache_adj(pkg: &str) -> bool {
+        let Some(uid) = freezer::pkg_uid(pkg) else {
+            return false;
+        };
+        let pids = freezer::uid_pids(uid);
+        if pids.is_empty() {
+            return false;
+        }
+        pids.iter().all(|pid| {
+            std::fs::read_to_string(format!("/proc/{}/oom_score_adj", pid))
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .map(|adj| adj >= 900)
+                .unwrap_or(false)
+        })
+    }
+
+    /// sys.boot_completed 属性（getprop；daemon root 可读）。
+    /// 失败 → false（不安排回收，保守；下轮重试）。
+    fn boot_completed() -> bool {
+        std::process::Command::new("getprop")
+            .arg("sys.boot_completed")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+            .unwrap_or(false)
     }
 
     // ---------------- 决策 ----------------
@@ -1446,5 +1741,127 @@ mod tests {
         e5.frozen.insert("com.gate.app".to_string(), Instant::now());
         e5.on_wakeup("com.gate.app", "service", "?");
         assert!(!e5.frozen.contains_key("com.gate.app"), "service 源不受门控");
+    }
+
+    /// v0.4.52-l3：冻结超时丢弃——过期判定（纯逻辑）+ 失败安全路径。
+    /// 真实 cgroup/SIGKILL 由真机验证；此处覆盖状态机与护栏。
+    #[test]
+    fn frozen_timeout_discard_v052() {
+        let mut e = EngineState::default();
+        e.policy.enabled = true;
+        e.policy.discard_frozen_timeout_seconds = 100;
+
+        // ① 过期判定：刚冻结（未超时）不在候选；150s 前冻结（超时）命中
+        e.frozen.insert("com.fresh.app".to_string(), Instant::now());
+        e.frozen.insert(
+            "com.stale.app".to_string(),
+            Instant::now() - Duration::from_secs(150),
+        );
+        let expired = e.expired_discard_candidates(Instant::now());
+        assert_eq!(expired, vec!["com.stale.app"], "仅超时项命中");
+
+        // ② timeout=0（关闭）→ 恒无候选
+        e.policy.discard_frozen_timeout_seconds = 0;
+        assert!(
+            e.expired_discard_candidates(Instant::now()).is_empty(),
+            "关闭丢弃不产生候选"
+        );
+
+        // ③ 失败安全：包表未知（测试环境无 packages.list）→ 清理记录、不计数、无 panic
+        e.policy.discard_frozen_timeout_seconds = 100;
+        let ok = e.discard_pkg("com.stale.app", "frozen_timeout");
+        assert!(!ok, "包表未知 → 丢弃失败");
+        assert!(!e.frozen.contains_key("com.stale.app"), "记录已清理");
+        assert_eq!(e.discard_ops, 0, "失败不计数");
+        assert_eq!(e.discard_frozen_timeout, 0);
+
+        // ④ 护栏拒绝：白名单包即使超时也不动（记录保留 + 不计数）
+        e.frozen.insert("com.whitelisted.app".to_string(), Instant::now());
+        e.policy.whitelist = vec!["com.whitelisted.app".to_string()];
+        let ok2 = e.discard_pkg("com.whitelisted.app", "frozen_timeout");
+        assert!(!ok2, "护栏拒绝");
+        assert!(e.frozen.contains_key("com.whitelisted.app"), "白名单保留");
+        assert_eq!(e.discard_ops, 0);
+    }
+
+    /// v0.4.52-l3：内存水位丢弃——候选排序（LRU 最旧优先）+ 护栏判定。
+    #[test]
+    fn mem_watermark_discard_v052() {
+        let mut e = EngineState::default();
+        e.policy.enabled = true;
+
+        // ① LRU 排序：最旧先丢（RSS 测试环境读不到按 0，排序退化为纯 LRU）
+        e.frozen.insert("com.new.app".to_string(), Instant::now());
+        e.frozen.insert(
+            "com.mid.app".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+        e.frozen.insert(
+            "com.old.app".to_string(),
+            Instant::now() - Duration::from_secs(600),
+        );
+        let order = e.sort_discard_candidates();
+        assert_eq!(order, vec!["com.old.app", "com.mid.app", "com.new.app"], "LRU 最旧优先");
+
+        // ② 护栏：白名单 / exempt / critical / 系统组件 / VPN / IMPORTANT / 前台 → 不可丢弃
+        e.policy.whitelist = vec!["com.wl.app".to_string()];
+        e.policy.apps.insert(
+            "com.imp.app".to_string(),
+            crate::policy::AppPolicy {
+                mode: AppMode::Important,
+                ..Default::default()
+            },
+        );
+        e.policy.apps.insert(
+            "com.exempt.app".to_string(),
+            crate::policy::AppPolicy {
+                mode: AppMode::Exempt,
+                ..Default::default()
+            },
+        );
+        e.last_focus = Some("com.fg.app".to_string());
+        e.system_apps.insert("com.sys.app".to_string());
+        assert!(e.discard_ineligible("com.wl.app"), "白名单");
+        assert!(e.discard_ineligible("com.imp.app"), "IMPORTANT");
+        assert!(e.discard_ineligible("com.exempt.app"), "per-app exempt");
+        assert!(e.discard_ineligible("com.android.systemui"), "critical 内置");
+        assert!(e.discard_ineligible("com.sys.app"), "动态系统组件");
+        assert!(e.discard_ineligible("com.fg.app"), "当前前台");
+        assert!(!e.discard_ineligible("com.normal.app"), "标准档可丢弃");
+    }
+
+    /// v0.4.52-l3：开机缓存回收——状态机（延迟到期执行一次 + 无候选安全跳过）。
+    /// cache 档 adj 判定依赖真实 /proc（测试环境恒 false → 候选恒空，验证安全跳过）。
+    #[test]
+    fn boot_reclaim_v052() {
+        let mut e = EngineState::default();
+        e.policy.enabled = true;
+        e.policy.discard_boot_reclaim = true;
+        e.policy.discard_boot_reclaim_delay_seconds = 0;
+
+        // ① boot_completed 未检测到 → 不执行
+        e.boot_completed_at = None;
+        assert!(!e.boot_reclaim_done);
+        e.tick_count = 100;
+        // tick 中 getprop 在测试环境失败 → boot_completed_at 保持 None → 不安排
+        e.tick();
+        assert!(e.boot_completed_at.is_none(), "getprop 失败不安排回收");
+
+        // ② 手动置 boot_completed_at（模拟已检测到）→ 延迟 0 到期 → tick 执行一次
+        e.boot_completed_at = Some(Instant::now() - Duration::from_secs(1));
+        e.boot_reclaim_candidates = vec![
+            ("com.oldfrozen.app".to_string(), 10001),
+            ("com.android.settings".to_string(), 10002), // critical 内置，护栏排除
+        ];
+        e.tick_count = 100; // %100==0 节拍（boot 检测段：boot_completed_at 已置 → 跳过检测，直接走执行段）
+        e.tick();
+        assert!(e.boot_reclaim_done, "tick 执行后标记完成");
+        assert_eq!(e.discard_ops, 0, "测试环境无 cache 档候选，零丢弃");
+
+        // ③ 只执行一次（done=true 后不再执行）
+        let before = e.discard_ops;
+        e.tick_count = 200;
+        e.tick();
+        assert_eq!(e.discard_ops, before, "重复 tick 不重复执行");
     }
 }

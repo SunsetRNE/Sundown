@@ -12,7 +12,7 @@ SOCK_PATH="$SUNDOWN_DIR/sundownd.sock"
 UPDATE_DIR="$SUNDOWN_DIR/update"
 PENDING_DIR="$UPDATE_DIR/pending"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.4.51-l3"
+VERSION="0.4.52-l3"
 
 # ---------- 工具函数 ----------
 
@@ -133,6 +133,13 @@ cmd_status() {
             else
                 echo "  L2b hook 桥:   ⏸ 未上线（bridge.dex/伴生库未交付或引导中；查 logcat SundownDex/SundownHook）"
             fi
+            # v0.4.52-l3 超时丢弃观测面（discard_ops / discard_reasons 嵌套对象 / 配置超时）
+            dops="$(printf '%s' "$sock_json" | json_int_in discard_ops)"
+            dft="$(printf '%s' "$sock_json" | json_int_in frozen_timeout)"
+            dmw="$(printf '%s' "$sock_json" | json_int_in mem_watermark)"
+            dbr="$(printf '%s' "$sock_json" | json_int_in boot_reclaim)"
+            dtimeout="$(printf '%s' "$sock_json" | json_int_in discard_timeout_s)"
+            echo "  超时丢弃:     累计 ${dops:-0} 次（超时:${dft:-0} / 水位:${dmw:-0} / 开机:${dbr:-0}；配置 ${dtimeout:-1800}s）"
         fi
         return 0
     fi

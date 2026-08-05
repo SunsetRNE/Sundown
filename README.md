@@ -91,7 +91,7 @@ Sundown/
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
-## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（**v0.4.51-l3**：Recents 任务保护实测补丁——o-stop 路径 + killLocked 双保险 + 候选池 adj=-1000 根治；AStop 差距矩阵 P0/P1/P2 全阶段完成；发布默认观望模式 `enabled=false`，冻结功能待用户确认后开启）
+## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（**v0.4.52-l3**：超时丢弃（Timeout Discard）落地——冻结超时/内存水位/开机回收三机制 + 安全护栏 + 观测面；AStop 差距矩阵 P0/P1/P2 全阶段完成；发布默认观望模式 `enabled=false`，冻结功能待用户确认后开启）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
@@ -206,12 +206,19 @@ Sundown/
   - 实测校准：ColorOS 滑卡/清 Recents 不走 ATMS.removeTask，实锤 o-stop(40)（OplusProcessManager）→ force-stop 直接杀进程
   - 根治机制：候选池 app adj=-1000（OOM 锁定）→ force-stop 视同 persistent 跳杀；killLocked 为候选池同步窗口期双保险（onTaskRemove ATMS+TaskSupervisor 双线 + onKillProcess CachedAppOptimizer + onKillLocked ProcessRecord#killLocked + reason 白名单）
   - 部署：sundownd release 56 + dex 6a72d93 六位一体闭环
+- [x] 超时丢弃三机制（v0.4.52-l3，行为概念《超时丢弃》落地）：
+  - 冻结超时丢弃（frozen_timeout_seconds 缺省 1800=30min，0=关闭）：冻结集条目超时且期间零活跃 → SIGKILL 整 uid 释放内存；"零活跃"口径 = 任何实际解冻重置超时，节流/门控拦截的唤醒不续期（防 FCM 风暴无限续期）
+  - 内存水位丢弃（mem_watermark_mb 缺省 512，0=关闭）：MemAvailable 低于水位 → 按 LRU（最旧优先）+ RSS 占用排序丢弃直到恢复（每 6s 采样）
+  - 开机缓存回收（boot_reclaim=true + delay 120s）：boot_completed 后延迟扫描"上次会话 Sundown 冻结集 ∪ 当前冻结集"中 oom_score_adj ≥ 900 的 cache 档包 → 丢弃（"开机高缓存"主动回收，只执行一次）
+  - 安全护栏：只作用于 Sundown 冻结集；白名单/exempt/IMPORTANT/critical/系统组件/VPN/前台一律不参与（discard_ineligible 判定面）；丢弃前解冻写 0 防内核残留 + cgroup.procs 归属核验防 pid 复用；丢弃=终态不可撤销
+  - 观测：事件 discard pkg=... reason=... + JSONL 审计 + status discard_ops/discarded_packages/discard_reasons/discard_timeout_s（契约只增不改）+ sunctl status 文本行
+  - 测试 46/46（discard_parse_v052 / frozen_timeout_discard_v052 / mem_watermark_discard_v052 / boot_reclaim_v052）；sundownd release 57
 
 ---
 
 # 行为概念：墓碑行为对齐之超时丢弃（Timeout Discard）
 
-> 状态：📋 概念定稿（v0.4.52-l3 实施候选）｜ 决策：SunsetREN
+> 状态：✅ 已实施（v0.4.52-l3，sundownd release 57；46/46 测试通过，待真机 enable=true 验证）｜ 决策：SunsetREN
 > 一句话：**墓碑该做的不是"永远冻着"，而是"冻住 → 过期 → 丢弃 → 释放内存"。**
 
 ## 0. 痛点（真实用户感受，本项目立项动机）
@@ -294,8 +301,8 @@ Sundown/
 ---
 
 ## 待办（后置）
-- [ ] **超时丢弃实现（v0.4.52-l3）**：冻结超时丢弃（frozen_timeout_seconds 缺省 1800）+ 内存水位丢弃（mem_watermark_mb 缺省 512）+ 开机缓存回收（boot_reclaim）——设计见上文《行为概念：墓碑行为对齐之超时丢弃》
-- [ ] v0.4.51-l3 刷入设备 + enable=true 实机验证（冻结/解冻正向链路 + frozen.state 持久化对账 + keep_network enable 场景 + 相机/Recents 保护实测）
+- [x] ~~超时丢弃实现（v0.4.52-l3）~~ ✅ 已落地：冻结超时丢弃（frozen_timeout_seconds 缺省 1800）+ 内存水位丢弃（mem_watermark_mb 缺省 512）+ 开机缓存回收（boot_reclaim）——设计见上文《行为概念：墓碑行为对齐之超时丢弃》
+- [ ] v0.4.52-l3 刷入设备 + enable=true 实机验证（冻结/解冻正向链路 + frozen.state 持久化对账 + keep_network enable 场景 + 相机/Recents 保护实测 + 超时丢弃三机制观测）
 - [ ] 冷启动压测 ≥10 轮无崩溃（当前 11 轮 ✅，续测）
 - [ ] 定位活动豁免 dex 侧 AppOps 判定（ExemptMonitor.java 扩展 loc 字段上报，走 L2 热更新路线）
 - [ ] 完整热更新闭环打磨（WebUI 检测新版 → 下载 → staged → 重启激活 → 回滚的端到端体验）

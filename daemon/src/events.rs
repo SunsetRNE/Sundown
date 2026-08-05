@@ -49,6 +49,7 @@ pub enum EvAction {
     Close,    // 退出/force-stop
     Freeze,   // 冻结
     Unfreeze, // 解冻
+    Discard,  // 丢弃（v0.4.52-l3 超时丢弃终态：SIGKILL 释放内存）
     Delay,    // grace 计时等待
     Exempt,   // 豁免决策
     Policy,   // 策略加载/重载
@@ -62,6 +63,7 @@ impl EvAction {
             EvAction::Close => "close",
             EvAction::Freeze => "freeze",
             EvAction::Unfreeze => "unfreeze",
+            EvAction::Discard => "discard",
             EvAction::Delay => "delay",
             EvAction::Exempt => "exempt",
             EvAction::Policy => "policy",
