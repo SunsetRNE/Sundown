@@ -55,6 +55,20 @@ public final class DefenseHooks implements HookEngine {
     private static final String PESR = "com.android.server.am.ProcessRecord$ProcessErrorStateRecord";
     private static final String CACHED_APP_OPTIMIZER = "com.android.server.am.CachedAppOptimizer";
     private static final String ACTIVITY_RECORD = "com.android.server.wm.ActivityRecord";
+    // v0.4.51-l3：Recents 任务保护（对齐 AStop TaskHooks）——removeTask 移除拦截
+    // 实测校准（2026-08-05）：AStop hook 目标是 ActivityTaskManagerService#removeTask
+    // （Recents 滑卡链路 AMS.removeTask(binder) → ATMS.removeTask → 内部清理）；
+    // 仅 hook ActivityTaskSupervisor 在 ColorOS 上匹配不到重载（hookAllOverloads=0）。
+    private static final String ACTIVITY_TASK_MANAGER = "com.android.server.wm.ActivityTaskManagerService";
+    private static final String TASK_SUPERVISOR = "com.android.server.wm.ActivityTaskSupervisor";
+    // 2026-08-05 定位：activity_task binder 分发器（AIDL Stub.onTransact 观测事务 code）
+    private static final String ACTIVITY_TASK_STUB = "android.app.IActivityTaskManager$Stub";
+    // 2026-08-05 定位：activity（AMS）binder 分发器 + TaskPersister（Recents 持久化清理）
+    private static final String ACTIVITY_STUB = "android.app.IActivityManager$Stub";
+    private static final String TASK_PERSISTER = "com.android.server.wm.TaskPersister";
+    // v0.4.51-l3 实测补丁：ColorOS 滑卡/清 Recents 走 o-stop(40) 直接杀进程（非 removeTask）——
+    // 任务移除是杀进程后果；对齐 AStop hookProcessRecordKill（ProcessRecord#killLocked）
+    private static final String PROCESS_RECORD = "com.android.server.am.ProcessRecord";
     // v0.4.26-l3：ColorOS HANS 防御（对齐 AStop RomCompatHooks，语义裁剪为冻结集防御）
     private static final String HANS_MANAGER = "com.android.server.am.OplusHansManager";
     private static final String HANS_PROXY = "com.android.server.hans.OplusHansProxyManager";
@@ -218,6 +232,32 @@ public final class DefenseHooks implements HookEngine {
         //     实机校准：PJD110/Android16 若方法名/类名不符 → hook 失败留痕不崩溃（失败安全）。
         hookAllOverloads(findClass(OPLUS_DEEPSLEEP), "isNeedUidDisconnectNetwork",
                 callback("onNeedUidDisconnect"));
+
+        // 12. v0.4.51-l3 P2 收尾：Recents 任务保护（对齐 AStop TaskHooks hookRecentsTaskDefense）
+        //     —— 候选池 app 的 Task 不被 removeTask 移除（防"清后台/系统自动清任务"杀被管 app，
+        //     与事故① remove task 杀冻结 app 同源；AStop hiddenTaskProtectedPackages 语义）
+        //     主入口：ActivityTaskManagerService#removeTask（Recents 滑卡 binder 链实测路径）；
+        //     ActivityTaskSupervisor#removeTask 兜底（内部调用重载，ColorOS 上可能无匹配）。
+        hookAllOverloads(findClass(ACTIVITY_TASK_MANAGER), "removeTask", callback("onTaskRemove"));
+        hookAllOverloads(findClass(TASK_SUPERVISOR), "removeTask", callback("onTaskRemove"));
+        // 2026-08-05 定位：清除全部入口观测（AOSP removeAllVisibleRecentTasks；ColorOS 路径待实测）
+        hookAllOverloads(findClass(ACTIVITY_TASK_MANAGER), "removeAllVisibleRecentTasks", callback("onRemoveAllVisible"));
+        hookAllOverloads(findClass(TASK_SUPERVISOR), "removeAllVisibleRecentTasks", callback("onRemoveAllVisible"));
+
+        // 13. v0.4.51-l3 P2 收尾：killProcess 拦截（对齐 AStop hookBinderFreezeDefense）
+        //     —— CachedAppOptimizer#killProcess（OOM/内存压力杀进程路径）对候选池内
+        //     pid/ProcessRecord → 拦截不杀（OOM 保护 -1000 的双保险；用户强停走
+        //     forceStop 不常经此路径，被管 app 墓碑语义下拦截可接受）
+        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "killProcess",
+                callback("onKillProcess"));
+
+        // 2026-08-05 定位：activity_task binder 事务 code 观测（不拦截，采样日志）
+        // —— Recents 移除任务未触发 ATMS.removeTask/removeAllVisibleRecentTasks hook，
+        //   需确认 binder 层实际到达的事务（对照 AIDL 找真实方法入口）
+        hookAllOverloads(findClass(TASK_PERSISTER), "removeTask", callback("onTaskPersisterRemove"));
+        // v0.4.51-l3 实测补丁：ProcessRecord#killLocked 拦截（ColorOS 滑卡 o-stop 杀进程根治；
+        // 对齐 AStop hookProcessRecordKill——reason 白名单内且属候选池 → 不杀）
+        hookAllOverloads(findClass(PROCESS_RECORD), "killLocked", callback("onKillLocked"));
 
         // 启动冻结集扫描线程（install 一次；uninstall 停）
         if (!scannerThread.isAlive()) {
@@ -644,6 +684,167 @@ public final class DefenseHooks implements HookEngine {
         return cb.invokeOriginalOrDefault();
     }
 
+    // ---------------- v0.4.51-l3 P2 收尾：Recents 任务保护 + killProcess 拦截 ----------------
+
+    /** Recents 任务保护：ActivityTaskSupervisor#removeTask(taskId) 目标是候选池 app 的任务 → 拦截。
+     *  对齐 AStop TaskHooks hookRecentsTaskDefense（hiddenTaskProtectedPackages 语义）：
+     *  候选池 app 的 Task 不被移除（防"清后台/系统自动清任务"杀被管 app，
+     *  与事故① remove task 杀冻结 app 同源）；用户滑掉任务同样保护（墓碑语义）。
+     *  taskId → uid 判定走 taskUid（getTaskById → getTopActivity → getUid），失败放行。 */
+    public Object onTaskRemove(MethodCallback cb) {
+        try {
+            // 调试日志（2026-08-05 定位）：打印触发与判定链每步结果，锁定 ColorOS 真实路径
+            StringBuilder dbg = new StringBuilder("removeTask 触发: " + cb.target.getName());
+            for (Object a : cb.args) {
+                if (a == null) { dbg.append(" [null]"); continue; }
+                if (a instanceof Number) { dbg.append(" [num=").append(a).append(']'); continue; }
+                dbg.append(" [obj=").append(a.getClass().getSimpleName()).append(']');
+            }
+            Log.i(TAG, dbg.toString());
+            for (Object a : cb.args) {
+                if (a instanceof Number) {
+                    int taskId = ((Number) a).intValue();
+                    if (taskId <= 0) continue;
+                    // 非静态方法 args[0] = thisObject（lsplant 约定）→ ActivityTaskManagerService 实例
+                    Object supervisor = cb.args.length > 0 ? cb.args[0] : null;
+                    Object task = null;
+                    try {
+                        task = callMethod(supervisor, "getTaskById", Integer.valueOf(taskId));
+                    } catch (Throwable ignored) {
+                    }
+                    if (task == null && supervisor != null) {
+                        Object ts = readField(supervisor, "mTaskSupervisor");
+                        if (ts != null) {
+                            try {
+                                task = callMethod(ts, "getTaskById", Integer.valueOf(taskId));
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    }
+                    Integer uid = (task != null) ? taskObjUid(task) : null;
+                    Log.i(TAG, "removeTask 判定: taskId=" + taskId + " task=" + (task != null ? "ok" : "null")
+                            + " uid=" + uid);
+                    if (uid != null && uid.intValue() >= 10000 && candidate(uid.intValue())) {
+                        Log.i(TAG, "removeTask 拦截（候选池任务 taskId=" + taskId + " uid=" + uid + "）");
+                        return cb.defaultReturn();
+                    }
+                } else {
+                    // removeTask(Task) 等对象重载：Task.getTopActivity → ActivityRecord.getUid
+                    Integer uid = taskObjUid(a);
+                    Log.i(TAG, "removeTask 对象判定: " + a.getClass().getSimpleName() + " uid=" + uid);
+                    if (uid != null && uid.intValue() >= 10000 && candidate(uid.intValue())) {
+                        Log.i(TAG, "removeTask 拦截（候选池任务对象 uid=" + uid + "）: " + cb.target.getName());
+                        return cb.defaultReturn();
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "removeTask 拦截异常（放行）: " + t);
+        }
+        return cb.invokeOriginalOrDefault();
+    }
+
+    /** 清除全部观测（2026-08-05 定位）：removeAllVisibleRecentTasks——先确认 ColorOS 清除全部是否走此入口 */
+    public Object onRemoveAllVisible(MethodCallback cb) {
+        Log.i(TAG, "removeAllVisibleRecentTasks 触发: " + cb.target.getName());
+        return cb.invokeOriginalOrDefault();
+    }
+
+    // 2026-08-05 定位：ATMS binder 事务 code 采样（不拦截；同 code 每 2s 一条，异 code 即时）
+    private static int lastTransactCode = -1;
+    private static long lastTransactTs = 0;
+
+    public Object onAtmsTransact(MethodCallback cb) {
+        try {
+            if (cb.args.length > 1 && cb.args[1] instanceof Number) {
+                Log.i(TAG, "activity_task binder code=" + ((Number) cb.args[1]).intValue());
+            }
+        } catch (Throwable ignored) {
+        }
+        return cb.invokeOriginalOrDefault();
+    }
+
+    /** 2026-08-05 定位：AMS binder code 全量（定位窗口用，操作后即撤） */
+    public Object onAmsTransact(MethodCallback cb) {
+        try {
+            if (cb.args.length > 1 && cb.args[1] instanceof Number) {
+                Log.i(TAG, "activity binder code=" + ((Number) cb.args[1]).intValue());
+            }
+        } catch (Throwable ignored) {
+        }
+        return cb.invokeOriginalOrDefault();
+    }
+
+    /** 2026-08-05 定位：TaskPersister.removeTask 观测（Recents 记录清理持久化层） */
+    public Object onTaskPersisterRemove(MethodCallback cb) {
+        Log.i(TAG, "TaskPersister.removeTask 触发: " + cb.target.getName());
+        return cb.invokeOriginalOrDefault();
+    }
+
+    /** v0.4.51-l3 实测补丁：ProcessRecord#killLocked 拦截——候选池 app 且 reason 命中保护名单 → 不杀。
+     *  2026-08-05 实锤：ColorOS 滑卡/清 Recents = o-stop(40) 杀进程（非 removeTask，任务移除是
+     *  杀进程后果）；对齐 AStop hookProcessRecordKill（killLocked + reason 白名单）。
+     *  uid 判定：ProcessRecord.uid 直字段 → getPid → /proc 兜底。 */
+    public Object onKillLocked(MethodCallback cb) {
+        try {
+            Object self = cb.args.length > 0 ? cb.args[0] : null;
+            Integer uid = extractUid(self);
+            if (uid == null && self != null) {
+                Object pid = callMethod(self, "getPid");
+                if (pid instanceof Number) uid = pidUid(((Number) pid).intValue());
+            }
+            String reason = null;
+            for (Object a : cb.args) {
+                if (a instanceof String) { reason = (String) a; break; }
+            }
+            if (uid != null && uid.intValue() >= 10000 && candidate(uid.intValue())
+                    && isProtectedKillReason(reason)) {
+                Log.i(TAG, "killLocked 拦截（候选池 uid=" + uid + " reason=" + reason + "）");
+                return cb.defaultReturn(); // void → null：不执行杀进程
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "killLocked 拦截异常（放行）: " + t);
+        }
+        return cb.invokeOriginalOrDefault();
+    }
+
+    /** killLocked reason 保护名单（对齐 AStop hookProcessRecordKill 语义 + ColorOS o-stop） */
+    private static boolean isProtectedKillReason(String reason) {
+        if (reason == null) return false;
+        String r = reason.toLowerCase();
+        return r.contains("remove task") || r.contains("o-stop") || r.contains("ostop")
+                || r.contains("graceful kill") || r.contains("stop user")
+                || r.contains("force stop") || r.contains("remove user");
+    }
+
+    /** killProcess 拦截：CachedAppOptimizer#killProcess（OOM/内存压力杀进程路径）目标是候选池内
+     *  pid/ProcessRecord → 拦截不杀。对齐 AStop hookBinderFreezeDefense：
+     *  OOM 保护 -1000 的双保险（防系统把进程杀了再清 Task，墓碑失效）。
+     *  用户强停走 forceStop 不常经此路径，被管 app 墓碑语义下拦截可接受。 */
+    public Object onKillProcess(MethodCallback cb) {
+        try {
+            for (Object a : cb.args) {
+                if (a == null) continue;
+                if (a instanceof Number) {
+                    int v = ((Number) a).intValue();
+                    if (v > 0 && pidCandidate(v)) {
+                        Log.i(TAG, "killProcess 拦截（候选池 pid=" + v + "）");
+                        return cb.defaultReturn();
+                    }
+                } else {
+                    Integer pid = processPid(a);
+                    if (pid != null && pid.intValue() > 0 && pidCandidate(pid.intValue())) {
+                        Log.i(TAG, "killProcess 拦截（候选池 ProcessRecord pid=" + pid + "）");
+                        return cb.defaultReturn();
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "killProcess 拦截异常（放行）: " + t);
+        }
+        return cb.invokeOriginalOrDefault();
+    }
+
     private static boolean intArrayContains(int[] arr, int v) {
         for (int x : arr) {
             if (x == v) return true;
@@ -737,6 +938,75 @@ public final class DefenseHooks implements HookEngine {
         } catch (Throwable ignored) {
             return null;
         }
+    }
+
+    /** 反射调用方法（低频事件逐次反射可接受；异常返回 null）——先 public getMethod，再声明方法兜底 */
+    private static Object callMethod(Object obj, String name, Object... args) {
+        if (obj == null) return null;
+        try {
+            Class<?>[] pts = new Class<?>[args.length];
+            for (int i = 0; i < args.length; i++) pts[i] = args[i].getClass();
+            Method m = obj.getClass().getMethod(name, pts);
+            return m.invoke(obj, args);
+        } catch (Throwable ignored) {
+        }
+        try {
+            for (Method m : obj.getClass().getDeclaredMethods()) {
+                if (!m.getName().equals(name) || m.getParameterTypes().length != args.length) continue;
+                m.setAccessible(true);
+                return m.invoke(obj, args);
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /** v0.4.51-l3：taskId → 属主 uid——ActivityTaskManagerService.getTaskById → Task.getTopActivity()
+     *  → ActivityRecord.getUid()（对齐 AStop TaskHooks 的 task→package 判定链；失败返回 null 放行）
+     *  回落链：ATMS.getTaskById → mTaskSupervisor.getTaskById（ColorOS 方法名/位置差异兜底） */
+    private static Integer taskUid(Object supervisor, int taskId) {
+        try {
+            if (supervisor == null) return null;
+            Object task = callMethod(supervisor, "getTaskById", Integer.valueOf(taskId));
+            if (task == null) {
+                Object ts = readField(supervisor, "mTaskSupervisor");
+                if (ts != null) task = callMethod(ts, "getTaskById", Integer.valueOf(taskId));
+            }
+            if (task == null) return null;
+            return taskObjUid(task);
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /** v0.4.51-l3：Task 对象 → 属主 uid（Task.getTopActivity → ActivityRecord.getUid；
+     *  覆盖 removeTask(Task) 等对象重载；失败返回 null 放行） */
+    private static Integer taskObjUid(Object task) {
+        try {
+            if (task == null) return null;
+            Object top = callMethod(task, "getTopActivity");
+            if (top == null) return null;
+            Object uid = callMethod(top, "getUid");
+            if (uid instanceof Number) return Integer.valueOf(((Number) uid).intValue());
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /** v0.4.51-l3：ProcessRecord 提取 pid——getPid() 方法 → mPid 字段 → pid 字段
+     *  （对齐 AStop killHook 提取链；失败返回 null 放行） */
+    private static Integer processPid(Object rec) {
+        if (rec == null) return null;
+        try {
+            Object v = callMethod(rec, "getPid");
+            if (v instanceof Number) return Integer.valueOf(((Number) v).intValue());
+        } catch (Throwable ignored) {
+        }
+        Object f = readField(rec, "mPid");
+        if (f instanceof Number) return Integer.valueOf(((Number) f).intValue());
+        f = readField(rec, "pid");
+        if (f instanceof Number) return Integer.valueOf(((Number) f).intValue());
+        return null;
     }
 
     private Method callback(String name) {
