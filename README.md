@@ -9,10 +9,10 @@
 
 | 层 | 资产 | 职责 | 更新方式 |
 |---|---|---|---|
-| L0 | `sundownd` | 调度大脑：冻结执行、策略决策、socket 服务 | staged 更新，看门狗重启 |
+| L0 | `sundownd` | 调度大脑：冻结执行、策略决策、超时丢弃、socket 服务 | staged 更新，看门狗重启 |
 | L1 | `libsunprobe.so` | Zygisk 探针桩：注入 system_server，socket 收发 + dex 加载 | 软重启 zygote |
-| L2 | `probe.dex` | 探针逻辑：LSPlant Java hook（焦点/豁免/Binder） | socket 推送，ClassLoader 热切换 |
-| L3 | conf/*.toml | 策略与豁免配置 | inotify 热加载，完全无感 |
+| L2 | `probe.dex` | 探针逻辑：LSPlant Java hook（焦点/豁免/防御/唤醒/断网） | socket 推送，ClassLoader 热切换 |
+| L3 | conf/*.toml | 策略与豁免配置（policy/action 双文件） | inotify 热加载，完全无感 |
 
 ## 目录结构
 
@@ -23,17 +23,25 @@ Sundown/
 ├── docs/
 │   ├── sunctl-spec.md      # sunctl CLI 命令规范与退出码契约
 │   ├── l2-plan.md          # L2 推进计划（DAC 裁决 / 协议 / 热切换，权威副本）
-│   └── l2b-plan.md         # L2b 推进计划（LSPlant 集成 / hook 点 / 事件上行，权威副本）
-├── daemon/                 # sundownd Rust 源码（L0 最小实现）
+│   ├── l2b-plan.md         # L2b 推进计划（LSPlant 集成 / hook 点 / 事件上行，权威副本）
+│   └── l3-plan.md          # L3 推进计划（策略引擎 / 冻结执行 / 豁免决策，权威副本）
+├── daemon/                 # sundownd Rust 源码（L0，仅依赖 libc）
 │   ├── Cargo.toml          # 仅依赖 libc；release 体积优化
 │   ├── README.md           # 构建/部署/staged 更新约定/冒烟测试
 │   └── src/
-│       ├── main.rs         # 入口：信号、ready 标记、主循环
+│       ├── main.rs         # 入口：信号、ready 标记、主循环、单实例守护
 │       ├── paths.rs        # 路径与版本常量（RELEASE_NO 只增不改）
-│       ├── logging.rs      # 极简日志（sundownd.log + stdout）
-│       ├── state.rs        # 共享状态 + status JSON（兼容 sunctl-spec）
-│       ├── sock.rs         # Unix socket 控制面（行协议）
-│       └── config.rs       # inotify conf/ 热加载（L3 接入点）
+│       ├── logging.rs      # 极简日志（sundownd.log + stdout，本地时区）
+│       ├── state.rs        # 共享状态 + status JSON（契约只增不改）
+│       ├── sock.rs         # Unix socket 控制面（行协议 + 事件订阅）
+│       ├── config.rs       # inotify conf/ 热加载（L3 接入点）
+│       ├── toml.rs         # 手写 TOML 子集解析器（零依赖）
+│       ├── policy.rs       # Policy 模型 + 解析/校验/重建（失败保留旧表）
+│       ├── preset.rs       # action.toml 情景预设（内存切换不动磁盘）
+│       ├── freezer.rs      # cgroup 冻结执行 + SIGSTOP 兜底 + OOM 锁定 + 归属核验
+│       ├── engine.rs       # 策略引擎：事件消费 + 进程/包表 + grace/冷却/节流/门控 + tick
+│       ├── events.rs       # 结构化事件缓冲（环形 256）+ JSONL 审计落盘
+│       └── network.rs      # 网络统计（netd eBPF map + xt_qtaguid + /proc 多源）
 ├── probe/                  # libsunprobe.so C++ 源码（L1 探针桩）
 │   ├── CMakeLists.txt      # NDK 构建（arm64-v8a，-DPROBE_BUILD_HASH 注入）
 │   ├── README.md           # L1 定位铁律 / hash 闭环 / L2 契约 / SELinux 备忘
@@ -83,7 +91,7 @@ Sundown/
 - CI 打包 job 内置防呆校验：三处版本不一致则构建失败
 - Nightly 渠道 asset 名随版本变化，CI 自动清理旧 assets，页面永远只有最新一个 zip
 
-## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（v0.4.23-l3：per-app 网络豁免位 + 冻结中网络唤醒——对齐 AStop force_network_exemption / allow_network_wakeup）
+## 当前状态：L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅（**v0.4.51-l3**：Recents 任务保护实测补丁——o-stop 路径 + killLocked 双保险 + 候选池 adj=-1000 根治；AStop 差距矩阵 P0/P1/P2 全阶段完成；发布默认观望模式 `enabled=false`，冻结功能待用户确认后开启）
 - [x] 命名规范定稿（NAMING.md）
 - [x] 模块骨架改名（AStop/Cerberus → Sundown 全套脚本）
 - [x] Cerberus 旧资产迁移逻辑（post-fs-data.sh）
@@ -165,11 +173,136 @@ Sundown/
   - 网络豁免 `keep_network`（全局 `[whitelist]` + per-app `[apps."pkg"]`，缺省 true）：`NetSampler::is_active_any` 窗口内流量增量 >0 即活跃（内核侧统计——进程被 cgroup 冻结后 rx 仍计数）；decide_leave 豁免链新增 `network_exempt`、tick 到期二次校验新增 `tick_network_exempt`——VPN/推送/下载/通话类网络敏感 app 有流量在跑永不进 grace
   - 冻结中网络唤醒（对齐 AStop allow_network_wakeup）：tick 每 10 拍（≈3s）扫描 frozen 表中 keep_network 开启者，检测到网络活动 → 解冻（reason=network_wakeup，进冷却防抖）——防"冻死断流"（隧道心跳/外部发包仍被内核计数）
   - WebUI v2.4：策略页新增网络豁免开关；policy.toml 模板补 keep_network 文档（全局 + per-app）
+- [x] P0 防御体系五件套（v0.4.24~v0.4.27-l3，对齐 AStop 防御链）：
+  - v0.4.24：内置 critical 名单硬豁免 + L2 dex ANR 隐身（firstPids 过滤/SIGQUIT 豁免/errorState 过滤）+ 系统 freezer 防双冻结 + Activity 保护（destroyImmediately/releaseSomeActivities）
+  - v0.4.25：热切换换代停旧代全部线程（ExemptMonitor stop/join + eventThread interrupt）——修实机热切换后旧代线程在已释放 dex 内存上解释执行致 system_server SIGSEGV
+  - v0.4.26：ColorOS HANS/Freezer 防御适配——freezeAppAsync*LSP 防双冻结（实机校准 ColorOS 改名）+ HANS unfreeze 解冻防御 + isProxyed/GMS 限制禁用
+  - v0.4.27：HANS 防御误伤修复——frozen-sync 冻结集归属协议（daemon 广播 Sundown 冻结 uid 集 + dex 双源判定）+ DefenseHooks public 可见性修复
+- [x] keep_network 数据源修复（v0.4.28-l3）：netd map pin 文件解析源（open pin 文件非真 map fd 必然 EINVAL）+ dex 自愈换代延迟 3-10s（防部署触发 LSPlant SetClassStatus 崩溃）
+- [x] 对账解冻归属修复 + 冻结集持久化 + 网络源启动自检（v0.4.29-l3）
+- [x] 换代风暴熔断 + 自动自愈换代禁用（v0.4.30-l3，软重启事故修复）；state/ 目录补建 + dex 字节源启动自检（v0.4.31-l3）
+- [x] SetClassStatus 概率性地雷根治（v0.4.32-l3）：LSPlant patch（class.cxx 四重载判空）+ dex waitForBootCompleted 双保险 + 版本三处同步——冷启动 4+ 分钟零崩溃，三个历史崩溃窗口全过
+- [x] tombstone_15 zygisk 早期崩溃根治（v0.4.33-l3）：`-fno-threadsafe-statics` 入口零 PLT（zygote64 fork 后 4s guard PLT 崩溃），第 3 轮冷启动 59s+ 无崩溃
+- [x] 日志观测性（v0.4.34/35-l3）：时间戳本地化（localtime_r）+ fetch-dex 解析失败诊断增强 + 双括号瑕疵修复
+- [x] P1 收官系列（v0.4.36~v0.4.40-l3）：
+  - v0.4.36：SIGSTOP 兜底冻结（cgroup 写失败降级，uid_pids 归属核验防 pid 复用）+ 幂等 SIGCONT 解冻
+  - v0.4.37：OOM 保护——冻结期 oom_score_adj 锁 -1000（OOM_DISABLE 等效），解冻恢复原值
+  - v0.4.38：事件审计持久化——JSONL 增量落盘 + 2MB 滚动保留 3 份 + seq 全局序号
+  - v0.4.39：防御补全——OomAdjuster 防御（防系统重算覆盖 -1000）+ 耗电判定豁免 + Doze 白名单注入
+  - v0.4.40：dex 版本解析步长 8→4 修复（DEX 规范 string_id_item=4B，hash 落奇数索引误报解析失败）
+- [x] P2 系列（v0.4.41~v0.4.45-l3，对齐 AStop 策略模型）：
+  - v0.4.41：IMPORTANT 档（AppMode::Important，grace=全局×2 + 唤醒解冻强制开启不可关）
+  - v0.4.42：唤醒节流（wake_throttle_seconds，对齐 AStop Probe 60s 限流）
+  - v0.4.43：Receiver gate 广播门控（白名单 action 才触发解冻，dex 透传 action）
+  - v0.4.44：break_network（hook OplusDeepSleep 冻结集内 uid 断网，对齐 AStop OplusDeepSleepHooks）
+  - v0.4.45：config export/import 本地配置压缩包迁移（用户决策不走云端）
+- [x] 实机事故四轮修复 + 相机黑屏根治（v0.4.46~v0.4.50-l3）：
+  - v0.4.46：选择性冻结路径补 OOM 保护 + tick 冻结集周期重锁（防系统 remove task 杀冻结 app）
+  - v0.4.47：pid 级解冻彻底化（父子级全遍历）+ grace 期提前锁 adj + adj_keep 解冻保持
+  - v0.4.48：candidate-sync 候选池广播（frozen+grace+adj_keep 并集）——系统冻结器/OOM/耗电防御对候选池全生效（dex 侧三处判定改候选池）
+  - v0.4.49：系统组件保护——CRITICAL_PACKAGES 扩展 19 个 + 动态 system_apps 保护（pm 枚举 392 个，三处接入）
+  - v0.4.50：系统链路 OOM 锁定（相机黑屏根治）——37 编译期组件 + android.process.media 恒锁 adj=-1000 + 防御性解冻残留；系统 AppFreezer 冻结媒体进程 → 相机 binder EPIPE(-32) → onDeviceError 黑屏，锁定后系统冻结逻辑跳过链路组件
+- [x] Recents 任务保护实测补丁（v0.4.51-l3）：
+  - 实测校准：ColorOS 滑卡/清 Recents 不走 ATMS.removeTask，实锤 o-stop(40)（OplusProcessManager）→ force-stop 直接杀进程
+  - 根治机制：候选池 app adj=-1000（OOM 锁定）→ force-stop 视同 persistent 跳杀；killLocked 为候选池同步窗口期双保险（onTaskRemove ATMS+TaskSupervisor 双线 + onKillProcess CachedAppOptimizer + onKillLocked ProcessRecord#killLocked + reason 白名单）
+  - 部署：sundownd release 56 + dex 6a72d93 六位一体闭环
+
+---
+
+# 行为概念：墓碑行为对齐之超时丢弃（Timeout Discard）
+
+> 状态：📋 概念定稿（v0.4.52-l3 实施候选）｜ 决策：SunsetREN
+> 一句话：**墓碑该做的不是"永远冻着"，而是"冻住 → 过期 → 丢弃 → 释放内存"。**
+
+## 0. 痛点（真实用户感受，本项目立项动机）
+
+- **冻结 ≠ 释放内存**：cgroup freezer 只是暂停调度，app 的 RSS / 缓存页仍完整占用内存。
+- **冻死 / 冻超时**：大量 app 被冻结后长期无人问津，系统可用内存被"冻结尸体"持续挤占——表现为"手机缓存拉得很高"、"用着难受"。
+- **开机高缓存不清理**：开机时系统自动恢复/预加载一批 app（boot 恢复 + cache 进程预建），墓碑模块不主动回收，用户只能等系统自己慢慢杀（或手动清后台）。
+- 现有流行墓碑（AStop/Cerberus）**没有完整闭环**（见 §1），上述体验缺陷长期存在。
+
+## 1. 现状对照：主流墓碑做了什么、缺什么（AStop v1.6.0 反编译实证）
+
+| 机制 | AStop 实现 | 与"超时丢弃"的关系 |
+|---|---|---|
+| PostCheck sync-kill | 冻结后核验，**残留进程** SIGKILL（kill_all 模式） | 只清理"冻结失败的残留"，不处理"冻结成功但超时"的尸体 |
+| 孤儿进程清理 | `Frozen > 30m` 清扫**辅助进程**（保留主进程） | 方向最接近但**不动主体**：主进程仍占内存，且无"整包丢弃"语义 |
+| 内存四件套 | MemoryGcMode / MemoryTrimMode / MemoryCompactionMode / MemoryPolicyMode | 是**主动整理**（GC/trim/compaction），不是**丢弃释放**；且依赖 LSPosed 内 API |
+| 内存水位触发 | **无**（全源码无 MemAvailable / watermark / lowMemory 检索命中） | 完全缺失：内存告急时不会主动释放冻结集 |
+| 开机缓存回收 | **无** | 完全缺失 |
+| 冻结时长上限→整包丢弃 | **无**（>30m 只清辅助进程） | 完全缺失 |
+
+**结论**："超时丢弃"（冻结超时 → 整包丢弃释放内存）在主流墓碑中不存在完整实现——这是 Sundown 的差异化行为概念。
+
+## 2. Sundown 超时丢弃设计（三机制）
+
+### 2.1 冻结超时丢弃（Frozen Timeout Discard）——主机制
+- 冻结集条目带 `frozen_since` 时间戳；冻结时长超过 `[discard] frozen_timeout_seconds`（缺省 **1800s = 30min**，0=关闭）且期间无任何唤醒命中 → 升级为**丢弃**（SIGKILL 整 uid，cgroup.procs 归属核验防 pid 复用误杀）。
+- 语义：**30 分钟没被唤醒的冻结 app ≈ 用户不需要** → 丢弃释放内存；"丢弃"成为冻结的终态之一（与"解冻"并列）。
+- 与唤醒节流/门控联动：节流窗口内的唤醒不算"活跃"（防 FCM 风暴把超时无限续期）；Receiver 门控拦截的广播同样不续期。
+- 丢弃前先写 `cgroup.freeze=0`（防内核态残留），随后 SIGKILL 主进程组。
+
+### 2.2 内存水位丢弃（Memory Watermark Discard）——加速器
+- daemon 周期采样 `/proc/meminfo` MemAvailable；低于 `[discard] mem_watermark_mb`（缺省 **512MB**，0=关闭）→ 按 **LRU（frozen_since 最旧优先）+ RSS 占用** 排序，丢弃冻结集直到水位恢复。
+- 只作用于 Sundown 冻结集/候选池——白名单 / IMPORTANT / critical / 系统组件 / 前台豁免天然不参与。
+- 语义：超时未到但内存告急 → 提前丢弃最不活跃的冻结 app，防"内存挤炸"。
+
+### 2.3 开机缓存回收（Boot Cache Reclaim）——开机自愈
+- boot_completed 后延迟 `[discard] boot_reclaim_delay_seconds`（缺省 **120s**，等系统恢复期结束），扫描 cache/空进程档（`/proc/*/oom_score_adj` 判定）与"开机恢复的冻结候选"，按策略丢弃——**"开机时的高缓存"由 Sundown 主动回收**，不再等系统慢慢杀。
+- 只回收 cache/empty 档（adj ≥ 缓存档），绝不动前台/感知/服务进程。
+- 观测：`boot_reclaim` 事件留痕 + status 计数（回收了谁、释放多少，全量可审计）。
+
+### 2.4 状态机扩展（冻结终态）
+```
+冻结集条目
+  ├─ 唤醒/前台命中 → 解冻（原有链路不变）
+  ├─ frozen_timeout 到期（期间零活跃）→ 丢弃（SIGKILL，reason=frozen_timeout）
+  ├─ 内存水位告急 → 按 LRU+RSS 丢弃（reason=mem_watermark）
+  └─ 开机回收窗口 → cache 档候选丢弃（reason=boot_reclaim）
+```
+
+## 3. 安全护栏（铁律延续）
+
+- **丢弃只作用于 Sundown 自己的冻结集/候选池**；白名单 / per-app exempt / IMPORTANT / critical 内置名单 / 动态 system_apps / VPN 硬豁免 / 前台 app 一律不参与（复用 v0.4.49 三处接入的判定面）。
+- 丢弃前 **cgroup.procs 归属核验**（防 pid 复用误杀，v0.4.36 同款）；失败安全：核验不过 → 放弃丢弃 + 留痕。
+- **丢弃 = 最终动作不可撤销**；用户切回时走冷启动（权衡文档化：冻结→丢弃→冷启动 vs 冻结→解冻→热恢复，丢弃只针对"30 分钟无活跃"的 app，冷启动代价可接受）。
+- 事件留痕：`discard pkg=P uid=N reason=frozen_timeout|mem_watermark|boot_reclaim` + JSONL 审计 + status `discard_ops` / `discarded_packages` 观测（契约只增不改）。
+- SIGKILL 权限面：daemon root 既有；SELinux 与 cgroup 写同域（v0.4.36 SIGSTOP 已有 kill 先例，无新面）。
+- **发布默认**：`frozen_timeout=1800` / `mem_watermark_mb=512` / `boot_reclaim=true` 全部**默认开启**（直击用户痛点），但受 `[general] enabled` 总开关约束——观望模式零动作。
+
+## 4. 实现落点（预估，v0.4.52-l3）
+
+| 文件 | 改动 |
+|---|---|
+| `daemon/src/freezer.rs` | `discard_uid`（解冻写 0 → SIGKILL 进程组 → 清理记录） |
+| `daemon/src/engine.rs` | tick 超时检查（frozen_since 水位）+ MemAvailable 采样 + boot 定时器（boot_completed 事件驱动） |
+| `daemon/src/policy.rs` | `[discard]` 段解析（frozen_timeout_seconds / mem_watermark_mb / boot_reclaim_*，0=关闭，失败安全） |
+| `daemon/src/state.rs` | status 追加 `discard_ops` / `discarded_packages` / `discard_reasons`（只增不改） |
+| `daemon/src/events.rs` | 事件语义扩展（discard 三 reason） |
+| `module/conf/policy.toml` | `[discard]` 段模板 + 注释文档 |
+| `sunctl` | status 文本面 discard 行 |
+| WebUI | 只读展示（后置） |
+| 测试 | frozen_timeout_discard_v052 / mem_watermark_discard_v052 / boot_reclaim_v052（不依赖真实 cgroup，mock 水位与时钟） |
+
+## 5. 明确不做（本刀留白）
+
+- ❌ 丢弃非冻结集 app（那是"清后台"，不是墓碑职责——系统 LMK 管）
+- ❌ 内存四件套（GC/trim/compaction 主动整理，AStop 路线，P3 独立评估）
+- ❌ 云端/定时全盘清理（破坏 Android 应用生命周期预期）
+- ❌ 桩（probe.cpp）任何改动；daemon 仍仅依赖 libc
+
+---
 
 ## 待办（后置）
+- [ ] **超时丢弃实现（v0.4.52-l3）**：冻结超时丢弃（frozen_timeout_seconds 缺省 1800）+ 内存水位丢弃（mem_watermark_mb 缺省 512）+ 开机缓存回收（boot_reclaim）——设计见上文《行为概念：墓碑行为对齐之超时丢弃》
+- [ ] v0.4.51-l3 刷入设备 + enable=true 实机验证（冻结/解冻正向链路 + frozen.state 持久化对账 + keep_network enable 场景 + 相机/Recents 保护实测）
+- [ ] 冷启动压测 ≥10 轮无崩溃（当前 11 轮 ✅，续测）
 - [ ] 定位活动豁免 dex 侧 AppOps 判定（ExemptMonitor.java 扩展 loc 字段上报，走 L2 热更新路线）
 - [ ] 完整热更新闭环打磨（WebUI 检测新版 → 下载 → staged → 重启激活 → 回滚的端到端体验）
 - [ ] WebUI 日志页交互打磨（v3 数据面就绪后的分组/时间线视图）
+- [ ] AStop 小米 8 类名清单 → 预置探测清单；能力探测清单 + hook 命中矩阵导出
+- [ ] 日志子系统优化（唤醒事件聚合 / pkg=? 降噪 / SIGTERM 优雅解冻）
+- [ ] P3 立项评估（暂缓）：自启动管控子系统 / 内存四件套 / 自带 eBPF 程序（多用户已定不做）
 
 ## 依赖
 
