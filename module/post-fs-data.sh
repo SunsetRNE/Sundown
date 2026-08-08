@@ -14,6 +14,12 @@ PROP_FILE="$MODDIR/system.prop"
 # （post-fs-data 阶段模块已就位，version 从 module.prop 读；date 为启动当天）
 VER_NAME="$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2 | tr -d 'v')"
 TODAY="$(date +%F 2>/dev/null)"
+# 时间未同步防护（v0.4.53-l3 实机：post-fs-data 阶段系统时钟可能未就绪，
+# date 返回 1970-xx → 会建出 1970-01-02 脏日期目录，boot-logcat.log 落错位置）。
+# 回退占位目录 pending-boot/，由 service.sh（boot completed 后时间已同步）归位到真实日期目录。
+case "$TODAY" in
+    1970-*) TODAY="pending-boot" ;;
+esac
 LOG_DAY_DIR="$LOG_DIR/$VER_NAME/$TODAY"
 
 mkdir -p "$CONF_DIR" "$DATA_DIR" "$LOG_DIR"

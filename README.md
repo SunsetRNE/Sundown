@@ -118,6 +118,7 @@ module.prop `v0.4.52-l3`/versionCode=62 ＝ paths.rs `0.4.52-l3`/RELEASE_NO=57 �
 - **日期判定**：`YYYY-MM-DD`（本地时区），每天 0:00 后第一条日志自动落新日期文件夹（惰性创建，零定时器）
 - **迁移**：v0.4.53 首次启动把旧平铺 `sundownd.log`/`events.jsonl*` 一次性归档到当前版本日期目录（`.legacy-migrated` 标记防重复）
 - **刷入清理**：刷入 v0.4.53 及以后版本时，customize.sh 精确清理 logs/ 根下旧平铺残留（仅当「刷入版本 >= 0.4.53」且「旧平铺文件确实存在」才触发；已运行 0.4.53+ 或降级刷入不触发；静默执行不显示在刷入日志中）
+- **时间未同步防护**：post-fs-data 阶段系统时钟可能未就绪（date 返回 1970-xx），boot-logcat 落 `pending-boot/` 占位目录，service.sh（boot completed 后时间已同步）归位到真实日期目录——实机修复 1970 脏日期目录
 - **观测**：`sunctl logs --list`（目录一览）/ `sunctl logs --times`（各版本刷入 vs 生效时间）
 
 ## 安全铁律（贯穿全生命周期）

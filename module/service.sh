@@ -154,6 +154,26 @@ while [ "$(getprop sys.boot_completed)" != "1" ]; do
 done
 echo "[$(date)] Boot completed."
 
+# 时间未同步防护归位（v0.4.53-l3 实机修复）：post-fs-data 阶段若系统时钟未就绪，
+# boot-logcat.log 落在 logs/<ver>/pending-boot/ 占位目录；本阶段（boot completed，
+# 时间已同步）归位到真实日期目录，保证「版本×日期」归档体系无 1970 脏目录。
+# 注：logcat 常驻记录器可能仍持有旧 inode（fd 悬空），移动后新行不再落盘——
+# 属尽力归位，下次重启后 post-fs-data 在正确日期目录重建。
+PENDING_BOOT_DIR="$LOG_DIR/$VER_NAME/pending-boot"
+if [ -d "$PENDING_BOOT_DIR" ]; then
+    TODAY="$(date +%F 2>/dev/null)"
+    case "$TODAY" in
+        1970-*) TODAY="" ;;
+    esac
+    if [ -n "$TODAY" ]; then
+        REAL_DAY_DIR="$LOG_DIR/$VER_NAME/$TODAY"
+        mkdir -p "$REAL_DAY_DIR"
+        mv "$PENDING_BOOT_DIR"/* "$REAL_DAY_DIR/" 2>/dev/null
+        rmdir "$PENDING_BOOT_DIR" 2>/dev/null
+        echo "[$(date)] boot-logcat 占位目录已归位: pending-boot/ → $TODAY/"
+    fi
+fi
+
 # 清理旧日志
 find "$LOG_DIR" -type f -name "*.log" -mtime +7 -delete 2>/dev/null
 
