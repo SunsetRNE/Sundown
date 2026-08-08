@@ -104,6 +104,45 @@ if [ -n "$VER_NAME" ]; then
     ui_print "- 日志版本归档: logs/$VER_NAME（install-time 已记录）"
 fi
 
+# ========== 旧版平铺日志清理（v0.4.53-l3 起，静默） ==========
+# 0.4.53 之前的日志体系是 logs/ 根下平铺文件（sundownd.log / events.jsonl* /
+# boot_watchdog.log / boot-logcat.log），与新版「版本×日期」归档混存会干扰
+# 目录定位与归档体系。刷入 0.4.53 及以后版本时精确清理：
+#   - 仅当「刷入版本 >= 0.4.53」且「logs/ 根下确实存在旧平铺文件」才触发；
+#   - 设备已运行 0.4.53+（旧文件已被清理/迁移）时再次刷入 → 条件不满足，不触发；
+#   - 降级刷入 < 0.4.53 同样不触发。
+# 静默执行（不输出到刷入日志）。注：刷入瞬间旧 daemon 仍持有已删文件句柄
+# 继续写（重启后消失），此处仅清理文件系统层面的旧平铺残留。
+ver_ge() {
+    # 逐段提取 major.minor.patch；先 cut -d- -f1 剥离后缀（如 -l3），
+    # 再 tr 去除非数字——避免 "-l3" 中的数字 3 混入 patch 段（"52-l3"→"52" 而非 "523"）
+    _ge_a=$(echo "$1" | cut -d. -f1 | cut -d- -f1 | tr -dc '0-9'); [ -z "$_ge_a" ] && _ge_a=0
+    _ge_b=$(echo "$1" | cut -d. -f2 | cut -d- -f1 | tr -dc '0-9'); [ -z "$_ge_b" ] && _ge_b=0
+    _ge_c=$(echo "$1" | cut -d. -f3 | cut -d- -f1 | tr -dc '0-9'); [ -z "$_ge_c" ] && _ge_c=0
+    _ge_x=$(echo "$2" | cut -d. -f1 | cut -d- -f1 | tr -dc '0-9'); [ -z "$_ge_x" ] && _ge_x=0
+    _ge_y=$(echo "$2" | cut -d. -f2 | cut -d- -f1 | tr -dc '0-9'); [ -z "$_ge_y" ] && _ge_y=0
+    _ge_z=$(echo "$2" | cut -d. -f3 | cut -d- -f1 | tr -dc '0-9'); [ -z "$_ge_z" ] && _ge_z=0
+    [ "$_ge_a" -gt "$_ge_x" ] && return 0
+    [ "$_ge_a" -lt "$_ge_x" ] && return 1
+    [ "$_ge_b" -gt "$_ge_y" ] && return 0
+    [ "$_ge_b" -lt "$_ge_y" ] && return 1
+    [ "$_ge_c" -ge "$_ge_z" ] && return 0
+    return 1
+}
+if [ -n "$VER_NAME" ] && ver_ge "$VER_NAME" "0.4.53"; then
+    LEGACY_LOG_DIR="$SUNDOWN_DIR/logs"
+    _legacy_hit=0
+    for _lf in sundownd.log events.jsonl events.jsonl.1 events.jsonl.2 events.jsonl.3 boot_watchdog.log boot-logcat.log; do
+        [ -f "$LEGACY_LOG_DIR/$_lf" ] && _legacy_hit=1
+    done
+    if [ "$_legacy_hit" = "1" ]; then
+        rm -f "$LEGACY_LOG_DIR/sundownd.log" "$LEGACY_LOG_DIR/events.jsonl" \
+            "$LEGACY_LOG_DIR/events.jsonl.1" "$LEGACY_LOG_DIR/events.jsonl.2" \
+            "$LEGACY_LOG_DIR/events.jsonl.3" "$LEGACY_LOG_DIR/boot_watchdog.log" \
+            "$LEGACY_LOG_DIR/boot-logcat.log"
+    fi
+fi
+
 rm -f "$MI_PROP_FILE" "$OPLUS_PROP_FILE" "$QTI_PROP_FILE"
 
 ui_print " "
