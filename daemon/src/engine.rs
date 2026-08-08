@@ -742,7 +742,7 @@ impl EngineState {
             self.persist_frozen_if_changed(); // v0.4.29-l3：清空冻结集持久化
             // P1⑩（v0.4.38-l3）：观测模式同样落盘事件（全量解冻可审计）
             if self.events.pending_persist() > 0 {
-                self.events.persist_new(crate::paths::EVENT_LOG_FILE);
+                self.events.persist_new(&crate::paths::current_event_file());
             }
             return;
         }
@@ -1016,7 +1016,7 @@ impl EngineState {
         // firewall_events 时间线）。观测模式也会落盘（全量解冻事件同样可审计）；
         // 失败安全见 events::persist_new（留痕不崩溃，下轮重试）。
         if self.events.pending_persist() > 0 {
-            let n = self.events.persist_new(crate::paths::EVENT_LOG_FILE);
+            let n = self.events.persist_new(&crate::paths::current_event_file());
             if n > 0 && self.tick_count % 100 == 0 {
                 logi!("事件审计: 落盘 {} 条（待同步 {}）", n, self.events.pending_persist());
             }

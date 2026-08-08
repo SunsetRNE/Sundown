@@ -74,6 +74,47 @@ fn write_ready_marker() -> std::io::Result<()> {
     std::fs::write(paths::READY_MARKER, content)
 }
 
+/// v0.4.53-l3：旧版平铺日志一次性迁移（logs/ 根下 sundownd.log、events.jsonl*、
+/// boot_watchdog.log、boot-logcat.log → logs/<VERSION_NAME>/<启动当天>/），
+/// marker 防重复（logs/.legacy-migrated）。失败静默——旧文件最终由 service.sh
+/// 的 -mtime +7 清理兜底，迁移只是尽力归档不阻塞启动。
+fn migrate_legacy_logs() {
+    use std::path::Path;
+    let marker = format!("{}/.legacy-migrated", paths::LOG_DIR);
+    if Path::new(&marker).exists() {
+        return;
+    }
+    let day_dir = paths::day_log_dir(&crate::logging::local_date());
+    if std::fs::create_dir_all(&day_dir).is_err() {
+        return;
+    }
+    let mut moved = 0u32;
+    for name in [
+        "sundownd.log",
+        "events.jsonl",
+        "events.jsonl.1",
+        "events.jsonl.2",
+        "events.jsonl.3",
+        "boot_watchdog.log",
+        "boot-logcat.log",
+    ] {
+        let src = format!("{}/{}", paths::LOG_DIR, name);
+        if Path::new(&src).exists() {
+            let dst = format!("{}/{}", day_dir, name);
+            if std::fs::rename(&src, &dst).is_ok() {
+                moved += 1;
+            }
+        }
+    }
+    let _ = std::fs::write(
+        &marker,
+        format!("migrated {} files at {}\n", moved, crate::logging::local_date()),
+    );
+    if moved > 0 {
+        logi!("旧版平铺日志已归档: {} 个 → {}", moved, day_dir);
+    }
+}
+
 /// 初始化 update/installed.json（仅缺失时，v0.4.20-l3）：
 /// 记录当前 daemon 版本，供 service.sh readiness 校验与 sunctl daemon_version 查询。
 /// staged 更新激活时由 service.sh 原子替换该文件——daemon 绝不覆盖既有文件，
@@ -104,6 +145,10 @@ fn main() {
         eprintln!("FATAL: 创建数据目录失败: {}", e);
         std::process::exit(1);
     }
+    // v0.4.53-l3：实际启动生效时间记录（开机校验"哪个版本真正生效"——旧版本仍在运行时
+    // 旧 daemon 写旧版本文件夹，本版本启动后日志即切到本版本文件夹）+ 旧平铺日志一次性归档
+    crate::logging::write_effective_since();
+    migrate_legacy_logs();
     // v0.4.20-l3：installed.json 初始化（仅缺失时写入；staged 激活由 service.sh 管理）
     if let Err(e) = write_installed_meta() {
         logw!("installed.json 初始化失败: {}（daemon_version 回落 sunctl VERSION）", e);

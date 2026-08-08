@@ -2,8 +2,8 @@
 
 **日落而息 · 墓碑调度** — by SunsetREN
 
-> **当前阶段：`v0.4.52-l3`（sundownd release 57，versionCode 62）**
-> L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅ ｜ 单元测试 **46/46** ✅ ｜ AStop 差距矩阵 **P0/P1/P2 全阶段完成** ✅
+> **当前阶段：`v0.4.53-l3`（sundownd release 58，versionCode 63）**
+> L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅ ｜ 单元测试 **48/48** ✅ ｜ AStop 差距矩阵 **P0/P1/P2 全阶段完成** ✅
 > 发布默认观望模式（`[general] enabled=false`），冻结与超时丢弃功能待真机确认后开启。
 
 面向 KernelSU 系的 Android 墓碑（应用冻结）调度模块。从 AStop/Cerberus 演进而来：
@@ -20,6 +20,8 @@ cd daemon && cargo build --release && cargo test    # 46/46
 # 常用控制命令（sunctl，完整规范见 docs/sunctl-spec.md）
 sunctl status                 # 状态总览（含超时丢弃四行观测）
 sunctl events [n]             # 结构化事件（环形 256，JSON 行）
+sunctl logs --times           # 各版本 install-time（刷入）与 effective-since（实际生效）
+sunctl logs --list            # 日志归档一览（logs/<版本>/<日期>/ 目录）
 sunctl policy preset list     # 情景预设（内存切换不动磁盘）
 sunctl apply-update [zip|URL] # Nightly 热更新暂存 → --activate 激活（失败自动回滚）
 sunctl restart-daemon         # daemon 重启（L0 生效路径，无需软重启 zygote）
@@ -95,6 +97,27 @@ module.prop `v0.4.52-l3`/versionCode=62 ＝ paths.rs `0.4.52-l3`/RELEASE_NO=57 �
 | L3 P2 对齐 | v0.4.41-l3 → v0.4.45-l3 | IMPORTANT 档；唤醒节流（对齐 AStop 60s）；Receiver gate 广播门控；break_network（OplusDeepSleep 断网）；config export/import |
 | L3 实机加固 | v0.4.46-l3 → v0.4.51-l3 | 选择性冻结补 OOM 保护 + tick 周期重锁；pid 级解冻彻底化 + adj_keep；candidate-sync 候选池广播；CRITICAL_PACKAGES 19 项 + 动态 system_apps；系统链路 OOM 锁定（相机黑屏根治：37 组件 + android.process.media 恒锁）；Recents 任务保护实测补丁（o-stop(40) 实锤 + killLocked 双保险，release 56） |
 | **L3 超时丢弃** | **v0.4.52-l3** | **超时丢弃三机制落地（见上节）；46/46 测试；release 57** |
+| **L3 日志归档** | **v0.4.53-l3** | **日志按「版本 × 日期」归档**（见下节）：logs/\<version\>/\<date\>/ + install-time/effective-since 双时间记录；旧平铺日志一次性迁移；sunctl logs --list/--times；48/48 测试；release 58 |
+
+## 日志归档（v0.4.53-l3：按版本 × 日期）
+
+```
+/data/adb/sundown/logs/
+├── v0.4.51-l3/                 ← 版本文件夹（customize.sh 刷入即建）
+│   ├── install-time            ← 实际刷入时间（epoch + 可读，一行）
+│   ├── effective-since         ← 实际启动生效时间（daemon 启动写，开机校验）
+│   └── 2026-08-05/             ← 日期子文件夹（每天 0:00 后第一条日志惰性新建）
+│       ├── sundownd.log        ← 引擎日志
+│       ├── events.jsonl(+.1/2/3) ← 事件审计 JSONL（滚动保留 3 份，日期文件夹内滚动）
+│       ├── boot_watchdog.log   ← service.sh 看门狗
+│       └── boot-logcat.log     ← post-fs-data 常驻 logcat（Sundown 三 tag + LSPlant）
+└── v0.4.52-l3/ ...
+```
+
+- **版本判定**：写日志时按「运行中 daemon 自身版本」解析路径——旧版本 daemon 仍在运行时继续写旧版本文件夹，直到新版本 daemon 真正启动才切换（`effective-since` 记录该时刻）；**刷入 ≠ 生效**，两者时间分别记录
+- **日期判定**：`YYYY-MM-DD`（本地时区），每天 0:00 后第一条日志自动落新日期文件夹（惰性创建，零定时器）
+- **迁移**：v0.4.53 首次启动把旧平铺 `sundownd.log`/`events.jsonl*` 一次性归档到当前版本日期目录（`.legacy-migrated` 标记防重复）
+- **观测**：`sunctl logs --list`（目录一览）/ `sunctl logs --times`（各版本刷入 vs 生效时间）
 
 ## 安全铁律（贯穿全生命周期）
 

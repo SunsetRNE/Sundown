@@ -90,6 +90,20 @@ else
     ui_print "- conf 已存在配置，保留（用户配置优先）。"
 fi
 
+# ========== 日志按版本归档：刷入记录（v0.4.53-l3） ==========
+# 刷入即建 logs/<version>/ 版本文件夹 + install-time（实际刷入时间，epoch + 可读）。
+# 注意：刷入不等于生效——旧版本 daemon 仍在运行时日志继续写旧版本文件夹；
+# 新版本 daemon 真正启动（开机/重启）时写 effective-since，见 daemon 启动校验。
+VER_NAME="$(grep '^version=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2 | tr -d 'v')"
+if [ -n "$VER_NAME" ]; then
+    VER_LOG_DIR="$SUNDOWN_DIR/logs/$VER_NAME"
+    mkdir -p "$VER_LOG_DIR"
+    NOW_TS="$(date +%s 2>/dev/null)"
+    [ -z "$NOW_TS" ] && NOW_TS="0"
+    echo "$NOW_TS $(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" > "$VER_LOG_DIR/install-time"
+    ui_print "- 日志版本归档: logs/$VER_NAME（install-time 已记录）"
+fi
+
 rm -f "$MI_PROP_FILE" "$OPLUS_PROP_FILE" "$QTI_PROP_FILE"
 
 ui_print " "

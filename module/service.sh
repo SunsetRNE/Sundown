@@ -6,7 +6,6 @@
 MODDIR=${0%/*}
 SUNDOWN_DIR="/data/adb/sundown"
 LOG_DIR="$SUNDOWN_DIR/logs"
-BOOT_LOG="$LOG_DIR/boot_watchdog.log"
 PROP_FILE="$MODDIR/module.prop"
 DAEMON_PATH="$MODDIR/system/bin/sundownd"
 UPDATE_DIR="$SUNDOWN_DIR/update"
@@ -16,7 +15,14 @@ INSTALLED_META="$UPDATE_DIR/installed.json"
 READY_MARKER="$UPDATE_DIR/daemon.ready"
 UPDATE_APPLIED=0
 
+# v0.4.53-l3：日志按「版本 × 日期」归档——boot_watchdog 落 logs/<version>/<今天>/
+VER_NAME="$(grep '^version=' "$PROP_FILE" 2>/dev/null | cut -d= -f2 | tr -d 'v')"
+TODAY="$(date +%F 2>/dev/null)"
+LOG_DAY_DIR="$LOG_DIR/$VER_NAME/$TODAY"
+BOOT_LOG="$LOG_DAY_DIR/boot_watchdog.log"
+
 mkdir -p "$LOG_DIR" "$PENDING_DIR" "$BACKUP_DIR"
+[ -n "$VER_NAME" ] && [ -n "$TODAY" ] && mkdir -p "$LOG_DAY_DIR"
 
 exec >> "$BOOT_LOG" 2>&1
 echo "----------------------------------------"

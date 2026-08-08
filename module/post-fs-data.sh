@@ -10,7 +10,14 @@ DATA_DIR="$SUNDOWN_DIR/data"
 LOG_DIR="$SUNDOWN_DIR/logs"
 PROP_FILE="$MODDIR/system.prop"
 
+# v0.4.53-l3：日志按「版本 × 日期」归档——boot-logcat 落 logs/<version>/<今天>/
+# （post-fs-data 阶段模块已就位，version 从 module.prop 读；date 为启动当天）
+VER_NAME="$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2 | tr -d 'v')"
+TODAY="$(date +%F 2>/dev/null)"
+LOG_DAY_DIR="$LOG_DIR/$VER_NAME/$TODAY"
+
 mkdir -p "$CONF_DIR" "$DATA_DIR" "$LOG_DIR"
+[ -n "$VER_NAME" ] && [ -n "$TODAY" ] && mkdir -p "$LOG_DAY_DIR"
 
 # ========== 旧资产迁移：Cerberus/AStop → Sundown ==========
 # 目录映射表：
@@ -104,12 +111,13 @@ fi
 # 完整重启时由本脚本启动（KernelSU 进程树管理，常驻跨软重启存活）；
 # 只记录 Sundown 三 tag + LSPlant，避免被系统日志/其他应用刷屏淹没
 # （logcat main buffer 仅 256KB，启动早期日志约 2 分钟即被冲掉——真机实证）。
-# 文件：$LOG_DIR/boot-logcat.log（启动时清空重建；软重启由常驻进程继续追加，
-# 时间戳可区分；post-fs-data 阶段 logd 已就绪，且早于 zygote/system_server 注入窗口）。
-if [ -d "$LOG_DIR" ]; then
-    : > "$LOG_DIR/boot-logcat.log" 2>/dev/null
+# 文件：$LOG_DAY_DIR/boot-logcat.log（v0.4.53-l3 起按版本×日期归档；
+# 启动时清空重建；软重启由常驻进程继续追加，时间戳可区分；post-fs-data 阶段
+# logd 已就绪，且早于 zygote/system_server 注入窗口）。
+if [ -d "$LOG_DAY_DIR" ]; then
+    : > "$LOG_DAY_DIR/boot-logcat.log" 2>/dev/null
     nohup logcat -b all -v threadtime -s SundownHook:I SundownDex:I SundownProbe:I LSPlant:I \
-        >> "$LOG_DIR/boot-logcat.log" 2>&1 &
+        >> "$LOG_DAY_DIR/boot-logcat.log" 2>&1 &
 fi
 # =================================================
 

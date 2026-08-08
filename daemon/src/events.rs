@@ -301,8 +301,12 @@ const EVENT_LOG_ROTATE_BYTES: u64 = 2 * 1024 * 1024;
 
 /// 追加写 JSONL：文件超阈值先滚动（events.jsonl → events.1.jsonl → … → 删最旧），
 /// 再 append。滚动/写失败返回 Err（调用方留痕，不崩溃）。
+/// v0.4.53-l3：父目录（logs/<version>/<date>/）惰性创建——跨天/首次启动目录不存在时自动补建。
 fn append_jsonl(path: &str, text: &str) -> std::io::Result<()> {
     use std::io::Write;
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     // 滚动检查（仅当前文件超阈值时）
     if let Ok(md) = std::fs::metadata(path) {
         if md.len() >= EVENT_LOG_ROTATE_BYTES {
