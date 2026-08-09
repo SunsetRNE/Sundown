@@ -21,6 +21,12 @@ json_string() {
     sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -n 1
 }
 
+# 从文件 JSON 提取数字字段（v0.4.54-l3 补缺：staged 激活/hotswap/apply-update 共用，
+# 此前从未定义——激活路径从未在运行态完整跑过，2026-08-09 hotswap 实测暴露）
+json_number() {
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$2" 2>/dev/null | head -n 1
+}
+
 # 从 stdin 的单行 JSON 提取字符串字段
 json_str_in() {
     sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1
