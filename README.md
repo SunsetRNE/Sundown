@@ -2,8 +2,8 @@
 
 **日落而息 · 墓碑调度** — by SunsetREN
 
-> **当前阶段：`v0.4.53-l3`（sundownd release 58，versionCode 63）**
-> L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅ ｜ 单元测试 **48/48** ✅ ｜ AStop 差距矩阵 **P0/P1/P2 全阶段完成** ✅
+> **当前阶段：`v0.4.54-l3`（sundownd release 59，versionCode 64）**
+> L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅ ｜ 单元测试 **50/50** ✅ ｜ AStop 差距矩阵 **P0/P1/P2 全阶段完成** ✅
 > 发布默认观望模式（`[general] enabled=false`），冻结与超时丢弃功能待真机确认后开启。
 
 面向 KernelSU 系的 Android 墓碑（应用冻结）调度模块。从 AStop/Cerberus 演进而来：
@@ -98,6 +98,7 @@ module.prop `v0.4.52-l3`/versionCode=62 ＝ paths.rs `0.4.52-l3`/RELEASE_NO=57 �
 | L3 实机加固 | v0.4.46-l3 → v0.4.51-l3 | 选择性冻结补 OOM 保护 + tick 周期重锁；pid 级解冻彻底化 + adj_keep；candidate-sync 候选池广播；CRITICAL_PACKAGES 19 项 + 动态 system_apps；系统链路 OOM 锁定（相机黑屏根治：37 组件 + android.process.media 恒锁）；Recents 任务保护实测补丁（o-stop(40) 实锤 + killLocked 双保险，release 56） |
 | **L3 超时丢弃** | **v0.4.52-l3** | **超时丢弃三机制落地（见上节）；46/46 测试；release 57** |
 | **L3 日志归档** | **v0.4.53-l3** | **日志按「版本 × 日期」归档**（见下节）：logs/\<version\>/\<date\>/ + install-time/effective-since 双时间记录；旧平铺日志一次性迁移；sunctl logs --list/--times；48/48 测试；release 58 |
+| **L3 日志降噪** | **v0.4.54-l3** | **实机校验修复**：cgroup.freeze ENOENT（uid 未运行）静默 + 其他失败 60s 节流 + OOM 保护锁定日志节流（08-08 实测 14445 条 WARN/天 → 归零）；50/50 测试；release 59 |
 
 ## 日志归档（v0.4.53-l3：按版本 × 日期）
 

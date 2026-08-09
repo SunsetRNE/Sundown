@@ -281,6 +281,9 @@ const OOM_PROTECT: i32 = -1000;
 /// pid → 冻结前原 oom_score_adj（解冻恢复用；进程死亡/pid 复用自动失效）
 static OOM_BACKUP: LazyLock<Mutex<HashMap<u32, i32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// OOM 保护成功锁定日志节流（v0.4.54-l3）：uid → 上次 WARN 时刻
+static OOM_PROTECT_LOG: Mutex<Option<HashMap<u32, Instant>>> = Mutex::new(None);
+
 fn read_oom_adj(pid: u32) -> Option<i32> {
     std::fs::read_to_string(format!("/proc/{}/oom_score_adj", pid))
         .ok()?
@@ -320,7 +323,21 @@ pub fn protect_oom(uid: u32) -> usize {
         }
     }
     if n > 0 {
-        logw!("OOM 保护: uid={} 锁定 {} 个进程 adj={}", uid, n, OOM_PROTECT);
+        // v0.4.54-l3 降噪：成功锁定是正常重锁动作（系统 OomAdjuster 每 1.5s 覆盖
+        // adj，tick 重锁即命中）——实机 08-08 达 948 条/天。同一 uid 60s 只留痕一次，
+        // 保留"系统与 Sundown 拉锯"的可观测性同时控制日志量。
+        let now = Instant::now();
+        let mut guard = OOM_PROTECT_LOG.lock().unwrap_or_else(|e| e.into_inner());
+        let map = guard.get_or_insert_with(HashMap::new);
+        let cooled = err_log_cooled(
+            map.get(&uid).copied(),
+            now,
+            Duration::from_secs(WRITE_ERR_COOLDOWN_SECS),
+        );
+        if cooled {
+            logw!("OOM 保护: uid={} 锁定 {} 个进程 adj={}", uid, n, OOM_PROTECT);
+            map.insert(uid, now);
+        }
     }
     n
 }
@@ -804,11 +821,42 @@ pub fn thaw_all_residual() -> usize {
     n
 }
 
+/// cgroup.freeze 写入失败日志节流（v0.4.54-l3）：path → 上次 WARN 时刻
+static WRITE_ERR_COOLDOWN: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+/// 非 ENOENT 失败的重打冷却（秒）
+const WRITE_ERR_COOLDOWN_SECS: u64 = 60;
+
+/// 节流判定：无上次记录 / 已过冷却 → 应打日志
+fn err_log_cooled(last: Option<Instant>, now: Instant, cooldown: Duration) -> bool {
+    last.map(|t| now.duration_since(t) >= cooldown).unwrap_or(true)
+}
+
 fn write_freeze(path: &str, val: &str) -> bool {
     match std::fs::write(path, val.as_bytes()) {
         Ok(_) => true,
         Err(e) => {
-            logw!("cgroup.freeze 写入失败 {}: {}（{}）", path, e, val);
+            // v0.4.54-l3 降噪（实机 2026-08-09 取证）：系统链路 OOM 锁定每 1.5s 对
+            // CRITICAL_PACKAGES 全部 uid 无条件写 0——系统 uid（1000/1001/2000）不在
+            // apps cgroup 树 / 应用未运行时 uid 目录不存在 → ENOENT 必然失败。
+            // 实测 08-08 一天 14445 条 WARN（占 sundownd.log 74%）淹没真实诊断信息。
+            // ENOENT = "目标 uid 未运行" 的正常状态 → 完全静默（返回 false 语义不变，
+            // 调用方 SIGSTOP 兜底/幂等解冻逻辑不受影响）；
+            // 其他错误（权限/IO 等真实故障）→ WARN + 60s/路径节流防风暴。
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return false;
+            }
+            let now = Instant::now();
+            let mut guard = WRITE_ERR_COOLDOWN.lock().unwrap_or_else(|e| e.into_inner());
+            let map = guard.get_or_insert_with(HashMap::new);
+            let cooled = err_log_cooled(
+                map.get(path).copied(),
+                now,
+                Duration::from_secs(WRITE_ERR_COOLDOWN_SECS),
+            );
+            if cooled {
+                logw!("cgroup.freeze 写入失败 {}: {}（{}）", path, e, val);
+                map.insert(path.to_string(), now);
+            }
             false
         }
     }
@@ -874,5 +922,30 @@ mod tests {
             }
         }
         None
+    }
+
+    /// v0.4.54-l3：失败日志节流判定（无记录/过冷却 → 打日志）
+    #[test]
+    fn err_log_cooldown_v054() {
+        let now = Instant::now();
+        let cd = Duration::from_secs(60);
+        assert!(err_log_cooled(None, now, cd), "无上次记录应打日志");
+        assert!(
+            !err_log_cooled(Some(now), now + Duration::from_millis(100), cd),
+            "冷却期内不打"
+        );
+        assert!(
+            err_log_cooled(Some(now), now + Duration::from_secs(61), cd),
+            "过冷却恢复"
+        );
+    }
+
+    /// v0.4.54-l3：ENOENT（目标 uid 未运行）静默——返回 false 不崩溃、不打日志
+    #[test]
+    fn write_freeze_enotent_silent_v054() {
+        // 不存在路径 = ENOENT 路径（静默，无日志输出）
+        assert!(!write_freeze("/nonexistent-sundown-test/cgroup.freeze", "1"));
+        // 不存在父目录同样 ENOENT
+        assert!(!write_freeze("/nonexistent-sundown-test/sub/cgroup.freeze", "0"));
     }
 }
