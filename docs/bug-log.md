@@ -18,6 +18,7 @@
 | B06 | 08-09 | v0.4.20-l3 | v0.4.54-l3 | S2 | 看门狗与外部管理操作竞争（kill 后抢启旧/半成品二进制） | `f5a4a3f` |
 | B07 | 08-09 | v0.4.20-l3 | v0.4.54-l3 | S1 | `BACKUP_DIR` 未定义（`rm -f "$BACKUP_DIR/..."` 解析到根路径） | `f5a4a3f` |
 | B08 | 08-09 | v0.4.20-l3 | v0.4.54-l3 | S2 | `json_number` 函数未定义（staged 激活 / hotswap / apply-update 必败） | `3addbdf` |
+| B09 | 08-09 | v0.4.20-l3 | v0.4.54-l3 | S3 | `daemon_version` 与防降级基线读 installed.json 过时（实机 0.4.25-l3/32 vs 实际 0.4.54-l3/59） | `7c4d01d` |
 
 ## 明细
 
@@ -83,9 +84,18 @@
 - **修复**：工具函数区补 `json_number()`（文件 JSON 数字字段提取）
 - **验证**：hotswap 重测全流程通过（版本解析、防降级、readiness 比对全部依赖该函数）
 
+### B09 `daemon_version` 与防降级基线读 installed.json 过时
+
+- **引入**：v0.4.20-l3（sunctl `daemon_version()` / 防降级基线以 `$INSTALLED_META` 为准）
+- **现象**：`sunctl --version` 显示 `daemon: 0.4.25-l3`，实际运行 0.4.54-l3/59（2026-08-09 v0.4.54-l3 完整刷入+重启后校验发现）
+- **根因**：installed.json 仅 **staged 激活路径**（`apply-update --activate`）更新；zip 刷入（customize.sh）与 hotswap 均不更新它 → 长期过时（实机遗留 08-03 的 0.4.25-l3/32）；`daemon_version()` 与三处防降级基线（stage_update / cmd_hotswap / cmd_apply_update）均以它为唯一数据源 → 版本误报误导诊断 + **降级拦截基线失效**（基线 32 远低于实际 59，hotswap 旧包不会被拦截）
+- **修复**：新增 `current_release_no()` 统一基线；`daemon_version()` 与三处防降级基线改 **daemon.ready 优先**（daemon 每次启动自写的运行时权威状态，含 version_name/release_no/pid）→ installed.json → `$VERSION`/0 兜底
+- **验证**：本地模拟三场景（ready+installed 并存 / 仅 installed / 全无）fallback 链正确；设备热更新后 `--version` 正确显示 `daemon: 0.4.54-l3`
+
 ## 经验沉淀（防再犯）
 
 1. **未运行态验证的路径 = 隐患区**：B05/B07/B08 全部位于"从未在运行态完整跑过"的 staged 激活路径——新功能必须端到端实测（hotswap 正是为此而生的受控验证入口）
 2. **二进制替换必须原子**：运行中可执行文件只能 rename（mv），不能 write（cp）——所有替换路径统一 mv + 维护窗口协调
 3. **日志噪音是缺陷**：高频必然失败路径（ENOENT）不得每次打 WARN——正常状态静默、真实故障保留 + 节流
 4. **shell 全局变量用前必查**：`BACKUP_DIR`/`json_number` 类缺失应在语法/静态检查或首次端到端测试中暴露
+5. **运行时状态源与安装元数据分离**：installed.json（staged 安装记录）≠ 当前运行版本（daemon.ready）——版本展示与防降级判定一律以**运行时状态**为准，安装元数据仅作兜底（B09）

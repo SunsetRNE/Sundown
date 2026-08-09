@@ -139,6 +139,7 @@ module.prop `v0.4.52-l3`/versionCode=62 ＝ paths.rs `0.4.52-l3`/RELEASE_NO=57 �
 | B06 | S2 | 看门狗与外部管理操作竞争（维护窗口 `.updating`） | v0.4.54-l3 |
 | B07 | S1 | `BACKUP_DIR` 未定义（rm 解析到根路径） | v0.4.54-l3 |
 | B08 | S2 | `json_number` 函数未定义（staged 激活/hotswap 必败） | v0.4.54-l3 |
+| B09 | S3 | `daemon_version`/防降级基线读 installed.json 过时（daemon.ready 优先） | v0.4.54-l3 |
 
 ## 安全铁律（贯穿全生命周期）
 
