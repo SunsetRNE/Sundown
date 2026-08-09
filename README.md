@@ -13,7 +13,8 @@
 
 ```sh
 # 构建 L0 daemon（仅依赖 libc，release 体积优化）
-cd daemon && cargo build --release && cargo test    # 46/46
+cd daemon && cargo test && cargo build --release      # 50/50
+cargo build --release --target aarch64-linux-android  # 设备产物（交叉编译，NDK r29 sysroot）
 
 # 真机安装：KSU 管理器刷入 CI Nightly 产出的 sundown-<version>.zip（唯一分发渠道）
 
@@ -99,7 +100,7 @@ module.prop `v0.4.52-l3`/versionCode=62 ＝ paths.rs `0.4.52-l3`/RELEASE_NO=57 �
 | L3 实机加固 | v0.4.46-l3 → v0.4.51-l3 | 选择性冻结补 OOM 保护 + tick 周期重锁；pid 级解冻彻底化 + adj_keep；candidate-sync 候选池广播；CRITICAL_PACKAGES 19 项 + 动态 system_apps；系统链路 OOM 锁定（相机黑屏根治：37 组件 + android.process.media 恒锁）；Recents 任务保护实测补丁（o-stop(40) 实锤 + killLocked 双保险，release 56） |
 | **L3 超时丢弃** | **v0.4.52-l3** | **超时丢弃三机制落地（见上节）；46/46 测试；release 57** |
 | **L3 日志归档** | **v0.4.53-l3** | **日志按「版本 × 日期」归档**（见下节）：logs/\<version\>/\<date\>/ + install-time/effective-since 双时间记录；旧平铺日志一次性迁移；sunctl logs --list/--times；48/48 测试；release 58 |
-| **L3 日志降噪** | **v0.4.54-l3** | **实机校验修复**：cgroup.freeze ENOENT（uid 未运行）静默 + 其他失败 60s 节流 + OOM 保护锁定日志节流（08-08 实测 14445 条 WARN/天 → 归零）；50/50 测试；release 59 |
+| **L3 日志降噪** | **v0.4.54-l3** | **实机校验修复**：cgroup.freeze ENOENT（uid 未运行）静默 + 其他失败 60s 节流 + OOM 保护锁定日志节流（08-08 实测 14445 条 WARN/天 → 归零）；**热更新行为冲突修复**（mv 原子替换 + 维护窗口 .updating + 新增 sunctl hotswap 受控热换）；50/50 测试；release 59；缺陷明细见 docs/bug-log.md（B01–B08） |
 
 ## 日志归档（v0.4.53-l3：按版本 × 日期）
 
@@ -122,6 +123,22 @@ module.prop `v0.4.52-l3`/versionCode=62 ＝ paths.rs `0.4.52-l3`/RELEASE_NO=57 �
 - **刷入清理**：刷入 v0.4.53 及以后版本时，customize.sh 精确清理 logs/ 根下旧平铺残留（仅当「刷入版本 >= 0.4.53」且「旧平铺文件确实存在」才触发；已运行 0.4.53+ 或降级刷入不触发；静默执行不显示在刷入日志中）
 - **时间未同步防护**：post-fs-data 阶段系统时钟可能未就绪（date 返回 1970-xx），boot-logcat 落 `pending-boot/` 占位目录，service.sh（boot completed 后时间已同步）归位到真实日期目录——实机修复 1970 脏日期目录
 - **观测**：`sunctl logs --list`（目录一览）/ `sunctl logs --times`（各版本刷入 vs 生效时间）
+
+## 缺陷与修复日志（Bug & Fix Log）
+
+> 实机校验/开发中发现的缺陷闭环记录（现象 → 根因 → 修复 → 验证），详见 **[docs/bug-log.md](docs/bug-log.md)**。
+> 编号 B 系列递增；严重度 S1（数据损坏/崩溃）/ S2（功能路径必败）/ S3（行为偏差）/ S4（噪音/体验）。
+
+| 编号 | 严重度 | 标题 | 修复版本 |
+|---|---|---|---|
+| B01 | S3 | sunctl `logs --list/--times` 空输出（glob v 前缀不匹配） | v0.4.53-l3 |
+| B02 | S3 | 开机早期时钟未同步产生 1970 脏日期目录（pending-boot 占位 + 归位） | v0.4.53-l3 |
+| B03 | S4 | cgroup.freeze ENOENT WARN 刷屏（14445 条/天 → 静默 + 节流） | v0.4.54-l3 |
+| B04 | S4 | OOM 保护成功锁定日志刷屏（948 条/天 → 60s/uid 节流） | v0.4.54-l3 |
+| B05 | S2 | 运行中二进制替换 `Text file busy`（mv 原子替换） | v0.4.54-l3 |
+| B06 | S2 | 看门狗与外部管理操作竞争（维护窗口 `.updating`） | v0.4.54-l3 |
+| B07 | S1 | `BACKUP_DIR` 未定义（rm 解析到根路径） | v0.4.54-l3 |
+| B08 | S2 | `json_number` 函数未定义（staged 激活/hotswap 必败） | v0.4.54-l3 |
 
 ## 安全铁律（贯穿全生命周期）
 
