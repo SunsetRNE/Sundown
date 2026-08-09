@@ -24,6 +24,7 @@ sunctl logs --times           # 各版本 install-time（刷入）与 effective-
 sunctl logs --list            # 日志归档一览（logs/<版本>/<日期>/ 目录）
 sunctl policy preset list     # 情景预设（内存切换不动磁盘）
 sunctl apply-update [zip|URL] # Nightly 热更新暂存 → --activate 激活（失败自动回滚）
+sunctl hotswap <二进制> [meta] # 受控热换 daemon（架构判定/防降级/原子替换/回滚）
 sunctl restart-daemon         # daemon 重启（L0 生效路径，无需软重启 zygote）
 ```
 

@@ -11,6 +11,7 @@ READY_MARKER="$SUNDOWN_DIR/update/daemon.ready"
 SOCK_PATH="$SUNDOWN_DIR/sundownd.sock"
 UPDATE_DIR="$SUNDOWN_DIR/update"
 PENDING_DIR="$UPDATE_DIR/pending"
+BACKUP_DIR="$UPDATE_DIR/backup"
 LOG_DIR="$SUNDOWN_DIR/logs"
 VERSION="0.4.54-l3"
 
@@ -181,15 +182,19 @@ EOF
 
 cmd_restart_daemon() {
     echo "正在重启 sundownd..."
+    # v0.4.54-l3 维护窗口标记：通知 service.sh 看门狗暂停自动重启（防竞争）
+    touch "$UPDATE_DIR/.updating"
     pgrep -f "$DAEMON_PATH" | while read -r p; do kill "$p" 2>/dev/null; done
     sleep 1
     if [ ! -x "$DAEMON_PATH" ]; then
         echo "❌ $DAEMON_PATH 不存在或不可执行（L0 骨架尚未内置二进制）" >&2
+        rm -f "$UPDATE_DIR/.updating"
         return 1
     fi
     nohup "$DAEMON_PATH" >/dev/null 2>&1 &
     sleep 3
     pid="$(daemon_pid)"
+    rm -f "$UPDATE_DIR/.updating"
     if [ -n "$pid" ]; then
         echo "✅ sundownd 已启动 (PID: $pid)"
         return 0
@@ -347,13 +352,27 @@ activate_pending_update() {
     [ -z "$new_rel" ] && { echo "❌ installed.json.new 缺少 release_no" >&2; return 1; }
     # 备份
     rm -f "$BACKUP_DIR/sundownd.previous" "$BACKUP_DIR/installed.json.previous"
+    mkdir -p "$BACKUP_DIR"
     cp -p "$DAEMON_PATH" "$BACKUP_DIR/sundownd.previous" || { echo "❌ 备份失败" >&2; return 1; }
     [ -f "$INSTALLED_META" ] && cp -p "$INSTALLED_META" "$BACKUP_DIR/installed.json.previous"
-    # 替换 + 重启
+    # 维护窗口：通知 service.sh 看门狗暂停自动重启（v0.4.54-l3 热更新冲突修复）
+    touch "$UPDATE_DIR/.updating"
+    # 替换 + 重启（v0.4.54-l3：mv = 原子 rename，不受 Text file busy 限制——
+    # 运行中的 daemon 继续占用旧 inode，kill 后自然释放；cp 覆盖运行中二进制会 ETXTBSY）
     rm -f "$READY_MARKER"
-    cp -p "$pending_bin" "$DAEMON_PATH" || { echo "❌ 激活失败（已备份）" >&2; return 1; }
+    if ! mv -f "$pending_bin" "$DAEMON_PATH"; then
+        echo "❌ 激活失败（已备份）" >&2
+        rm -f "$UPDATE_DIR/.updating"
+        return 1
+    fi
     chmod 0755 "$DAEMON_PATH"
-    cp -p "$pending_meta" "$INSTALLED_META" || { echo "❌ 元数据激活失败" >&2; return 1; }
+    if ! cp -p "$pending_meta" "$INSTALLED_META"; then
+        echo "❌ 元数据激活失败" >&2
+        mv -f "$BACKUP_DIR/sundownd.previous" "$DAEMON_PATH"
+        chmod 0755 "$DAEMON_PATH"
+        rm -f "$UPDATE_DIR/.updating"
+        return 1
+    fi
     pgrep -f "$DAEMON_PATH" | while read -r old_pid; do kill "$old_pid" 2>/dev/null; done
     sleep 1
     nohup "$DAEMON_PATH" >/dev/null 2>&1 &
@@ -367,18 +386,102 @@ activate_pending_update() {
         echo "❌ 新 daemon readiness 校验失败，回滚…"
         pgrep -f "$DAEMON_PATH" | while read -r fpid; do kill "$fpid" 2>/dev/null; done
         sleep 1
-        cp -p "$BACKUP_DIR/sundownd.previous" "$DAEMON_PATH"
+        mv -f "$BACKUP_DIR/sundownd.previous" "$DAEMON_PATH"  # mv 原子回滚
         chmod 0755 "$DAEMON_PATH"
         [ -f "$BACKUP_DIR/installed.json.previous" ] && cp -p "$BACKUP_DIR/installed.json.previous" "$INSTALLED_META"
         rm -f "$READY_MARKER"
         nohup "$DAEMON_PATH" >/dev/null 2>&1 &
+        rm -f "$UPDATE_DIR/.updating"
         echo "❌ 已回滚到原版本并重启" >&2
         return 1
     fi
-    # 成功：清理 pending + 备份
+    # 成功：清理 pending + 备份 + 维护窗口
     rm -f "$PENDING_DIR/sundownd.new" "$PENDING_DIR/installed.json.new" "$PENDING_DIR/pending.sha256" "$PENDING_DIR/pending.json"
     rm -f "$BACKUP_DIR/sundownd.previous" "$BACKUP_DIR/installed.json.previous"
+    rm -f "$UPDATE_DIR/.updating"
     echo "✅ 已激活新 daemon（release_no $new_rel）并重启"
+    return 0
+}
+
+# ---------- hotswap（v0.4.54-l3：受控热更新——热更新行为冲突修复） ----------
+# 直接热换 daemon 二进制（不经 zip/staged，适用本地构建产物/快速迭代）。
+# 完整判定链：可执行性(exec --version) → 版本解析 → 防降级 → 备份 →
+# 维护窗口(watchdog 暂停) → 原子替换(mv，不受 Text file busy 限制) →
+# kill+启动 → readiness(release_no 比对) → 失败回滚。
+# 用法: sunctl hotswap <二进制路径> [installed.json.new]
+cmd_hotswap() {
+    local src="$1"
+    [ -n "$src" ] || { echo "用法: sunctl hotswap <二进制路径> [installed.json.new]" >&2; return 2; }
+    [ -f "$src" ] || { echo "❌ 二进制不存在: $src" >&2; return 1; }
+    [ -x "$src" ] || { echo "❌ 二进制不可执行: $src" >&2; return 1; }
+    # 1) 架构/有效性判定：--version 必须可解析（x86_64 产物在 aarch64 设备上
+    #    exec 失败 → 拦截；2026-08-09 手动热更新踩坑实录）
+    local ver_line new_ver new_rel
+    ver_line="$( "$src" --version 2>/dev/null | head -n 1 )"
+    new_ver="$(printf '%s' "$ver_line" | sed -n 's/.*sundownd[[:space:]]*\([^ ]*\)[[:space:]]*(release_no[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    new_rel="$(printf '%s' "$ver_line" | sed -n 's/.*(release_no[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    if [ -z "$new_ver" ] || [ -z "$new_rel" ]; then
+        echo "❌ 无法解析版本（--version 失败：架构不符或二进制损坏？）" >&2
+        echo "   提示: 设备为 aarch64，需 cargo build --release --target aarch64-linux-android 产物" >&2
+        return 1
+    fi
+    # 2) 防降级：release_no 只增（同号允许重装覆盖）
+    local cur_rel="$(json_number release_no "$INSTALLED_META")"
+    [ -z "$cur_rel" ] && cur_rel=0
+    if [ "$new_rel" -lt "$cur_rel" ] 2>/dev/null; then
+        echo "❌ 拒绝降级: release_no $new_rel < 当前 $cur_rel" >&2
+        return 1
+    fi
+    # 3) 备份
+    mkdir -p "$BACKUP_DIR"
+    rm -f "$BACKUP_DIR/sundownd.previous" "$BACKUP_DIR/installed.json.previous"
+    cp -p "$DAEMON_PATH" "$BACKUP_DIR/sundownd.previous" || { echo "❌ 备份失败" >&2; return 1; }
+    [ -f "$INSTALLED_META" ] && cp -p "$INSTALLED_META" "$BACKUP_DIR/installed.json.previous"
+    # 4) 维护窗口 + 原子替换（mv = rename，运行中 daemon 占用旧 inode 不受影响）
+    touch "$UPDATE_DIR/.updating"
+    rm -f "$READY_MARKER"
+    if ! mv -f "$src" "$DAEMON_PATH"; then
+        echo "❌ 替换失败（已备份）" >&2
+        rm -f "$UPDATE_DIR/.updating"
+        return 1
+    fi
+    chmod 0755 "$DAEMON_PATH"
+    [ -s "$DAEMON_PATH" ] || {
+        echo "❌ 替换后二进制为空，回滚" >&2
+        mv -f "$BACKUP_DIR/sundownd.previous" "$DAEMON_PATH"
+        chmod 0755 "$DAEMON_PATH"
+        rm -f "$UPDATE_DIR/.updating"
+        return 1
+    }
+    # 5) 元数据（可选 installed.json.new；缺失则保持现有 installed.json）
+    if [ -n "$2" ] && [ -f "$2" ]; then
+        cp -p "$2" "$INSTALLED_META" || echo "⚠️ 元数据写入失败（不影响二进制生效）" >&2
+    fi
+    # 6) kill + 启动
+    pgrep -f "$DAEMON_PATH" | while read -r old_pid; do kill "$old_pid" 2>/dev/null; done
+    sleep 1
+    nohup "$DAEMON_PATH" >/dev/null 2>&1 &
+    # 7) readiness：20s 等 ready 标记 + release_no 比对
+    local rw=0
+    while [ "$rw" -lt 20 ] && [ ! -f "$READY_MARKER" ]; do sleep 1; rw=$((rw + 1)); done
+    local ready_rel="$(json_number release_no "$READY_MARKER")"
+    if [ ! -f "$READY_MARKER" ] || ! pgrep -f "$DAEMON_PATH" >/dev/null || [ "$ready_rel" != "$new_rel" ]; then
+        echo "❌ 新 daemon readiness 校验失败，回滚…"
+        pgrep -f "$DAEMON_PATH" | while read -r fpid; do kill "$fpid" 2>/dev/null; done
+        sleep 1
+        mv -f "$BACKUP_DIR/sundownd.previous" "$DAEMON_PATH"
+        chmod 0755 "$DAEMON_PATH"
+        [ -f "$BACKUP_DIR/installed.json.previous" ] && cp -p "$BACKUP_DIR/installed.json.previous" "$INSTALLED_META"
+        rm -f "$READY_MARKER"
+        nohup "$DAEMON_PATH" >/dev/null 2>&1 &
+        rm -f "$UPDATE_DIR/.updating"
+        echo "❌ 已回滚到原版本并重启" >&2
+        return 1
+    fi
+    # 成功：清理备份 + 维护窗口
+    rm -f "$BACKUP_DIR/sundownd.previous" "$BACKUP_DIR/installed.json.previous"
+    rm -f "$UPDATE_DIR/.updating"
+    echo "✅ hotswap 完成: $new_ver (release_no $new_rel) 已生效"
     return 0
 }
 
@@ -706,6 +809,7 @@ usage() {
   config import <路径>   [迁移] 导入配置压缩包（白名单校验 → 完整性校验 → 备份 → 热加载）
   apply-update [src]    [L0] 下载/暂存 daemon 更新（src=本地zip或URL；缺省查 GitHub Nightly）
   apply-update --activate [L0] 立即激活已暂存更新（备份/readiness/自动回滚）
+  hotswap <二进制> [meta] [L0] 受控热换 daemon 二进制（架构判定/防降级/原子替换/回滚）
   logs [行数]            查看启动看门狗日志（当前生效版本最新日期目录）
   logs --engine [行数]   查看引擎事件日志（焦点/唤醒/冻结时间轴）
   logs --list            日志归档一览（版本×日期目录）
@@ -727,6 +831,7 @@ case "$1" in
     events)          shift; cmd_events "$@" ;;
     config)          shift; cmd_config "$@" ;;
     apply-update)    shift; cmd_apply_update "$@" ;;
+    hotswap)         shift; cmd_hotswap "$@" ;;
     logs)            shift; cmd_logs "$@" ;;
     version|--version|-v) cmd_version ;;
     *)               usage ;;

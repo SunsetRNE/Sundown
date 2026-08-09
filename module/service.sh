@@ -238,9 +238,12 @@ if ! pgrep -f "$DAEMON_PATH" > /dev/null; then
     fi
 fi
 
-# 看门狗循环
+# 看门狗循环（v0.4.54-l3：维护窗口判定——外部管理面 sunctl hotswap / 
+# apply-update --activate / restart-daemon 会 touch $UPDATE_DIR/.updating，
+# 标记存在时跳过本轮自动重启，防替换窗口竞争启动半成品/旧二进制）
 while true; do
     sleep 300
+    [ -f "$UPDATE_DIR/.updating" ] && continue
     if ! pgrep -f "$DAEMON_PATH" > /dev/null; then
         echo "[$(date)] Watchdog: Daemon not running, restarting..."
         start_daemon
