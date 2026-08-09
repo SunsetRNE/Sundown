@@ -53,9 +53,20 @@ daemon_pid() {
     pgrep -f "$DAEMON_PATH" 2>/dev/null | head -n 1
 }
 
+# 当前 daemon 版本（v0.4.54-l3 修复：优先 daemon.ready——daemon 每次启动自写的
+# 运行时权威状态；installed.json 仅在 staged 激活路径更新，zip 刷入/hotswap 均不
+# 更新它 → 长期过时（实机 08-03 遗留 0.4.25-l3/32，实际已 0.4.54-l3/59））
 daemon_version() {
-    v="$(json_string version_name "$INSTALLED_META")"
+    v="$(json_string version_name "$READY_MARKER")"
+    [ -n "$v" ] || v="$(json_string version_name "$INSTALLED_META")"
     [ -n "$v" ] && echo "$v" || echo "$VERSION"
+}
+
+# 当前 daemon release_no（防降级基线，同上：daemon.ready 优先）
+current_release_no() {
+    r="$(json_number release_no "$READY_MARKER")"
+    [ -n "$r" ] || r="$(json_number release_no "$INSTALLED_META")"
+    echo "${r:-0}"
 }
 
 # 探测 Zygisk 提供方：rezygisk / zygisknext / magisk-zygisk / none
@@ -319,9 +330,8 @@ stage_update() {
         echo "❌ 无法解析新 daemon 版本（--version 输出异常）" >&2
         return 1
     fi
-    # 防降级：release_no 只增（同号允许重装覆盖）
-    local cur_rel="$(json_number release_no "$INSTALLED_META")"
-    [ -z "$cur_rel" ] && cur_rel=0
+    # 防降级：release_no 只增（同号允许重装覆盖）——基线以 daemon.ready 优先
+    local cur_rel="$(current_release_no)"
     if [ "$new_rel" -lt "$cur_rel" ] 2>/dev/null; then
         echo "❌ 拒绝降级：新包 release_no=$new_rel < 当前 $cur_rel" >&2
         return 1
@@ -431,9 +441,8 @@ cmd_hotswap() {
         echo "   提示: 设备为 aarch64，需 cargo build --release --target aarch64-linux-android 产物" >&2
         return 1
     fi
-    # 2) 防降级：release_no 只增（同号允许重装覆盖）
-    local cur_rel="$(json_number release_no "$INSTALLED_META")"
-    [ -z "$cur_rel" ] && cur_rel=0
+    # 2) 防降级：release_no 只增（同号允许重装覆盖）——基线以 daemon.ready 优先
+    local cur_rel="$(current_release_no)"
     if [ "$new_rel" -lt "$cur_rel" ] 2>/dev/null; then
         echo "❌ 拒绝降级: release_no $new_rel < 当前 $cur_rel" >&2
         return 1
@@ -514,7 +523,7 @@ cmd_apply_update() {
     local staged
     staged="$(stage_update "$zip" "$label")" || return 1
     local new_ver="${staged%%|*}" new_rel="${staged##*|}"
-    local cur_rel="$(json_number release_no "$INSTALLED_META")"
+    local cur_rel="$(current_release_no)"
     if [ -n "$cur_rel" ] && [ "$new_rel" = "$cur_rel" ]; then
         echo "ℹ️  已是最新（release_no $cur_rel），暂存覆盖完成（可 --activate 重装）"
     else
