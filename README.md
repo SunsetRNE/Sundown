@@ -142,6 +142,11 @@ module.prop `v0.4.55-l3`/versionCode=65 ＝ paths.rs `0.4.55-l3`/RELEASE_NO=60 �
 | B08 | S2 | `json_number` 函数未定义（staged 激活/hotswap 必败） | v0.4.54-l3 |
 | B09 | S3 | `daemon_version`/防降级基线读 installed.json 过时（daemon.ready 优先） | v0.4.54-l3 |
 
+## 故障排查（第三方 App 卡死 / ANR）
+
+> 刷入模块后若某 App 出现卡死/ANR，**先按排查指南取证，再定责**——绝大多数 ANR 根因在 App 自身（启动过载/版本回归/广告 SDK），模块只注入 system_server、不注入第三方 App 进程，且一切操作可审计。
+> 完整三步判断法（时间线对照 / Sundown 审计 / App 自身证据）+ 证据采集速查卡见 **[docs/troubleshooting.md](docs/troubleshooting.md)**。
+
 ## 安全铁律（贯穿全生命周期）
 
 1. **白名单/豁免优先**：任何机制不得触碰白名单、exempt、IMPORTANT、critical、系统组件、VPN、前台。
@@ -157,7 +162,7 @@ module.prop `v0.4.55-l3`/versionCode=65 ＝ paths.rs `0.4.55-l3`/RELEASE_NO=60 �
 Sundown/
 ├── README.md               # 本文件（阶段状态唯一权威）
 ├── NAMING.md               # 命名规范（定稿，唯一权威副本）
-├── docs/                   # sunctl-spec / l2-plan / l2b-plan / l3-plan（权威副本）
+├── docs/                   # sunctl-spec / l2-plan / l2b-plan / l3-plan / troubleshooting（权威副本）
 ├── daemon/                 # sundownd Rust 源码（L0，仅依赖 libc）
 │   └── src/                # main/paths/logging/state/sock/config/toml/policy/preset/freezer/engine/events/network
 ├── probe/                  # libsunprobe.so C++ 源码（L1 探针桩，NDK arm64-v8a）
