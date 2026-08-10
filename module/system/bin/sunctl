@@ -13,7 +13,7 @@ UPDATE_DIR="$SUNDOWN_DIR/update"
 PENDING_DIR="$UPDATE_DIR/pending"
 BACKUP_DIR="$UPDATE_DIR/backup"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.4.54-l3"
+VERSION="0.4.55-l3"
 
 # ---------- 工具函数 ----------
 

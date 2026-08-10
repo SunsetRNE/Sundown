@@ -185,6 +185,20 @@ pub const CRITICAL_PACKAGES: &[&str] = &[
     "com.coloros.alarmclock", // 闹钟（ColorOS，系统 AppFreezer 曾冻结 ×2）
     "com.coloros.calendar", // 日历（ColorOS）
     "com.android.calendar", // 日历（AOSP）
+    // v0.4.55-l3 系统组件保护扩展（2026-08-11 实机校验后补全）：
+    // 拨号/设置存储/电话存储/WiFi 对话框/NFC 为隐式 Intent 与系统链路高频入口，
+    // 冻结 = 无法拨号、设置读写出错、WiFi 连接无响应、NFC 支付失败；
+    // ColorOS 私有组件（phonemanager/secureguard/permissioncontroller/oplus.phone）
+    // 与 AOSP 版同级——权限确认/安装/后台管理链路必经。
+    "com.android.dialer", // 拨号器（AOSP，隐式 Intent dial 链路）
+    "com.oplus.phone", // 拨号器（ColorOS/OPPO 实机拨号入口）
+    "com.android.providers.settings", // 设置存储提供者（系统设置读写链路）
+    "com.android.providers.telephony", // 电话/短信存储提供者（通话记录/短信链路）
+    "com.android.nfc", // NFC（支付/标签链路）
+    "com.android.wifi.dialog", // WiFi 连接对话框（隐式 Intent 连接链路）
+    "com.coloros.phonemanager", // 手机管家（ColorOS 权限/后台管理链路）
+    "com.oplus.secureguard", // 安全守护（ColorOS 权限/安装确认链路）
+    "com.oplus.permissioncontroller", // 权限控制器（ColorOS 版，与 AOSP 版同级）
 ];
 
 /// 策略默认值（policy.toml 缺失/解析失败时的兜底：策略关闭，观测优先）
@@ -856,6 +870,20 @@ keep_network = 1
             "com.android.providers.media",
         ] {
             assert!(p.is_critical(c), "{} 应在 critical 清单", c);
+        }
+        // v0.4.55-l3 扩展 9 项（拨号/设置存储/电话存储/NFC/WiFi 对话框/ColorOS 私有组件）
+        for c in [
+            "com.android.dialer",
+            "com.oplus.phone",
+            "com.android.providers.settings",
+            "com.android.providers.telephony",
+            "com.android.nfc",
+            "com.android.wifi.dialog",
+            "com.coloros.phonemanager",
+            "com.oplus.secureguard",
+            "com.oplus.permissioncontroller",
+        ] {
+            assert!(p.is_critical(c), "v0.4.55-l3 新增 {} 应在 critical 清单", c);
         }
         // 普通包不受影响（即使配置里显式写 force 也不行——引擎层已先于 force 检查）
         assert!(!p.is_critical("com.example.normal"));

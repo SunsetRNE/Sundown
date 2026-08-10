@@ -382,26 +382,26 @@ impl EngineState {
         );
     }
 
-    /// v0.4.49-l3：动态系统 app 保护集合刷新（pm list packages -s 枚举）——
+    /// v0.4.49-l3：动态系统 app 保护集合刷新（pm 枚举）——
     /// 系统组件冻结 = 隐式 Intent/凭据/安装/文件选择链路黑屏（2026-08-05 相机事故）。
     /// pm 失败 → 空集（回落编译期 CRITICAL_PACKAGES，零风险降级）。
+    /// v0.4.55-l3：`pm list packages -s`（system 标志）改 `-f`（输出安装路径）——
+    /// ColorOS 大量系统组件在 /system_ext/ /product/ /vendor/ 分区，-s 标志可能漏；
+    /// 按系统分区路径前缀 + 厂商包名域兜底双判定（厂商私有组件更新到 /data 也受保护）。
     pub fn refresh_system_apps(&mut self) {
         let mut fresh = HashSet::new();
         match std::process::Command::new("pm")
-            .args(["list", "packages", "-s"])
+            .args(["list", "packages", "-f"])
             .output()
         {
             Ok(out) if out.status.success() => {
                 let text = String::from_utf8_lossy(&out.stdout);
                 for line in text.lines() {
-                    if let Some(pkg) = line.trim().strip_prefix("package:") {
-                        let pkg = pkg.trim();
-                        if !pkg.is_empty() {
-                            fresh.insert(pkg.to_string());
-                        }
+                    if let Some(pkg) = Self::parse_pm_line(line) {
+                        fresh.insert(pkg);
                     }
                 }
-                logi!("系统 app 保护清单刷新: {} 个（pm 枚举）", fresh.len());
+                logi!("系统 app 保护清单刷新: {} 个（pm -f 分区 + 厂商域判定）", fresh.len());
             }
             _ => {
                 logw!("系统 app 枚举失败（回落编译期 critical 名单）");
@@ -416,6 +416,48 @@ impl EngineState {
             logi!("android.process.media uid 解析: {}", uid);
         } else {
             logw!("android.process.media uid 解析失败（进程未运行？）");
+        }
+    }
+
+    /// v0.4.55-l3：系统分区路径判定（pm -f 输出行 path 段）——
+    /// /system /vendor /product /odm /system_ext /apex 前缀命中 = 系统组件
+    /// （/apex 为 APEX 模块挂载点，同属系统只读分区语义）。纯函数可单测。
+    fn is_system_partition_path(path: &str) -> bool {
+        let p = path.trim();
+        p.starts_with("/system/")
+            || p.starts_with("/vendor/")
+            || p.starts_with("/product/")
+            || p.starts_with("/odm/")
+            || p.starts_with("/system_ext/")
+            || p.starts_with("/apex/")
+    }
+
+    /// v0.4.55-l3：厂商包名域兜底——厂商私有系统组件（OPPO/OnePlus/realme 系）
+    /// 可能更新到 /data 分区（分区判定抓不到）或 -f 输出异常；包名域命中即受保护。
+    /// 纯函数可单测；与 CRITICAL_PACKAGES（编译期显式清单）双保险。
+    fn is_vendor_pkg_domain(pkg: &str) -> bool {
+        pkg.starts_with("com.oplus.")
+            || pkg.starts_with("com.coloros.")
+            || pkg.starts_with("com.oneplus.")
+            || pkg.starts_with("com.realme.")
+            || pkg.starts_with("com.heytap.")
+            || pkg.starts_with("com.nearme.")
+    }
+
+    /// v0.4.55-l3：pm -f 输出行解析（纯函数可单测）——
+    /// 行格式 `package:<path>=<pkg>`：分区路径前缀命中**或**厂商包名域命中 → Some(pkg)；
+    /// 用户分区普通包 / 畸形行 / 空包名 → None（不保护，回落编译期名单语义）。
+    fn parse_pm_line(line: &str) -> Option<String> {
+        let line = line.trim();
+        let pkg = line.rsplit('=').next()?.trim();
+        if pkg.is_empty() {
+            return None;
+        }
+        let path = line.strip_prefix("package:").unwrap_or("");
+        if Self::is_system_partition_path(path) || Self::is_vendor_pkg_domain(pkg) {
+            Some(pkg.to_string())
+        } else {
+            None
         }
     }
 
@@ -1057,10 +1099,26 @@ impl EngineState {
     /// 丢弃资格判定（安全护栏，纯逻辑可单测）：命中者任何丢弃机制不得触碰——
     /// 白名单 / per-app exempt / critical 内置 / 动态系统组件 / VPN 硬豁免 /
     /// IMPORTANT 档 / 当前前台。复用 v0.4.49 三处接入的既有判定面。
+    /// v0.4.55-l3 落刀前终检：exempt 表实时判定（fg_service/media/location）——
+    /// 与 tick 冻结路径的豁免二次校验（keep_flags/keep_loc + exempt 表）同构。
+    /// 2026-08-11 联通 ANR 事件实机印证：焦点抖动可致 last_focus 失真（00:39-00:41
+    /// 17 次焦点切换），此时持有前台服务/媒体/定位的冻结 app 不得被 SIGKILL 丢弃。
     fn discard_ineligible(&self, pkg: &str) -> bool {
-        self.should_never_freeze(pkg)
+        if self.should_never_freeze(pkg)
             || self.mode_of(pkg) == AppMode::Important
             || self.last_focus.as_deref() == Some(pkg)
+        {
+            return true;
+        }
+        // 落刀前终检：exempt 表（独立线程 2s 节拍实时判定）——与 tick 冻结路径同构
+        let (keep_fg, keep_media) = self.keep_flags(pkg);
+        let keep_loc = self.keep_loc(pkg);
+        if let Some(fl) = self.exempt.get(pkg) {
+            if (keep_fg && fl.fg_service) || (keep_media && fl.media) || (keep_loc && fl.location) {
+                return true;
+            }
+        }
+        false
     }
 
     /// 执行丢弃一个包（终态：SIGKILL 整 uid 释放内存，不可撤销）。
@@ -1863,5 +1921,171 @@ mod tests {
         e.tick_count = 200;
         e.tick();
         assert_eq!(e.discard_ops, before, "重复 tick 不重复执行");
+    }
+
+    /// v0.4.55-l3：系统分区路径判定（pm -f 改造核心）——
+    /// 6 个系统分区前缀命中；用户分区/相似前缀无尾斜杠/空串不命中；容忍首尾空白。
+    #[test]
+    fn system_partition_path_v055() {
+        // 命中：/system /vendor /product /odm /system_ext /apex 六前缀（pm -f 真实行形态）
+        for p in [
+            "/system/priv-app/Settings/Settings.apk",
+            "/system/framework/framework-res.apk",
+            "/vendor/app/com.oplus.xxx/xxx.apk",
+            "/product/overlay/com.coloros.yyy/yyy.apk",
+            "/odm/etc/com.oplus.zzz/zzz.apk",
+            "/system_ext/priv-app/com.android.aaa/aaa.apk",
+            "/apex/com.android.art/art.apk",
+        ] {
+            assert!(EngineState::is_system_partition_path(p), "分区前缀应命中: {}", p);
+        }
+        // 不命中：用户分区 / 存储 / 无尾斜杠前缀（防误判整词）/ 空串 / 无前导斜杠
+        for p in [
+            "/data/app/com.example.foo-1/base.apk",
+            "/data/user/0/com.example.foo/base.apk",
+            "/storage/emulated/0/Download/x.apk",
+            "/system",
+            "/vendor",
+            "/product",
+            "/odm",
+            "/system_ext",
+            "/apex",
+            "",
+            "system/priv-app/x.apk",
+        ] {
+            assert!(!EngineState::is_system_partition_path(p), "非分区不应命中: {}", p);
+        }
+        // trim 容忍（pm 输出行可能带前导空格）
+        assert!(EngineState::is_system_partition_path("  /system/priv-app/x.apk "));
+    }
+
+    /// v0.4.55-l3：厂商包名域兜底——6 个厂商域命中（含更新到 /data 的私有组件）；
+    /// 域前缀无点（如 com.oplus 框架包本身）、非厂商域、空串不命中。
+    #[test]
+    fn vendor_pkg_domain_v055() {
+        for p in [
+            "com.oplus.phone",
+            "com.coloros.phonemanager",
+            "com.oneplus.settings",
+            "com.realme.movie",
+            "com.heytap.openid",
+            "com.nearme.instant",
+        ] {
+            assert!(EngineState::is_vendor_pkg_domain(p), "厂商域应命中: {}", p);
+        }
+        for p in [
+            "com.android.settings", // AOSP 域（走分区判定，不靠域兜底）
+            "com.tencent.mm",       // 第三方
+            "com.oplus",            // 域前缀无点 = 框架包本身，非组件（分区判定兜住）
+            "com.coloros",
+            "com.oneplus",
+            "com.realme",
+            "com.heytap",
+            "com.nearme",
+            "oplus.phone", // 缺 com. 前缀
+            "",
+        ] {
+            assert!(!EngineState::is_vendor_pkg_domain(p), "非厂商域不应命中: {}", p);
+        }
+    }
+
+    /// v0.4.55-l3：pm -f 输出行解析——双判定组合（分区路径 OR 厂商域）：
+    /// 用户分区普通包不保护；厂商私有组件更新到 /data 仍保护；畸形行安全 None。
+    #[test]
+    fn parse_pm_line_v055() {
+        // ① 系统分区命中
+        assert_eq!(
+            EngineState::parse_pm_line("package:/system/priv-app/Settings/Settings.apk=com.android.settings"),
+            Some("com.android.settings".to_string())
+        );
+        // ② /system_ext 分区命中（-s 标志漏项的核心修复点）
+        assert_eq!(
+            EngineState::parse_pm_line("package:/system_ext/priv-app/com.android.aaa/aaa.apk=com.android.aaa"),
+            Some("com.android.aaa".to_string())
+        );
+        // ③ 用户分区 + 厂商域兜底命中（更新到 /data 的私有组件）
+        assert_eq!(
+            EngineState::parse_pm_line("package:/data/app/~~abc==/com.coloros.phonemanager-1/base.apk=com.coloros.phonemanager"),
+            Some("com.coloros.phonemanager".to_string())
+        );
+        // ④ 用户分区普通包不保护
+        assert_eq!(
+            EngineState::parse_pm_line("package:/data/app/~~abc==/com.example.foo-1/base.apk=com.example.foo"),
+            None
+        );
+        // ⑤ 畸形行 / 空包名 / 空行安全 None（不 panic）
+        assert_eq!(EngineState::parse_pm_line("garbage line"), None);
+        assert_eq!(EngineState::parse_pm_line("package:/system/priv-app/x.apk="), None);
+        assert_eq!(EngineState::parse_pm_line(""), None);
+        assert_eq!(EngineState::parse_pm_line("   "), None);
+    }
+
+    /// v0.4.55-l3：discard 落刀前 exempt 表终检——持有前台服务/媒体/定位的
+    /// 冻结 app 不得被 SIGKILL 丢弃（与 tick 冻结路径豁免二次校验同构）。
+    /// 2026-08-11 联通 ANR 实机背书：焦点抖动（00:39-00:41 17 次切换）可致
+    /// last_focus 失真，此时 exempt 表实时判定是唯一可靠豁免源。
+    #[test]
+    fn discard_exempt_final_check_v055() {
+        let mut e = EngineState::default();
+        e.policy.enabled = true;
+        e.policy.keep_fg_service = true;
+        e.policy.keep_media = true;
+        e.policy.keep_location = true;
+
+        // ① 前台服务（fg_service=true）→ 终检拦截
+        e.on_exempt("com.service.app", true, false, false);
+        assert!(e.discard_ineligible("com.service.app"), "fg_service 终检拦截");
+
+        // ② 媒体播放（media=true）→ 终检拦截
+        e.on_exempt("com.music.app", false, true, false);
+        assert!(e.discard_ineligible("com.music.app"), "media 终检拦截");
+
+        // ③ 定位活动（location=true）→ 终检拦截
+        e.on_exempt("com.nav.app", false, false, true);
+        assert!(e.discard_ineligible("com.nav.app"), "location 终检拦截");
+
+        // ④ 无豁免标记（exempt 表 reason=none）→ 标准档可丢弃
+        e.on_exempt("com.normal.app", false, false, false);
+        assert!(!e.discard_ineligible("com.normal.app"), "无豁免可丢弃");
+
+        // ⑤ 豁免开关关闭（keep_* = false）→ 即使 exempt 表标记 true 也不拦截（配置决定）
+        let mut e2 = EngineState::default();
+        e2.policy.enabled = true;
+        e2.policy.keep_fg_service = false;
+        e2.policy.keep_media = false;
+        e2.policy.keep_location = false;
+        e2.on_exempt("com.service.app", true, true, true);
+        assert!(!e2.discard_ineligible("com.service.app"), "豁免开关关闭不拦截");
+
+        // ⑥ exempt 表无记录（dex 未上报/上报丢失）→ 不拦截（仅当有记录才判定）
+        let mut e3 = EngineState::default();
+        e3.policy.enabled = true;
+        e3.policy.keep_fg_service = true;
+        assert!(!e3.discard_ineligible("com.unknown.app"), "无 exempt 记录不拦截");
+
+        // ⑦ 联通 ANR 场景复现：焦点抖动致 last_focus 失真（最后焦点为 launcher），
+        //    联通仍持有前台服务 → exempt 终检兜底拦截落刀
+        let mut e4 = EngineState::default();
+        e4.policy.enabled = true;
+        e4.policy.keep_fg_service = true;
+        e4.last_focus = Some("com.oplus.launcher".to_string());
+        e4.on_exempt("com.sinovatech.unicom.ui", true, false, false);
+        assert!(
+            e4.discard_ineligible("com.sinovatech.unicom.ui"),
+            "焦点失真时 exempt 终检兜底（联通 ANR 场景）"
+        );
+    }
+
+    /// v0.4.55-l3：refresh_system_apps 失败安全——pm 不可用（测试环境）→
+    /// 空集回落（编译期 CRITICAL_PACKAGES 双保险由 should_never_freeze 保证），不 panic。
+    #[test]
+    fn refresh_system_apps_fallback_v055() {
+        let mut e = EngineState::default();
+        e.system_apps.insert("com.legacy.app".to_string());
+        e.refresh_system_apps();
+        // 测试环境无 pm → 走失败分支 → system_apps 清为空集（回落语义）
+        assert!(e.system_apps.is_empty(), "pm 失败回落空集");
+        // 编译期名单独立兜底（不受 pm 影响）
+        assert!(e.policy.is_critical("com.android.systemui"));
     }
 }

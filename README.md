@@ -2,8 +2,8 @@
 
 **日落而息 · 墓碑调度** — by SunsetREN
 
-> **当前阶段：`v0.4.54-l3`（sundownd release 59，versionCode 64）**
-> L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅ ｜ 单元测试 **50/50** ✅ ｜ AStop 差距矩阵 **P0/P1/P2 全阶段完成** ✅
+> **当前阶段：`v0.4.55-l3`（sundownd release 60，versionCode 65）**
+> L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅ ｜ 单元测试 **55/55** ✅ ｜ AStop 差距矩阵 **P0/P1/P2 全阶段完成** ✅
 > 发布默认观望模式（`[general] enabled=false`），冻结与超时丢弃功能待真机确认后开启。
 
 面向 KernelSU 系的 Android 墓碑（应用冻结）调度模块。从 AStop/Cerberus 演进而来：
@@ -13,7 +13,7 @@
 
 ```sh
 # 构建 L0 daemon（仅依赖 libc，release 体积优化）
-cd daemon && cargo test && cargo build --release      # 50/50
+cd daemon && cargo test && cargo build --release      # 55/55
 cargo build --release --target aarch64-linux-android  # 设备产物（交叉编译，NDK r29 sysroot）
 
 # 真机安装：KSU 管理器刷入 CI Nightly 产出的 sundown-<version>.zip（唯一分发渠道）
@@ -43,7 +43,7 @@ sunctl restart-daemon         # daemon 重启（L0 生效路径，无需软重�
 
 1. **冻结主线**：per-app 策略分级（exempt / standard / strict / IMPORTANT / force）→ grace 宽限 → cgroup v2 freezer 冻结（SIGSTOP 兜底 + OOM 锁 adj=-1000）→ 唤醒/前台解冻 → 冷却防抖。
 2. **豁免链**：前台（ExemptMonitor 2s 节拍权威源）/ 媒体 / 定位 / 高网络负载（256KB/30s）/ 任何网络活动（内核侧流量） / 交互·FCM 唤醒开关 / 定时解冻窗口 / 推送子进程保留（pid 级选择性冻结）。
-3. **防御体系**（对齐 AStop 防御链）：内置 critical 19 项 + 动态 system_apps 保护 / HANS·Freezer·OomAdjuster 防双冻结与防重算 / ANR 隐身 / Doze 白名单 / 候选池广播（frozen+grace+adj_keep 并集）/ Recents 任务保护（adj 锁定 + killLocked 双保险）。
+3. **防御体系**（对齐 AStop 防御链）：内置 critical 45 项 + 动态 system_apps 保护（pm -f 分区 + 厂商域双判定）/ HANS·Freezer·OomAdjuster 防双冻结与防重算 / ANR 隐身 / Doze 白名单 / 候选池广播（frozen+grace+adj_keep 并集）/ Recents 任务保护（adj 锁定 + killLocked 双保险）。
 4. **超时丢弃**（v0.4.52 新增，差异化行为）：冻结超时 → 整包 SIGKILL 释放内存；内存水位告急 → LRU+RSS 排序丢弃；开机缓存 → 主动回收。详见下节。
 5. **观测面**：结构化事件（EvLevel 7 档 × EvAction 9 种）+ JSONL 审计落盘（2MB 滚动 ×3）+ status JSON（契约只增不改）+ WebUI 仪表盘。
 
@@ -82,7 +82,7 @@ sunctl restart-daemon         # daemon 重启（L0 生效路径，无需软重�
 
 ### 版本同步
 
-module.prop `v0.4.52-l3`/versionCode=62 ＝ paths.rs `0.4.52-l3`/RELEASE_NO=57 ＝ sunctl `VERSION="0.4.52-l3"`；CI 防呆校验三处一致才打包。
+module.prop `v0.4.55-l3`/versionCode=65 ＝ paths.rs `0.4.55-l3`/RELEASE_NO=60 ＝ sunctl `VERSION="0.4.55-l3"`；CI 防呆校验三处一致才打包。
 
 ## 版本时间线
 
@@ -100,7 +100,8 @@ module.prop `v0.4.52-l3`/versionCode=62 ＝ paths.rs `0.4.52-l3`/RELEASE_NO=57 �
 | L3 实机加固 | v0.4.46-l3 → v0.4.51-l3 | 选择性冻结补 OOM 保护 + tick 周期重锁；pid 级解冻彻底化 + adj_keep；candidate-sync 候选池广播；CRITICAL_PACKAGES 19 项 + 动态 system_apps；系统链路 OOM 锁定（相机黑屏根治：37 组件 + android.process.media 恒锁）；Recents 任务保护实测补丁（o-stop(40) 实锤 + killLocked 双保险，release 56） |
 | **L3 超时丢弃** | **v0.4.52-l3** | **超时丢弃三机制落地（见上节）；46/46 测试；release 57** |
 | **L3 日志归档** | **v0.4.53-l3** | **日志按「版本 × 日期」归档**（见下节）：logs/\<version\>/\<date\>/ + install-time/effective-since 双时间记录；旧平铺日志一次性迁移；sunctl logs --list/--times；48/48 测试；release 58 |
-| **L3 日志降噪** | **v0.4.54-l3** | **实机校验修复**：cgroup.freeze ENOENT（uid 未运行）静默 + 其他失败 60s 节流 + OOM 保护锁定日志节流（08-08 实测 14445 条 WARN/天 → 归零）；**热更新行为冲突修复**（mv 原子替换 + 维护窗口 .updating + 新增 sunctl hotswap 受控热换）；50/50 测试；release 59；缺陷明细见 docs/bug-log.md（B01–B08） |
+| **L3 日志降噪** | **v0.4.54-l3** | **实机校验修复**：cgroup.freeze ENOENT（uid 未运行）静默 + 其他失败 60s 节流 + OOM 保护锁定日志节流（08-08 实测 14445 条 WARN/天 → 归零）；**热更新行为冲突修复**（mv 原子替换 + 维护窗口 .updating + 新增 sunctl hotswap 受控热换）；50/50 测试；release 59；缺陷明细见 docs/bug-log.md（B01–B09） |
+| **L3 系统组件保护强化** | **v0.4.55-l3** | **系统组件保护三改动**（2026-08-11 实机侦查后落地）：① CRITICAL_PACKAGES 36→45 项（拨号/设置存储/电话存储/NFC/WiFi 对话框/ColorOS 私有组件）；② `refresh_system_apps` 改 `pm -f` 按系统分区路径前缀 + 厂商包名域（oplus/coloros/oneplus/realme/heytap/nearme）双判定（-s 标志漏 /system_ext /product /vendor 分区项）；③ `discard_ineligible` 落刀前 exempt 表终检（fg_service/media/location，防焦点抖动误杀——联通 ANR 实机案例背书）；55/55 测试；release 60 |
 
 ## 日志归档（v0.4.53-l3：按版本 × 日期）
 
