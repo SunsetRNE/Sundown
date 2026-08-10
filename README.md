@@ -101,7 +101,7 @@ module.prop `v0.4.55-l3`/versionCode=65 ＝ paths.rs `0.4.55-l3`/RELEASE_NO=60 �
 | **L3 超时丢弃** | **v0.4.52-l3** | **超时丢弃三机制落地（见上节）；46/46 测试；release 57** |
 | **L3 日志归档** | **v0.4.53-l3** | **日志按「版本 × 日期」归档**（见下节）：logs/\<version\>/\<date\>/ + install-time/effective-since 双时间记录；旧平铺日志一次性迁移；sunctl logs --list/--times；48/48 测试；release 58 |
 | **L3 日志降噪** | **v0.4.54-l3** | **实机校验修复**：cgroup.freeze ENOENT（uid 未运行）静默 + 其他失败 60s 节流 + OOM 保护锁定日志节流（08-08 实测 14445 条 WARN/天 → 归零）；**热更新行为冲突修复**（mv 原子替换 + 维护窗口 .updating + 新增 sunctl hotswap 受控热换）；50/50 测试；release 59；缺陷明细见 docs/bug-log.md（B01–B09） |
-| **L3 系统组件保护强化** | **v0.4.55-l3** | **系统组件保护三改动**（2026-08-11 实机侦查后落地）：① CRITICAL_PACKAGES 36→45 项（拨号/设置存储/电话存储/NFC/WiFi 对话框/ColorOS 私有组件）；② `refresh_system_apps` 改 `pm -f` 按系统分区路径前缀 + 厂商包名域（oplus/coloros/oneplus/realme/heytap/nearme）双判定（-s 标志漏 /system_ext /product /vendor 分区项）；③ `discard_ineligible` 落刀前 exempt 表终检（fg_service/media/location，防焦点抖动误杀——联通 ANR 实机案例背书）；55/55 测试；release 60 |
+| **L3 系统组件保护强化** | **v0.4.55-l3** | **系统组件保护三改动**（2026-08-11 实机侦查后落地）：① CRITICAL_PACKAGES 37→46 项（拨号/设置存储/电话存储/NFC/WiFi 对话框/ColorOS 私有组件）；② `refresh_system_apps` 改 `pm -f` 按系统分区路径前缀 + 厂商包名域（oplus/coloros/oneplus/realme/heytap/nearme）双判定（-s 标志漏 /system_ext /product /vendor 分区项）；③ `discard_ineligible` 落刀前 exempt 表终检（fg_service/media/location，防焦点抖动误杀——联通 ANR 实机案例背书）；55/55 测试；release 60 |
 
 ## 日志归档（v0.4.53-l3：按版本 × 日期）
 
