@@ -289,7 +289,7 @@ fetch_update_zip() {
             echo "❌ 无 curl/wget，无法查询 nightly 资源（可改传本地 zip 路径）" >&2
             return 1
         fi
-        url="$(printf '%s' "$api_json" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*sundown-[^"]*\.zip\)".*//p' | head -n 1)"
+        url="$(printf '%s' "$api_json" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*sundown-[^"]*\.zip\)".*/\1/p' | head -n 1)"
         [ -z "$url" ] && { echo "❌ 未找到 nightly 模块包（Release 为空或 API 失败）" >&2; return 1; }
     fi
     echo "ℹ️  下载: $url"
@@ -324,8 +324,8 @@ stage_update() {
     # 运行新 daemon --version 解析版本（与 daemon 内部 release_no 同源）
     local ver_line new_ver new_rel
     ver_line="$( "$new_bin" --version 2>/dev/null | head -n 1 )"
-    new_ver="$(printf '%s' "$ver_line" | sed -n 's/.*sundownd[[:space:]]*\([^ ]*\)[[:space:]]*(release_no[[:space:]]*\([0-9][0-9]*\).*//p')"
-    new_rel="$(printf '%s' "$ver_line" | sed -n 's/.*(release_no[[:space:]]*\([0-9][0-9]*\).*//p')"
+    new_ver="$(printf '%s' "$ver_line" | sed -n 's/.*sundownd[[:space:]]*\([^ ]*\)[[:space:]]*(release_no[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    new_rel="$(printf '%s' "$ver_line" | sed -n 's/.*(release_no[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
     if [ -z "$new_ver" ] || [ -z "$new_rel" ]; then
         echo "❌ 无法解析新 daemon 版本（--version 输出异常）" >&2
         return 1
