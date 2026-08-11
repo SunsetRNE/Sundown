@@ -6,6 +6,31 @@
 
 ---
 
+## v0.4.57-l3 (2026-08-12)
+
+**B2 事件订阅注册表（缺口补入 B 档架构层）+ CI 正式发布流程改造（v0.4.56-l3 起不做 Nightly 测试版）**
+
+### B 档 · P1 架构演进
+- **B2 事件订阅注册表**（替代全量广播，按需分发）：
+  - `daemon` 新增 `Subscription` 过滤器：事件类型（kinds）+ 包名（packages）双轴
+  - **默认全量**（Default = 收所有事件），旧 dex 不声明 subscribe 行为不变（零风险兼容）
+  - 包名精确 + `pkg.*` 前缀通配；无 `pkg=` 事件（frozen-sync/candidate-sync）仅按 kind 过滤
+  - 协议扩展（只增不改）：订阅连接新增 `subscribe` 命令（`kinds=<a,b> packages=<x,y>` 声明兴趣 / `query` 查询 / `clear` 重置全量）；未知 key 前向兼容忽略；格式错误 Err 防静默吞错
+  - `state.rs` dex_clients 升级为 (id, stream, Subscription) 三元组，`broadcast_line`/`broadcast_dex` 按过滤器分发（不感兴趣连接保留但不通知）；main.rs 广播携带 kind
+
+### CI 正式发布流程（v0.4.56-l3 起）
+- 删除 nightly 滚动三步（tag 移动 / 旧 assets 清理 / 滚动 Release）
+- 新增 **CHANGELOG 版本条目防呆**：每个版本必须留档，缺失则构建失败
+- 新增 Release notes 提取（awk 抽取当前版本条目为 body）
+- 发布正式 Release：**tag = 版本号**，非 prerelease，覆盖 asset 软发布
+- 新增 CHANGELOG.md 版本档案（v0.1.0-l0 → 当前全版本留档）
+
+### 验证
+- cargo test 65/65（原 58 + 新增 B2 订阅 7 项：解析 4 / 匹配 2 / pkg= 提取 1）
+- 正式 Release v0.4.56-l3 已自动创建成功（tag=v0.4.56-l3，55c65d0）
+
+---
+
 ## v0.4.56-l3 (2026-08-12)
 
 **缺口补入 A 档 + B1（决策：不重写，三档增量补入，见 `Sundown-缺口补入清单.md`）**
