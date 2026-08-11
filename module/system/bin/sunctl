@@ -266,11 +266,11 @@ cmd_reload_probe() {
 # pending 四件套：sundownd.new / installed.json.new / pending.sha256 / pending.json(staged_boot_id)
 # 激活路径：A) 重启后 service.sh apply_pending_update（boot_id 变化才放行）
 #          B) sunctl apply-update --activate 立即激活（用户显式确认，同 boot 允许）
-NIGHTLY_API="https://api.github.com/repos/SunsetRNE/Sundown/releases/tags/nightly"
-NIGHTLY_DL="https://github.com/SunsetRNE/Sundown/releases/download/nightly"
+# v0.4.57-l3：正式发布流程（无 Nightly）——latest = 最新正式 Release（非 prerelease）
+RELEASE_API="https://api.github.com/repos/SunsetRNE/Sundown/releases/latest"
 DL_DIR="$SUNDOWN_DIR/update/download"
 
-# 下载模块 zip：<URL> 或缺省（GitHub API 查 nightly asset）
+# 下载模块 zip：<URL/本地路径> 或缺省（GitHub API 查最新正式 Release asset）
 fetch_update_zip() {
     local src="$1" out="$DL_DIR/sundown.zip"
     mkdir -p "$DL_DIR"
@@ -279,18 +279,18 @@ fetch_update_zip() {
     fi
     local url="$src"
     if [ -z "$url" ]; then
-        # 无参：GitHub API 查 nightly release 的 sundown-*.zip asset URL
+        # 无参：GitHub API 查最新正式 Release 的 sundown-*.zip asset URL
         local api_json
         if command -v curl >/dev/null 2>&1; then
-            api_json="$(curl -s --max-time 20 "$NIGHTLY_API" 2>/dev/null)"
+            api_json="$(curl -s --max-time 20 "$RELEASE_API" 2>/dev/null)"
         elif command -v wget >/dev/null 2>&1; then
-            api_json="$(wget -qO- --timeout=20 "$NIGHTLY_API" 2>/dev/null)"
+            api_json="$(wget -qO- --timeout=20 "$RELEASE_API" 2>/dev/null)"
         else
-            echo "❌ 无 curl/wget，无法查询 nightly 资源（可改传本地 zip 路径）" >&2
+            echo "❌ 无 curl/wget，无法查询最新 Release（可改传本地 zip 路径）" >&2
             return 1
         fi
         url="$(printf '%s' "$api_json" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*sundown-[^"]*\.zip\)".*/\1/p' | head -n 1)"
-        [ -z "$url" ] && { echo "❌ 未找到 nightly 模块包（Release 为空或 API 失败）" >&2; return 1; }
+        [ -z "$url" ] && { echo "❌ 未找到最新正式 Release 模块包（Release 为空或 API 失败）" >&2; return 1; }
     fi
     echo "ℹ️  下载: $url"
     if command -v curl >/dev/null 2>&1; then
@@ -519,7 +519,7 @@ cmd_apply_update() {
         return $?
     fi
     local zip="$(fetch_update_zip "$src")" || return 1
-    local label="${src:-nightly}"
+    local label="${src:-latest}"
     local staged
     staged="$(stage_update "$zip" "$label")" || return 1
     local new_ver="${staged%%|*}" new_rel="${staged##*|}"
@@ -822,7 +822,7 @@ usage() {
   events [行数]          [L3.1] 结构化事件时间线（JSON；焦点/唤醒/冻结/豁免/握手）
   config export [路径]   [迁移] 导出配置压缩包（policy.toml + action.toml + sha256 校验清单）
   config import <路径>   [迁移] 导入配置压缩包（白名单校验 → 完整性校验 → 备份 → 热加载）
-  apply-update [src]    [L0] 下载/暂存 daemon 更新（src=本地zip或URL；缺省查 GitHub Nightly）
+  apply-update [src]    [L0] 下载/暂存 daemon 更新（src=本地zip或URL；缺省查最新正式 Release）
   apply-update --activate [L0] 立即激活已暂存更新（备份/readiness/自动回滚）
   hotswap <二进制> [meta] [L0] 受控热换 daemon 二进制（架构判定/防降级/原子替换/回滚）
   logs [行数]            查看启动看门狗日志（当前生效版本最新日期目录）
