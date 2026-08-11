@@ -157,6 +157,30 @@ keep_media = false
     }
 
     #[test]
+    fn parse_presets_instant_v06() {
+        // 立即墓碑档位（A2）：grace_seconds=0 必须解析为 0（int_of.max(0) 不钳 0）
+        let src = r#"
+[presets."instant"]
+enabled = true
+grace_seconds = 0
+cooldown_seconds = 120
+keep_fg_service = true
+keep_media = true
+"#;
+        let t = PresetTable::from_toml(src, 7).unwrap();
+        let i = &t.presets["instant"];
+        assert!(i.enabled);
+        assert_eq!(i.grace_seconds, 0);
+        assert_eq!(i.cooldown_seconds, 120);
+        assert!(i.keep_fg_service);
+        assert!(i.keep_media);
+        // 负数钳 0（与 max(0) 一致）
+        let src2 = "[presets.\"x\"]\ngrace_seconds = -5\n";
+        let t2 = PresetTable::from_toml(src2, 1).unwrap();
+        assert_eq!(t2.presets["x"].grace_seconds, 0);
+    }
+
+    #[test]
     fn parse_presets_bad() {
         assert!(PresetTable::from_toml("k = ", 0).is_err());
         // 未知键忽略不致命

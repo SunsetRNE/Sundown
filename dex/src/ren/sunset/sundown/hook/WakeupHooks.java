@@ -88,14 +88,15 @@ final class WakeupHooks implements HookEngine {
         return res;
     }
 
-    /** 服务启动：ServiceRecord 实参 → packageName/name/appInfo 字段枚举 */
+    /** 服务启动：ServiceRecord 实参 → packageName/name/appInfo 字段枚举；v0.6-l3 携带组件名
+     *  （ServiceRecord.name ComponentName flatten，Service gate 门控匹配键） */
     public Object onServiceStart(MethodCallback cb) {
         Object res = cb.invokeOriginalOrDefault();
         try {
             for (Object a : cb.args) {
                 String pkg = extractPkgFromRecord(a);
                 if (pkg != null) {
-                    reportWakeup(pkg, "service");
+                    reportWakeup(pkg, "service", componentFromRecord(a));
                     break;
                 }
             }
@@ -105,7 +106,8 @@ final class WakeupHooks implements HookEngine {
         return res;
     }
 
-    /** PendingIntent 触发：this（args[0]）→ key.packageName */
+    /** PendingIntent 触发：this（args[0]）→ key.packageName；v0.6-l3 携带组件名
+     *  （key.intent component flatten，PendingIntent gate 门控匹配键） */
     public Object onPendingSend(MethodCallback cb) {
         Object res = cb.invokeOriginalOrDefault();
         try {
@@ -116,7 +118,7 @@ final class WakeupHooks implements HookEngine {
                 pkg = readStringField(key, "packageName");
             }
             if (pkg != null) {
-                reportWakeup(pkg, "pendingintent");
+                reportWakeup(pkg, "pendingintent", componentFromKey(key));
             }
         } catch (Throwable t) {
             Log.w(TAG, "PendingIntent 事件提取失败: " + t);
@@ -130,9 +132,34 @@ final class WakeupHooks implements HookEngine {
         dispatcher.dispatch("event wakeup pkg=" + pkg + " reason=" + reason);
     }
 
-    /** v0.4.43-l3：带广播 action（Receiver gate 门控数据源；仅 broadcast 源携带） */
-    private void reportWakeup(String pkg, String reason, String action) {
-        dispatcher.dispatch("event wakeup pkg=" + pkg + " reason=" + reason + " action=" + action);
+    /** v0.4.43-l3：带广播 action（Receiver gate 门控数据源；仅 broadcast 源携带）
+     *  v0.6-l3：service/pendingintent 源复用此入口，第三参 = 组件 flatten（缺省 "?"） */
+    private void reportWakeup(String pkg, String reason, String key) {
+        dispatcher.dispatch("event wakeup pkg=" + pkg + " reason=" + reason + " action=" + key);
+    }
+
+    /** ServiceRecord → 组件名（匹配键）：name(ComponentName) flatten 优先，intent.getComponent 兜底 */
+    private static String componentFromRecord(Object rec) {
+        if (rec == null) return "?";
+        Object name = readField(rec, "name");
+        if (name instanceof ComponentName) return ((ComponentName) name).flattenToString();
+        Object intent = readField(rec, "intent");
+        if (intent instanceof Intent) {
+            ComponentName c = ((Intent) intent).getComponent();
+            if (c != null) return c.flattenToString();
+        }
+        return "?";
+    }
+
+    /** PendingIntentRecord.Key → 组件名（匹配键）：key.intent component flatten */
+    private static String componentFromKey(Object key) {
+        if (key == null) return "?";
+        Object intent = readField(key, "intent");
+        if (intent instanceof Intent) {
+            ComponentName c = ((Intent) intent).getComponent();
+            if (c != null) return c.flattenToString();
+        }
+        return "?";
     }
 
     private static String pkgOf(Intent intent) {

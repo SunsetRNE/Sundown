@@ -217,8 +217,20 @@ pub struct Policy {
     /// 广播门控白名单（v0.4.43-l3，对齐 AStop Receiver gate 裁剪版）：
     /// 非空时，冻结 app 仅白名单广播 action 触发解冻（其余留痕 receiver_gated 不解冻）；
     /// 空 = 全部放行（保持既有行为，零风险默认）。仅约束 broadcast 源；
-    /// service/pendingintent 唤醒不受门控；IMPORTANT 档 app 不受门控（保持"重要"语义）
+    /// service/pendingintent 唤醒不受门控；IMPORTANT 档 app 不受门控（保持"重要"语义）；
+    /// "*" = 通配全部放行
     pub receiver_gate: Vec<String>,
+    /// 服务启动门控白名单（v0.6-l3，缺口补入清单 A3 压制维度扩展，同构复制 receiver_gate）：
+    /// 非空时，冻结 app 的 service 唤醒（realStartServiceLocked）仅白名单组件命中才解冻
+    /// （其余留痕 service_gated 不解冻）——对齐 AStop autostart 抑制：后台拉起
+    /// 服务不会让 app 脱离墓碑；空 = 全部放行（默认零风险）；IMPORTANT 档不受门控；
+    /// 匹配键 = dex 上报的 service 组件名（flatten 字符串），"*" 通配全部放行
+    pub service_gate: Vec<String>,
+    /// PendingIntent 触发门控白名单（v0.6-l3，A3，同构复制 receiver_gate）：
+    /// 非空时，冻结 app 的 pendingintent 唤醒（sendInner）仅白名单组件命中才解冻
+    /// （其余留痕 pendingintent_gated 不解冻）；空 = 全部放行；IMPORTANT 档不受门控；
+    /// 匹配键 = dex 上报的 component 名（flatten 字符串），"*" 通配全部放行
+    pub pendingintent_gate: Vec<String>,
     /// 强制冻结名单（命中即冻，优先级高于豁免动作，但白名单仍优先）
     pub force: Vec<String>,
     /// 永不冻结白名单
@@ -273,6 +285,8 @@ impl Default for Policy {
             cooldown_seconds: 60,
             wake_throttle_seconds: 60,
             receiver_gate: Vec::new(),
+            service_gate: Vec::new(),
+            pendingintent_gate: Vec::new(),
             force: Vec::new(),
             whitelist: Vec::new(),
             apps: HashMap::new(),
@@ -360,6 +374,8 @@ fn apply_entry(p: &mut Policy, e: &TomlEntry) {
         ("freeze", "force") => p.force = str_array_of(val, e),
         ("whitelist", "packages") => p.whitelist = str_array_of(val, e),
         ("whitelist", "receiver_gate") => p.receiver_gate = str_array_of(val, e),
+        ("whitelist", "service_gate") => p.service_gate = str_array_of(val, e),
+        ("whitelist", "pendingintent_gate") => p.pendingintent_gate = str_array_of(val, e),
         ("whitelist", "keep_fg_service") => p.keep_fg_service = bool_of(val, e, true),
         ("whitelist", "keep_media") => p.keep_media = bool_of(val, e, true),
         ("whitelist", "keep_location") => p.keep_location = bool_of(val, e, true),
@@ -699,6 +715,34 @@ grace_seconds = 120
                 "android.intent.action.BOOT_COMPLETED".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn service_pendingintent_gate_parse_v06() {
+        // v0.6-l3（缺口补入清单 A3）：service/pendingintent 门控解析（缺省空 = 全放行）
+        let p = Policy::from_toml("[general]\nenabled = true", 1).unwrap();
+        assert!(p.service_gate.is_empty());
+        assert!(p.pendingintent_gate.is_empty());
+        let src = r#"
+[whitelist]
+service_gate = ["com.example.app.SyncService", "com.example.app.PushService"]
+pendingintent_gate = ["com.example.app"]
+"#;
+        let p2 = Policy::from_toml(src, 2).unwrap();
+        assert_eq!(
+            p2.service_gate,
+            vec![
+                "com.example.app.SyncService".to_string(),
+                "com.example.app.PushService".to_string()
+            ]
+        );
+        assert_eq!(p2.pendingintent_gate, vec!["com.example.app".to_string()]);
+        // 通配符 "*" 正常解析（放行语义在 engine 判定）
+        let p3 = Policy::from_toml("[whitelist]\nservice_gate = [\"*\"]", 3).unwrap();
+        assert_eq!(p3.service_gate, vec!["*".to_string()]);
+        // 坏值回落空（失败安全）
+        let p4 = Policy::from_toml("[whitelist]\nservice_gate = 12", 4).unwrap();
+        assert!(p4.service_gate.is_empty());
     }
 
     #[test]

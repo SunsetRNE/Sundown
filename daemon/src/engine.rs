@@ -214,10 +214,14 @@ impl EngineState {
     /// v0.4.42-l3：wake_throttle_seconds 节流——后台唤醒解冻后窗口内同包再次唤醒
     /// 不解冻（事件留痕 reason=wakeup_throttled），对齐 AStop Probe 60s 限流。
     /// v0.4.43-l3：receiver_gate 广播门控——冻结中 broadcast 源且 action 不在白名单
-    /// → 不解冻（留痕 reason=receiver_gated）；service/pendingintent 不受门控；
-    /// IMPORTANT 档 app 不受门控（保持"重要"语义）。门控优先于节流。
+    /// → 不解冻（留痕 reason=receiver_gated）；IMPORTANT 档 app 不受门控（保持"重要"语义）。
+    /// v0.6-l3（缺口补入清单 A3 压制维度扩展）：同构复制到 service/pendingintent 源——
+    /// 对齐 AStop autostart 抑制：后台拉起服务/PendingIntent 不会让 app 脱离墓碑
+    /// （白名单外留痕 service_gated / pendingintent_gated 不解冻）。门控优先于节流。
+    /// 匹配键：broadcast = action；service/pendingintent = 组件 flatten（dex 上报，缺省 "?"）；
+    /// "*" = 通配全部放行（三源通用）。
     /// source：唤醒源（dex 上行 reason=broadcast|service|pendingintent；缺省 "?"）。
-    /// action：广播 action（仅 broadcast 源携带；dex 未上报或缺省 "?"）。
+    /// action：匹配键（broadcast 源 = action；service/pendingintent 源 = 组件名；缺省 "?"）。
     pub fn on_wakeup(&mut self, pkg: &str, source: &str, action: &str) {
         if !self.keep_wakeup(pkg) {
             logi!("L3 唤醒忽略（keep_wakeup=false）: {}", pkg);
@@ -231,22 +235,48 @@ impl EngineState {
             return;
         }
         let now = Instant::now();
-        // v0.4.43-l3：广播门控——冻结中 + broadcast 源 + action 不在白名单 → 不解冻。
-        // 白名单空 = 全部放行（默认零风险）；IMPORTANT 档绕过（保持"重要"语义）；
-        // service/pendingintent 源绕过（门控只管广播）。
-        let gated = source == "broadcast"
-            && !self.policy.receiver_gate.is_empty()
-            && self.mode_of(pkg) != AppMode::Important
-            && self.frozen.contains_key(pkg)
-            && !self.policy.receiver_gate.iter().any(|a| a == action);
-        if gated {
-            logi!("L3 广播门控: {} action={}（白名单外不解冻）", pkg, action);
+        // 三源唤醒门控（v0.4.43-l3 broadcast / v0.6-l3 service+pendingintent）：
+        // 冻结中 + 源门控非空 + 匹配键不在白名单（"*" 通配放行）→ 不解冻。
+        // 白名单空 = 全部放行（默认零风险）；IMPORTANT 档绕过（保持"重要"语义）。
+        let gated: Option<(&'static str, String)> = {
+            if self.mode_of(pkg) == AppMode::Important || !self.frozen.contains_key(pkg) {
+                None
+            } else if source == "broadcast"
+                && !self.policy.receiver_gate.is_empty()
+                && !self.policy.receiver_gate.iter().any(|a| a == action || a == "*")
+            {
+                Some(("receiver_gated", action.to_string()))
+            } else if source == "service"
+                && !self.policy.service_gate.is_empty()
+                && !self.policy.service_gate.iter().any(|a| a == action || a == "*")
+            {
+                Some(("service_gated", action.to_string()))
+            } else if source == "pendingintent"
+                && !self.policy.pendingintent_gate.is_empty()
+                && !self.policy
+                    .pendingintent_gate
+                    .iter()
+                    .any(|a| a == action || a == "*")
+            {
+                Some(("pendingintent_gated", action.to_string()))
+            } else {
+                None
+            }
+        };
+        if let Some((reason, key)) = gated {
+            logi!(
+                "L3 唤醒门控: {} source={} key={}（{}）",
+                pkg,
+                source,
+                key,
+                reason
+            );
             self.events.push_app(
                 EvLevel::Info,
                 EvAction::Exempt,
                 pkg,
-                Some("receiver_gated"),
-                Some(action),
+                Some(reason),
+                Some(&key),
             );
             return;
         }
@@ -1563,6 +1593,10 @@ impl EngineState {
         }
         // 离开即计时（已在 grace 中也重置到离开时刻——防止"切回再离开"沿用旧
         // 时刻导致刚离开就被到期冻结）
+        // v0.6-l3（缺口补入清单 A2）立即墓碑档位：grace_dur=0 时仍在 grace 表计时，
+        // tick（300ms 节拍）扫描 `elapsed >= Duration::from_secs(0)` 恒成立 →
+        // 下一 tick 即到期落冻（≤300ms 延迟，等效"离开前台即入冻结队列"）。
+        // 豁免链/二次校验不减判，防抖由 cooldown（instant 预设 120s）承担。
         self.grace.insert(pkg.to_string(), (now, grace_dur));
         // v0.4.47-l3：退后台进 grace 即锁 OOM（adj=-1000）——系统 AppFreezer 只冻结
         // cached（adj≥阈值）app；不锁则系统会抢先 pid 级冻结候选 app（Sundown 解冻后
@@ -1793,12 +1827,90 @@ mod tests {
         e4.on_wakeup("com.tencent.mm", "broadcast", "com.vendor.SPAM");
         assert!(!e4.frozen.contains_key("com.tencent.mm"), "IMPORTANT 档绕过门控");
 
-        // ⑤ gate 非空 + service 源 → 不受门控（门控只管广播）
+        // ⑤ gate 非空 + service 源 → 不受 receiver_gate 门控（receiver 只管 broadcast）
         let mut e5 = EngineState::default();
         e5.policy.receiver_gate = vec!["android.intent.action.USER_PRESENT".to_string()];
         e5.frozen.insert("com.gate.app".to_string(), Instant::now());
         e5.on_wakeup("com.gate.app", "service", "?");
-        assert!(!e5.frozen.contains_key("com.gate.app"), "service 源不受门控");
+        assert!(!e5.frozen.contains_key("com.gate.app"), "service 源不受 receiver_gate 门控");
+    }
+
+    /// v0.6-l3（缺口补入清单 A3 压制维度扩展）：service/pendingintent 门控——
+    /// 同构复制 receiver_gate：白名单外不解冻（service_gated/pendingintent_gated 留痕）；
+    /// 空 = 全放行；IMPORTANT 档绕过；"*" 通配放行；互不干扰（各管各源）。
+    #[test]
+    fn service_pendingintent_gate_v06() {
+        // ① service_gate 空（默认）→ service 唤醒正常解冻（现状兼容）
+        let mut e = EngineState::default();
+        e.frozen.insert("com.gate.app".to_string(), Instant::now());
+        e.on_wakeup("com.gate.app", "service", "com.gate.app.SyncService");
+        assert!(!e.frozen.contains_key("com.gate.app"), "空 service_gate 全放行");
+
+        // ② service_gate 非空 + 白名单组件 → 解冻
+        let mut e2 = EngineState::default();
+        e2.policy.service_gate = vec!["com.gate.app.SyncService".to_string()];
+        e2.frozen.insert("com.gate.app".to_string(), Instant::now());
+        e2.on_wakeup("com.gate.app", "service", "com.gate.app.SyncService");
+        assert!(!e2.frozen.contains_key("com.gate.app"), "白名单组件放行");
+
+        // ③ service_gate 非空 + 白名单外 → 不解冻 + service_gated 留痕
+        let mut e3 = EngineState::default();
+        e3.policy.service_gate = vec!["com.gate.app.SyncService".to_string()];
+        e3.frozen.insert("com.gate.app".to_string(), Instant::now());
+        e3.on_wakeup("com.gate.app", "service", "com.gate.app.PushService");
+        assert!(e3.frozen.contains_key("com.gate.app"), "白名单外不解冻");
+        let j3 = e3.events.to_json(8);
+        assert!(j3.contains("service_gated"), "留痕 service_gated: {}", j3);
+
+        // ④ service_gate 非空 + dex 未上报组件（"?"）→ 门控（全静默语义，配置即抑制）
+        let mut e4 = EngineState::default();
+        e4.policy.service_gate = vec!["com.gate.app.SyncService".to_string()];
+        e4.frozen.insert("com.gate.app".to_string(), Instant::now());
+        e4.on_wakeup("com.gate.app", "service", "?");
+        assert!(e4.frozen.contains_key("com.gate.app"), "未上报组件 → 门控");
+
+        // ⑤ pendingintent_gate 非空 + 白名单外 → 不解冻 + pendingintent_gated 留痕
+        let mut e5 = EngineState::default();
+        e5.policy.pendingintent_gate = vec!["com.gate.app".to_string()];
+        e5.frozen.insert("com.gate.app".to_string(), Instant::now());
+        e5.on_wakeup("com.gate.app", "pendingintent", "com.vendor.SPAM");
+        assert!(e5.frozen.contains_key("com.gate.app"), "pendingintent 白名单外不解冻");
+        let j5 = e5.events.to_json(8);
+        assert!(j5.contains("pendingintent_gated"), "留痕 pendingintent_gated: {}", j5);
+
+        // ⑥ "*" 通配 → 全部放行（三源通用）
+        let mut e6 = EngineState::default();
+        e6.policy.service_gate = vec!["*".to_string()];
+        e6.policy.pendingintent_gate = vec!["*".to_string()];
+        e6.frozen.insert("com.gate.app".to_string(), Instant::now());
+        e6.on_wakeup("com.gate.app", "service", "com.vendor.SPAM");
+        assert!(!e6.frozen.contains_key("com.gate.app"), "* 通配放行 service");
+        let mut e6b = EngineState::default();
+        e6b.policy.pendingintent_gate = vec!["*".to_string()];
+        e6b.frozen.insert("com.gate.app".to_string(), Instant::now());
+        e6b.on_wakeup("com.gate.app", "pendingintent", "com.vendor.SPAM");
+        assert!(!e6b.frozen.contains_key("com.gate.app"), "* 通配放行 pendingintent");
+
+        // ⑦ IMPORTANT 档绕过 service 门控（保持"重要"语义）
+        let mut e7 = EngineState::default();
+        e7.policy.service_gate = vec!["com.gate.app.SyncService".to_string()];
+        e7.policy.apps.insert(
+            "com.tencent.mm".to_string(),
+            crate::policy::AppPolicy {
+                mode: AppMode::Important,
+                ..Default::default()
+            },
+        );
+        e7.frozen.insert("com.tencent.mm".to_string(), Instant::now());
+        e7.on_wakeup("com.tencent.mm", "service", "com.vendor.SPAM");
+        assert!(!e7.frozen.contains_key("com.tencent.mm"), "IMPORTANT 档绕过 service 门控");
+
+        // ⑧ 互不干扰：receiver_gate 不影响 service 源（service 走 service_gate）
+        let mut e8 = EngineState::default();
+        e8.policy.receiver_gate = vec!["android.intent.action.USER_PRESENT".to_string()];
+        e8.frozen.insert("com.gate.app".to_string(), Instant::now());
+        e8.on_wakeup("com.gate.app", "service", "?");
+        assert!(!e8.frozen.contains_key("com.gate.app"), "receiver_gate 不管 service 源");
     }
 
     /// v0.4.52-l3：冻结超时丢弃——过期判定（纯逻辑）+ 失败安全路径。

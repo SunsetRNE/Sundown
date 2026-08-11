@@ -14,6 +14,14 @@
 #   无副作用 → 全程无 ANR/崩溃；微信/QQ 后台唤醒仅记录不冻结
 #
 # [general]   enabled 总开关 / grace_seconds 退后台宽限秒数 / cooldown_seconds 解冻后冷却秒数
+#             grace_seconds 语义（v0.6-l3 立即墓碑档位）：
+#               30  = 温和（缺省）：退后台宽限 30s 再冻，防抖动
+#               5~10 = 激进：短宽限（对应 strict 模式 8s 缺省）
+#               0   = 立即墓碑：离开前台即进入冻结队列（tick ≤300ms 落冻，
+#                    走完整豁免链 + 二次校验——失败安全不减判；防抖由
+#                    cooldown_seconds 承担，建议配合 120s+ 冷却与唤醒节流）
+#             理念可配，不是改哲学：默认温和，需要"立即墓碑"的 app 用
+#             [apps."pkg"] grace_seconds = 0 或 action.toml instant 预设一键切换
 #             wake_throttle_seconds 唤醒节流秒数（v0.4.42-l3，对齐 AStop Probe 60s 限流）：
 #               后台唤醒（broadcast/service/pendingintent）触发解冻后，窗口内同包再次唤醒
 #               不解冻（防 FCM/广播风暴反复解冻-再冻抖动）；0=关闭；用户交互（focus）不受限
@@ -22,7 +30,18 @@
 #             receiver_gate 广播门控白名单（v0.4.43-l3，对齐 AStop Receiver gate 裁剪版）：
 #               非空时冻结 app 仅白名单广播 action 触发解冻（其余留痕 receiver_gated 不解冻）；
 #               空 = 全部放行（默认零风险）；仅约束 broadcast 源（service/pendingintent 不受限）；
-#               IMPORTANT 档 app 不受门控（保持"重要"语义）
+#               IMPORTANT 档 app 不受门控（保持"重要"语义）；"*" = 通配全部放行
+#             service_gate 服务启动门控白名单（v0.6-l3，缺口补入清单 A3 压制维度扩展）：
+#               非空时冻结 app 的 service 唤醒仅白名单组件命中才解冻（其余留痕 service_gated
+#               不解冻）——对齐 AStop autostart 抑制：后台拉起服务不会让 app 脱离墓碑；
+#               空 = 全部放行（默认零风险）；IMPORTANT 档不受门控；匹配键 = dex 上报的
+#               service 组件名（flatten 字符串）；"*" = 通配全部放行
+#             pendingintent_gate PendingIntent 触发门控白名单（v0.6-l3，A3）：
+#               非空时冻结 app 的 pendingintent 唤醒仅白名单组件命中才解冻（其余留痕
+#               pendingintent_gated 不解冻）；空 = 全部放行；IMPORTANT 档不受门控；
+#               匹配键 = dex 上报的 component 名；"*" = 通配全部放行
+#               ⚠️ 注意：service/pendingintent 门控默认关闭（空），需要抑制后台拉起时
+#               在下方 [whitelist] 配置；配置后不命中白名单的拉起一律不解冻（墓碑语义）
 #             keep_location 定位活动豁免（v0.4.20-l3：dex 侧 AppOps 判定 loc=1，定位使用中不冻）
 #             keep_high_network 高网络负载豁免（v0.4.19-l3，daemon 侧流量采样判定）
 #             keep_network 网络豁免（v0.4.23-l3，对齐 AStop force_network_exemption）：
@@ -85,6 +104,7 @@
 
 [general]
 enabled = false
+# 立即墓碑档位：设 0 = 离开前台即冻结（配合 cooldown 120s+ 防抖）；缺省 30 = 温和
 grace_seconds = 30
 cooldown_seconds = 60
 wake_throttle_seconds = 60
@@ -122,6 +142,17 @@ keep_location = true
 keep_high_network = true
 keep_network = true
 push_policy = "keep"
+
+# ---- 唤醒门控（v0.4.43-l3 broadcast / v0.6-l3 service+pendingintent，A3 压制维度）----
+# 默认全部留空 = 全放行（零风险）。需要"压制后台拉起"时配置对应源门控：
+#   receiver_gate      广播门控：白名单外 broadcast 不解冻（留痕 receiver_gated）
+#   service_gate       服务门控：白名单外 service 启动不解冻（留痕 service_gated）
+#   pendingintent_gate PendingIntent 门控：白名单外触发不解冻（留痕 pendingintent_gated）
+# 匹配键：broadcast = action 字符串；service/pendingintent = 组件名（如 "com.tencent.mm/com.tencent.mm.service.AccountService"）
+# "*" = 通配全部放行；IMPORTANT 档 app 不受任何门控
+# receiver_gate = ["android.intent.action.USER_PRESENT", "android.intent.action.BOOT_COMPLETED"]
+# service_gate = ["com.tencent.mm/com.tencent.mm.service.AccountService"]
+# pendingintent_gate = []
 
 # ---- per-app 策略示例（默认全部注释：不配置 = 跟随全局 standard 规则）----
 # 通讯类高频 app：strict + 保留媒体豁免（语音通话/视频播放中不冻），grace 15s 兼顾消息场景

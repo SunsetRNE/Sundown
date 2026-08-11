@@ -36,3 +36,14 @@ grace_seconds = 60
 cooldown_seconds = 60
 keep_fg_service = true
 keep_media = true
+
+[presets."instant"]
+# 立即墓碑（v0.6-l3，缺口补入清单 A2）：离开前台即冻结（grace=0，tick ≤300ms 落冻），
+# 前台服务/媒体豁免保留（防冻掉音乐/通话）。防抖由更长冷却承担（120s：解冻后
+# 免冻窗口拉长，吸收"切走-切回"抖动）+ 唤醒节流（wake_throttle 全局 60s 独立生效）。
+# 适用：续航优先 / 后台 App 无价值场景；IM/推送类请用 important 或 per-app 豁免。
+enabled = true
+grace_seconds = 0
+cooldown_seconds = 120
+keep_fg_service = true
+keep_media = true

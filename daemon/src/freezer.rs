@@ -180,12 +180,105 @@ pub fn freeze_uid(uid: u32) -> bool {
     ok
 }
 
+// ---------------- 解冻预热（v0.6-l3，缺口补入清单 A1） ----------------
+// 场景：冻结瞬间积压的 binder/wakelock 在解冻时同时爆发 → 首帧卡顿/启动卡死
+// （v0.4.22-l3 记录"解冻后能打开但无响应"体验问题）。对齐 AStop 解冻预热：
+// 放行前先 process_madvise(MADV_WILLNEED) 预取工作集页，让恢复路径内存就绪。
+// 解冻顺序（本文件统一）：①预热 → ②cgroup 写 0 → ③pid 级写 0 → ④SIGCONT → ⑤restore_oom。
+// 铁律：madvise 失败**不阻塞解冻**（失败安全）；ColorOS 内核可用性需实机验证
+// （_verify/madvise_test.c 探针，同 PinFile 纪律）；日志仅成功时一条（防刷屏）。
+
+/// process_madvise / pidfd_open 通用 syscall 号（arm64/x86_64/arm EABI 一致）
+const SYS_PIDFD_OPEN: libc::c_long = 434;
+const SYS_PROCESS_MADVISE: libc::c_long = 440;
+
+/// 对单个进程执行 process_madvise(MADV_WILLNEED)：读 /proc/<pid>/maps 收集可读映射
+/// 区间（clamp：段数 ≤64、单段 ≤8MB 防 IO 风暴），一次性下发。失败安全：任何错误
+/// 返回 false（调用方静默计数，不阻塞解冻）。
+fn madvise_willneed(pid: u32) -> bool {
+    // 1. pidfd（目标进程无需合作；冻结/SIGSTOP 进程同样适用）
+    let pidfd = unsafe { libc::syscall(SYS_PIDFD_OPEN, pid as libc::c_int, 0) };
+    if pidfd < 0 {
+        return false;
+    }
+    let pidfd = pidfd as libc::c_int;
+    // 2. 收集可读映射区间（跳过内核特殊段）
+    let mut iovs: Vec<libc::iovec> = Vec::with_capacity(64);
+    let maps_path = format!("/proc/{}/maps", pid);
+    if let Ok(text) = std::fs::read_to_string(&maps_path) {
+        for line in text.lines() {
+            if iovs.len() >= 64 {
+                break;
+            }
+            let mut it = line.split_whitespace();
+            let (Some(range), Some(perms)) = (it.next(), it.next()) else { continue };
+            if !perms.contains('r') {
+                continue; // 只预热可读映射
+            }
+            let Some((start_s, end_s)) = range.split_once('-') else { continue };
+            let (Ok(start), Ok(end)) =
+                (u64::from_str_radix(start_s, 16), u64::from_str_radix(end_s, 16))
+            else {
+                continue;
+            };
+            if end <= start {
+                continue;
+            }
+            // [vvar]/[vdso]/[vsyscall] 等内核特殊段——madvise 无意义，跳过
+            if it.next().map_or(false, |p| p.starts_with('[')) {
+                continue;
+            }
+            let len = (end - start).min(8 << 20); // clamp 单段 8MB
+            iovs.push(libc::iovec {
+                iov_base: start as *mut libc::c_void,
+                iov_len: len as usize,
+            });
+        }
+    }
+    if iovs.is_empty() {
+        unsafe { libc::close(pidfd) };
+        return false;
+    }
+    // 3. process_madvise(pidfd, vec, vlen, MADV_WILLNEED, flags=0)
+    let ret = unsafe {
+        libc::syscall(
+            SYS_PROCESS_MADVISE,
+            pidfd,
+            iovs.as_mut_ptr(),
+            iovs.len() as usize,
+            libc::MADV_WILLNEED,
+            0 as libc::c_ulong,
+        )
+    };
+    unsafe { libc::close(pidfd) };
+    ret == 0
+}
+
+/// uid 级解冻预热：对全部存活进程执行 WILLNEED 预取。返回成功进程数。
+/// 日志纪律：仅当有进程成功预热时打一条 logi（失败静默，防刷屏）。
+fn madvise_warm_uid(uid: u32) -> usize {
+    let pids = uid_pids(uid);
+    let mut n = 0usize;
+    for pid in pids {
+        if madvise_willneed(pid) {
+            n += 1;
+        }
+    }
+    if n > 0 {
+        logi!("解冻预热: uid={} WILLNEED {} 个进程", uid, n);
+    }
+    n
+}
+
 /// 解冻整个 app（uid 级）：cgroup 写 0 + SIGCONT 幂等恢复（双通道，SIGSTOP 兜底可解）
 /// v0.4.47-l3：cgroup v2 父子级 freeze 独立——**父级写 0 不会解冻 pid 级残留冻结**
 /// （系统 AppFreezer 用 pid 级冻结后台 app；Sundown 选择性冻结也写 pid 级）。
 /// 2026-08-05 实机根因：解冻只写 uid 级 0 → pid 级残留 1 → 进程实际仍冻结 → 黑屏。
 /// 必须遍历 pid_* 子目录全部写 0，否则解冻不彻底。
+/// v0.6-l3：解冻预热链（A1）——放行前先 WILLNEED 预取工作集（失败不阻塞）。
 pub fn unfreeze_uid(uid: u32) -> bool {
+    // ① 预热（失败安全：madvise 不可用/失败 → 静默计数，照常解冻）
+    let _warmed = madvise_warm_uid(uid);
     let ok = write_freeze(&uid_freeze_path(uid), "0");
     // pid 级残留解冻（v0.4.47-l3 根治；写失败幂等无害）
     let base = format!("/sys/fs/cgroup/apps/uid_{}", uid);
@@ -207,7 +300,10 @@ pub fn unfreeze_uid(uid: u32) -> bool {
 /// 运行期解冻路径。背景：系统 AppFreezer 只冻结 cached（adj≥阈值）app；解冻即还原 adj
 /// → app 若仍在后台会被系统立即 pid 级重冻（与 Sundown 拉锯 → 黑屏，2026-08-05 实机）。
 /// 保持 -1000 直到确认回前台（tick 见 engine.rs），由 restore_oom_pkg 显式还原。
+/// v0.6-l3：解冻预热链（A1）——与 unfreeze_uid 一致，放行前先 WILLNEED 预取。
 pub fn unfreeze_uid_keep_oom(uid: u32) -> bool {
+    // ① 预热（失败安全：静默计数，照常解冻）
+    let _warmed = madvise_warm_uid(uid);
     let ok = write_freeze(&uid_freeze_path(uid), "0");
     let base = format!("/sys/fs/cgroup/apps/uid_{}", uid);
     if let Ok(rd) = std::fs::read_dir(&base) {
