@@ -27,7 +27,10 @@
 
 ### 验证
 - cargo test 65/65（原 58 + 新增 B2 订阅 7 项：解析 4 / 匹配 2 / pkg= 提取 1）
-- 正式 Release v0.4.56-l3 已自动创建成功（tag=v0.4.56-l3，55c65d0）
+- 正式 Release 流程全链路验证：v0.4.56-l3（55c65d0）/ v0.4.57-l3（c0fc580，312b710 软更新）自动创建成功（tag=版本号，非 prerelease，asset=sundown-*.zip）
+- **实机热更新上线（2026-08-12）**：daemon 热替换 release 61→62（PID 12311）+ probe.dex 热切换（hello-dex c0fc580 match=1）+ 设备端 sunctl 同步修复版（magic mount 实时生效，无参更新改查 releases/latest）+ 六位一体闭环（dex 上报 c0fc580 = 模块 probe.dex.hash = root 侧字节源）
+- fix(sunctl)（312b710）：无参 apply-update 原查已删除的 nightly tag，改为 releases/latest（最新正式 Release）
+- nightly tag/Release 已废弃清理（正式发布流程上线后）
 
 ---
 
