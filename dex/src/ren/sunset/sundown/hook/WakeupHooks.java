@@ -5,8 +5,6 @@ import android.content.Intent;
 import android.util.Log;
 
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -42,27 +40,30 @@ final class WakeupHooks implements HookEngine {
 
     @Override
     public void install() {
+        // v0.6-l3（缺口补入清单 B1）：注册表驱动——hook 点条目化，公共机制收敛至 Registry。
+        // 广播宿主 BC(A14+)/AMS(<14) 版本迁移经 Registry fallbackHost 处理；
+        // critical=false（观测组，失败仅跳过）；注册表描述可经 env-check 导出。
+        int n = Registry.installGroup(this, entries(), hookers);
+        Log.i(TAG, "WakeupHooks 安装完成（hook 数: " + n + "）");
+    }
+
+    /** B1 注册条目 */
+    private static List<Registry.Entry> entries() {
+        List<Registry.Entry> list = new ArrayList<>();
         // 广播投递：A14+ BroadcastController，旧版 AMS 兜底
-        Class<?> bcHost = (findMethod(findClass(BC), "broadcastIntentLocked") != null)
-                ? findClass(BC) : findClass(AMS);
-        hookAllOverloads(bcHost, "broadcastIntentLocked", callback("onBroadcast"));
-
-        hookAllOverloads(findClass(AS), "realStartServiceLocked", callback("onServiceStart"));
-        hookAllOverloads(findClass(PIR), "sendInner", callback("onPendingSend"));
-
-        Log.i(TAG, "WakeupHooks 安装完成（hook 数: " + hookers.size() + "）");
+        list.add(Registry.entry("wakeup.broadcast", BC, AMS, "broadcastIntentLocked",
+                "onBroadcast", false, "广播投递（含 action，Receiver gate 数据源）"));
+        list.add(Registry.entry("wakeup.service", AS, null, "realStartServiceLocked",
+                "onServiceStart", false, "服务启动（含组件名，Service gate 数据源）"));
+        list.add(Registry.entry("wakeup.pendingintent", PIR, null, "sendInner",
+                "onPendingSend", false, "PendingIntent 触发（含组件名，PendingIntent gate 数据源）"));
+        return list;
     }
 
     @Override
     public void uninstall() {
-        for (Hooker h : hookers) {
-            try {
-                h.unhook();
-            } catch (Throwable t) {
-                Log.w(TAG, "unhook 异常: " + t);
-            }
-        }
-        hookers.clear();
+        // v0.6-l3（B1）：卸载收敛至 Registry（幂等，单点失败不拖垮其余）
+        Registry.uninstallAll(hookers);
         Log.i(TAG, "WakeupHooks 已卸载");
     }
 
@@ -203,51 +204,5 @@ final class WakeupHooks implements HookEngine {
     private static String readStringField(Object obj, String name) {
         Object v = readField(obj, name);
         return (v instanceof String) ? (String) v : null;
-    }
-
-    private Method callback(String name) {
-        try {
-            return WakeupHooks.class.getDeclaredMethod(name, MethodCallback.class);
-        } catch (Throwable t) {
-            Log.e(TAG, "回调方法缺失: " + name + " -> " + t);
-            return null;
-        }
-    }
-
-    private static Class<?> findClass(String name) {
-        // services.jar 不在 BOOTCLASSPATH（SYSTEMSERVERCLASSPATH 专属 loader 加载），
-        // 注入 dex 的 loader 链不可见——必须经 ServerClasses 解析（v0.3.4-l2 修复）
-        return ServerClasses.find(name);
-    }
-
-    private static Method findMethod(Class<?> cls, String name) {
-        if (cls == null) return null;
-        for (Method m : cls.getDeclaredMethods()) {
-            if (m.getName().equals(name)) return m;
-        }
-        return null;
-    }
-
-    private int hookAllOverloads(Class<?> cls, String name, Method callback) {
-        if (cls == null || callback == null) {
-            Log.w(TAG, "hook 跳过（类或回调缺失）: " + name);
-            return 0;
-        }
-        int ok = 0;
-        for (Method m : cls.getDeclaredMethods()) {
-            if (!m.getName().equals(name)) continue;
-            if (Modifier.isAbstract(m.getModifiers()) || m.isBridge() || m.isSynthetic()) continue;
-            Hooker h = NativeBridge.hook(m, callback, this);
-            if (h != null) {
-                hookers.add(h);
-                ok++;
-            }
-        }
-        if (ok == 0) {
-            Log.w(TAG, "方法未 hook 到: " + cls.getName() + "#" + name);
-        } else {
-            Log.i(TAG, "已 hook " + cls.getSimpleName() + "#" + name + "（重载数: " + ok + "）");
-        }
-        return ok;
     }
 }
