@@ -20,6 +20,12 @@
 //!   push-dex [path]      -> 【仅 root 管理面】读 dex 文件并向全部订阅连接推送
 //!                           {"event":"dex-push","size":N,...} + N 字节（热切换触发）
 //!
+//! 协议（B2 事件订阅注册表，v0.7-l3，订阅连接上行命令，只增不改）：
+//!   subscribe [kinds=<a,b>] [packages=<x,y>] -> 声明事件兴趣（按需分发替代全量广播）；
+//!                           未声明 = 全量收（旧 dex 兼容零风险）；无参 = 重置全量
+//!   subscribe query        -> 返回当前过滤器 JSON
+//!   subscribe clear        -> 等价无参（重置全量）
+//!
 //! 协议（L2b 新增，订阅连接上的 dex→daemon 上行命令，只增不改）：
 //!   report-bridge <hash> -> bridge（libsundownhook）上报 build hash；
 //!                           应答 {"ok":1,"bridge_hash_match":1|0|-1}
@@ -221,7 +227,7 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>, mgmt: bool) -> std::
         // 登记订阅 + 读循环；EOF/错误注销（daemon 重启后 dex 侧自动重连重登记）
         let id = state.register_dex_client(writer.try_clone()?);
         logi!("dex 事件订阅已建立 (id={}, version={})", id, arg);
-        let r = dex_subscription_loop(&mut reader, &mut writer, &state);
+        let r = dex_subscription_loop(&mut reader, &mut writer, &state, id);
         state.unregister_dex_client(id);
         logi!("dex 事件订阅断开 (id={})", id);
         return r;
@@ -298,11 +304,12 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>, mgmt: bool) -> std::
 }
 
 /// hello-dex 订阅连接的读循环：dex 侧只收事件 + L2b 起上行命令；
-/// EOF 返回由调用方注销。
+/// EOF 返回由调用方注销。id = 订阅注册表登记 id（subscribe 命令按 id 更新过滤器）。
 fn dex_subscription_loop(
     reader: &mut BufReader<UnixStream>,
     writer: &mut UnixStream,
     state: &DaemonState,
+    id: u64,
 ) -> std::io::Result<()> {
     loop {
         let mut line = String::new();
@@ -330,6 +337,8 @@ fn dex_subscription_loop(
                     dex_hello_response(state)
                 }
             }
+            // ---- B2 事件订阅注册表（v0.7-l3）：声明兴趣，按需分发 ----
+            "subscribe" => handle_subscribe(state, id, arg),
             // ---- L2b 上行命令（观测模式事件面） ----
             "report-bridge" => {
                 if arg.is_empty() {
@@ -485,6 +494,89 @@ fn handle_event(state: &DaemonState, arg: &str) -> String {
         },
         _ => format!("{{\"ok\":1,\"ignored\":1,\"kind\":\"{}\"}}", kind),
     }
+}
+
+/// B2 事件订阅注册表（v0.7-l3）：subscribe 命令处理。
+/// 语法（空格分隔 kv，只增不改）：
+///   subscribe                  -> 重置全量（默认，旧 dex 兼容）
+///   subscribe clear            -> 同无参
+///   subscribe query            -> 返回当前过滤器 JSON
+///   subscribe kinds=<a,b> packages=<x,y> -> 声明兴趣（缺省维度 = 全量）
+/// 未知 key 忽略（前向兼容：未来新增维度旧 dex 不解析）。
+fn handle_subscribe(state: &DaemonState, id: u64, arg: &str) -> String {
+    if arg.is_empty() || arg == "clear" {
+        state.update_dex_subscription(id, crate::state::Subscription::default());
+        logi!("dex 订阅重置全量 (id={})", id);
+        return "{\"ok\":1,\"subscription\":\"all\"}".to_string();
+    }
+    if arg == "query" {
+        return match state.dex_subscription(id) {
+            Some(s) => format!(
+                "{{\"ok\":1,\"kinds\":[{}],\"packages\":[{}]}}",
+                s.kinds
+                    .iter()
+                    .map(|k| format!("\"{}\"", k))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                s.packages
+                    .iter()
+                    .map(|p| format!("\"{}\"", p))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            None => "{\"ok\":0,\"error\":\"subscription not found\"}".to_string(),
+        };
+    }
+    match parse_subscription(arg) {
+        Ok(sub) => {
+            let updated = state.update_dex_subscription(id, sub);
+            if updated {
+                let kinds = if state.dex_subscription(id).map(|s| s.kinds.is_empty()).unwrap_or(true) {
+                    "*".to_string()
+                } else {
+                    state
+                        .dex_subscription(id)
+                        .map(|s| s.kinds.join(","))
+                        .unwrap_or_default()
+                };
+                logi!("dex 订阅更新 (id={}): kinds={}", id, kinds);
+                "{\"ok\":1,\"subscription\":\"updated\"}".to_string()
+            } else {
+                "{\"ok\":0,\"error\":\"subscription not found\"}".to_string()
+            }
+        }
+        Err(e) => format!("{{\"ok\":0,\"error\":\"subscribe: {}\"}}", e),
+    }
+}
+
+/// subscribe 参数解析（纯函数，可单测）：
+/// `kinds=<a,b> packages=<x,y>` → Subscription；未知 key 忽略；空值段忽略。
+/// 解析失败（无法识别的键值对）→ Err（格式错误提示，防静默吞错）。
+fn parse_subscription(arg: &str) -> Result<crate::state::Subscription, String> {
+    let mut kinds: Vec<String> = Vec::new();
+    let mut packages: Vec<String> = Vec::new();
+    let mut seen = false;
+    for tok in arg.split_whitespace() {
+        let Some((k, v)) = tok.split_once('=') else {
+            return Err(format!("无法识别参数: {}", tok));
+        };
+        seen = true;
+        let items: Vec<String> = v
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        match k {
+            "kinds" => kinds = items,
+            "packages" => packages = items,
+            _ => {} // 未知 key：前向兼容忽略
+        }
+    }
+    if !seen {
+        return Err("缺少 kinds=/packages= 参数".to_string());
+    }
+    // 全空（kinds= packages=）→ 等价全量（默认语义）
+    Ok(crate::state::Subscription { kinds, packages })
 }
 
 /// policy 管理命令（仅 root 管理面）：
@@ -961,7 +1053,7 @@ fn probe_response(state: &DaemonState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_dex_version;
+    use super::*;
 
     /// 构造最小 DEX：header + 1 个 string_id + 1 个字符串（CI 短 sha 格式）
     fn mini_dex_with_string(s: &[u8]) -> Vec<u8> {
@@ -1023,5 +1115,92 @@ mod tests {
     fn dex_version_reject_uppercase_hex() {
         let dex = mini_dex_with_string(b"A672EFF"); // 大写 → 非 CI 注入格式
         assert_eq!(extract_dex_version(&dex), None);
+    }
+
+    // ---------------- B2 事件订阅注册表（v0.7-l3） ----------------
+
+    use crate::state::Subscription;
+
+    /// subscribe 参数解析：kinds + packages 双轴
+    #[test]
+    fn subscribe_parse_kinds_packages() {
+        let s = parse_subscription("kinds=frozen-sync,candidate-sync packages=com.wechat,com.qq").unwrap();
+        assert_eq!(s.kinds, vec!["frozen-sync", "candidate-sync"]);
+        assert_eq!(s.packages, vec!["com.wechat", "com.qq"]);
+    }
+
+    /// subscribe 缺省维度 = 全量（kinds 空 / packages 空）
+    #[test]
+    fn subscribe_parse_partial_is_all() {
+        let s = parse_subscription("kinds=dex-push").unwrap();
+        assert_eq!(s.kinds, vec!["dex-push"]);
+        assert!(s.packages.is_empty(), "缺省 packages = 全部包");
+        let s2 = parse_subscription("packages=com.x").unwrap();
+        assert!(s2.kinds.is_empty(), "缺省 kinds = 全部类型");
+    }
+
+    /// 未知 key 前向兼容忽略；空值段忽略；全空 = 全量语义
+    #[test]
+    fn subscribe_parse_unknown_key_and_empty() {
+        let s = parse_subscription("kinds=frozen-sync level=2").unwrap();
+        assert_eq!(s.kinds, vec!["frozen-sync"], "未知 key level= 前向兼容忽略");
+        let s2 = parse_subscription("kinds=frozen-sync, packages=").unwrap();
+        assert_eq!(s2.kinds, vec!["frozen-sync"]);
+        assert!(s2.packages.is_empty());
+        let s3 = parse_subscription("kinds= packages=").unwrap();
+        assert!(s3.kinds.is_empty() && s3.packages.is_empty(), "全空 = 全量");
+    }
+
+    /// 格式错误（无 = 的 token）→ Err 防静默吞错
+    #[test]
+    fn subscribe_parse_rejects_bad_token() {
+        assert!(parse_subscription("kinds").is_err());
+        assert!(parse_subscription("kinds=frozen-sync garbage").is_err());
+    }
+
+    /// 匹配判定：kind 过滤
+    #[test]
+    fn subscription_match_kinds_filter() {
+        let sub = Subscription {
+            kinds: vec!["frozen-sync".to_string()],
+            packages: Vec::new(),
+        };
+        assert!(sub.matches("frozen-sync", None));
+        assert!(!sub.matches("candidate-sync", None));
+        assert!(!sub.matches("dex-push", None));
+        // 无 pkg= 事件不受包名过滤影响（frozen-sync 行只有 uid=）
+        let sub2 = Subscription {
+            kinds: Vec::new(),
+            packages: vec!["com.wechat".to_string()],
+        };
+        assert!(sub2.matches("frozen-sync", None), "无 pkg 事件仅按 kinds 过滤");
+    }
+
+    /// 匹配判定：包名过滤（精确 + `.*` 前缀通配）
+    #[test]
+    fn subscription_match_packages_filter() {
+        let sub = Subscription {
+            kinds: Vec::new(),
+            packages: vec!["com.wechat".to_string(), "com.tencent.*".to_string()],
+        };
+        assert!(sub.matches("any-kind", Some("com.wechat")));
+        assert!(sub.matches("any-kind", Some("com.tencent.mm")));
+        assert!(sub.matches("any-kind", Some("com.tencent.qq")));
+        assert!(!sub.matches("any-kind", Some("com.other.app")));
+        // 通配 `com.tencent.*` 不匹配裸前缀 `com.tencent`（须有子域名）
+        assert!(!sub.matches("any-kind", Some("com.tencent")));
+        // 默认全量：kinds/packages 都空 → 一切命中
+        assert!(Subscription::default().matches("frozen-sync", Some("anything")));
+    }
+
+    /// pkg= 行内提取
+    #[test]
+    fn subscription_pkg_of_extract() {
+        assert_eq!(Subscription::pkg_of("event frozen-sync uid=10001\n"), None);
+        assert_eq!(
+            Subscription::pkg_of("event wakeup pkg=com.wechat reason=broadcast\n"),
+            Some("com.wechat")
+        );
+        assert_eq!(Subscription::pkg_of("event focus pkg=com.qq fg=1\n"), Some("com.qq"));
     }
 }

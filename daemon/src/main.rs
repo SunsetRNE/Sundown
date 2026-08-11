@@ -326,13 +326,15 @@ fn main() {
         if sig != last_frozen_sig {
             last_frozen_sig = sig.clone();
             let line = format!("event frozen-sync uid={}\n", sig);
-            let n = state.broadcast_line(&line);
+            // B2（v0.7-l3）：kind=frozen-sync 按需分发（订阅者声明兴趣才收）
+            let n = state.broadcast_line("frozen-sync", &line);
             logi!("frozen-sync 广播: [{}] → {} 订阅者", sig, n);
         }
         if cand_sig != last_candidate_sig {
             last_candidate_sig = cand_sig.clone();
             let line = format!("event candidate-sync uid={}\n", cand_sig);
-            let n = state.broadcast_line(&line);
+            // B2（v0.7-l3）：kind=candidate-sync 按需分发
+            let n = state.broadcast_line("candidate-sync", &line);
             logi!("candidate-sync 广播: [{}] → {} 订阅者", cand_sig, n);
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
