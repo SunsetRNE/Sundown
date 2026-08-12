@@ -371,6 +371,8 @@ fn dex_subscription_loop(
             }
             // ---- B2 事件订阅注册表（v0.7-l3）：声明兴趣，按需分发 ----
             "subscribe" => handle_subscribe(state, id, arg),
+            // ---- v0.9-l3 B4 配套：dex 侧 ROM 能力探测上报（原样存储，观测面导出） ----
+            "capability-probe" => handle_capability_probe(state, arg),
             // ---- L2b 上行命令（观测模式事件面） ----
             "report-bridge" => {
                 if arg.is_empty() {
@@ -581,6 +583,25 @@ fn handle_subscribe(state: &DaemonState, id: u64, arg: &str) -> String {
     }
 }
 
+/// v0.9-l3 B4 配套：dex 侧 ROM 能力探测上报（CapabilityProbe.probeJson 原样存储）。
+/// 协议：`capability-probe <json>`（一行；JSON 无空格，splitn(2,' ') 分割安全）。
+/// 失败安全：空参数拒绝（ok=0）；dex 侧整体失败时静默不报（观测面缺省 None）。
+fn handle_capability_probe(state: &DaemonState, arg: &str) -> String {
+    if arg.is_empty() {
+        return "{\"ok\":0,\"error\":\"capability-probe requires <json>\"}".to_string();
+    }
+    let mut slot = state.dex_capability.lock().unwrap();
+    let replaced = slot.replace(arg.to_string());
+    drop(slot);
+    logi!("dex ROM 能力探测上报（替换旧值: {}）", replaced.is_some());
+    state.engine.lock().unwrap().events.push_system(
+        EvLevel::Report,
+        EvAction::System,
+        Some("capability_probe_dex"),
+        Some("rom_classes_probed"),
+    );
+    "{\"ok\":1,\"stored\":1}".to_string()
+}
 /// subscribe 参数解析（纯函数，可单测）：
 /// `kinds=<a,b> packages=<x,y>` → Subscription；未知 key 忽略；空值段忽略。
 /// 解析失败（无法识别的键值对）→ Err（格式错误提示，防静默吞错）。
@@ -860,6 +881,13 @@ fn handle_capability(state: &DaemonState, arg: &str) -> String {
                 .map(|(k, v)| format!("\"{}\":{}", k, v))
                 .collect::<Vec<_>>()
                 .join(",");
+            // v0.9-l3：dex 侧 ROM 能力探测矩阵（原样嵌入；未上报 = null，观测面缺省）
+            let dex_probe = state
+                .dex_capability
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "null".to_string());
             format!(
                 concat!(
                     "{{\"ok\":1,",
@@ -871,7 +899,8 @@ fn handle_capability(state: &DaemonState, arg: &str) -> String {
                     "\"madvise_willneed\":{madvise},",
                     "\"net_source\":\"{net}\",",
                     "\"wakeup_sources\":{{{ws}}},",
-                    "\"probed_at\":{probed}",
+                    "\"probed_at\":{probed},",
+                    "\"dex_probe\":{dex_probe}",
                     "}}"
                 ),
                 freezer = cap.freezer.as_str(),
@@ -895,6 +924,7 @@ fn handle_capability(state: &DaemonState, arg: &str) -> String {
                 net = cap.net_source,
                 ws = ws,
                 probed = cap.probed_at,
+                dex_probe = dex_probe,
             )
         }
     }

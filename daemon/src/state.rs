@@ -119,6 +119,9 @@ pub struct DaemonState {
     /// B4（v0.8-l3）：设备能力探测矩阵（启动探测一次 + capability reprobe 刷新；
     /// None = 尚未探测——启动早期查询的兜底，观测面不阻塞）
     pub capability: Mutex<Option<crate::capability::Capability>>,
+    /// v0.9-l3：dex 侧 ROM 能力探测上报（CapabilityProbe.probeJson 原样存储——
+    /// system_server 内类/方法存在性矩阵；None = dex 未上报或旧代未支持）
+    pub dex_capability: Mutex<Option<String>>,
 }
 
 /// 从模块目录读取期望 hash（启动 / reload-config 时调用）
@@ -164,6 +167,7 @@ impl DaemonState {
             wakeup_events: AtomicU64::new(0),
             engine: Mutex::new(Self::init_engine()),
             capability: Mutex::new(None),
+            dex_capability: Mutex::new(None),
         }
     }
 

@@ -13,7 +13,7 @@ UPDATE_DIR="$SUNDOWN_DIR/update"
 PENDING_DIR="$UPDATE_DIR/pending"
 BACKUP_DIR="$UPDATE_DIR/backup"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.4.61-l3"
+VERSION="0.4.62-l3"
 
 # ---------- 工具函数 ----------
 
@@ -559,7 +559,17 @@ cmd_env_check() {
 
     [ -d "$SUNDOWN_DIR" ] && echo "  ✅ 数据目录 $SUNDOWN_DIR" || { echo "  ❌ 数据目录缺失"; ok=1; }
     [ -f "$SUNDOWN_DIR/data/.migrated_from_cerberus" ] && echo "  ℹ️  已完成 Cerberus 旧资产迁移"
-
+    # v0.9-l3：dex 侧 ROM 能力探测导出面（daemon 在线时；离线仅提示，不置失败）
+    dex_probe="$(sock_query capability status 2>/dev/null)"
+    if [ -z "$dex_probe" ]; then
+        echo "  ℹ️  daemon 未连接，dex ROM 能力矩阵不可用（capability status 查询失败）"
+    elif printf '%s' "$dex_probe" | grep -q '"dex_probe":null'; then
+        echo "  ℹ️  dex ROM 能力矩阵未上报（旧 dex / 未重连；热更新或重启 system_server 后自动上报）"
+    else
+        hit="$(printf '%s' "$dex_probe" | grep -o '"class":true' | wc -l)"
+        total="$(printf '%s' "$dex_probe" | grep -o '"name":"' | wc -l)"
+        echo "  ✅ dex ROM 能力矩阵在线（类命中 $hit/$total；明细: sunctl capability dex-probe）"
+    fi
     return $ok
 }
 
@@ -686,8 +696,10 @@ cmd_rules() {
 
 cmd_capability() {
     # B4 设备能力探测矩阵（v0.8-l3）管理（WebUI 能力页后端；经 daemon 管理面 socket）
-    #   capability status  -> 能力矩阵 JSON（freezer 层级/madvise/网络源/唤醒源基线）
-    #   capability reprobe -> 重新探测（刷新矩阵）
+    #   capability status    -> 能力矩阵 JSON（freezer 层级/madvise/网络源/唤醒源基线 + dex_probe）
+    #   capability reprobe   -> 重新探测（刷新矩阵）
+    #   capability dex-probe -> dex 侧 ROM 类/方法存在性矩阵（v0.9-l3；system_server 内
+    #                           hook 目标探测——daemon capability.rs 是磁盘能力，本面是注入环境）
     sub="${1:-status}"
     case "$sub" in
         status|reprobe)
@@ -699,8 +711,24 @@ cmd_capability() {
             printf '%s\n' "$resp"
             return 0
             ;;
+        dex-probe)
+            resp="$(sock_query capability status)"
+            if [ -z "$resp" ]; then
+                echo "❌ daemon 未连接（socket 不可用），无法执行 capability dex-probe" >&2
+                return 1
+            fi
+            case "$resp" in
+                *'"dex_probe":null'*)
+                    echo "ℹ️  dex 侧 ROM 能力矩阵未上报（旧 dex / 未重连；system_server 重启或热更新后自动上报）"
+                    return 0 ;;
+            esac
+            # 提取 dex_probe 内嵌 JSON 对象（原样打印；capability status 输出以 dex_probe 收尾）
+            printf '%s\n' "$resp" | sed -n 's/.*"dex_probe":\({.*}\)}$/\1/p'
+            [ "${PIPESTATUS[0]}" -eq 0 ] || printf '%s\n' "$resp"
+            return 0
+            ;;
         *)
-            echo "用法: sunctl capability status|reprobe" >&2
+            echo "用法: sunctl capability status|reprobe|dex-probe" >&2
             return 2
             ;;
     esac
@@ -901,8 +929,9 @@ usage() {
   policy preset clear    [L3] 清除预设（回落磁盘 policy.toml 参数）
   rules list             [B3] 声明式规则引擎：规则 id 列表（JSON）
   rules status           [B3] 声明式规则引擎：规则数 / revision / 累计命中（JSON）
-  capability status     [B4] 设备能力矩阵（freezer 层级/madvise/网络源/唤醒源基线）
+  capability status     [B4] 设备能力矩阵（freezer 层级/madvise/网络源/唤醒源基线 + dex_probe）
   capability reprobe    [B4] 重新探测能力矩阵
+  capability dex-probe  [B4] dex 侧 ROM 类/方法存在性矩阵（system_server 内 hook 目标探测）
   profile top [n]       [C1] 使用画像：按唤醒次数降序 TOP n（缺省 10）
   profile summary       [C1] 使用画像：总览（app 数/总唤醒/总冻结）
   profile get <pkg>     [C1] 使用画像：单 app 明细

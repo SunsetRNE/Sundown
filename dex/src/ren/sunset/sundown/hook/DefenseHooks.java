@@ -5,7 +5,6 @@ import android.util.Log;
 import java.io.File;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -151,119 +150,119 @@ public final class DefenseHooks implements HookEngine {
 
     @Override
     public void install() {
-        // 1. ANR 流程上游阻断（直击"点击无响应→闪退"）
-        hookAllOverloads(findClass(ANR_HELPER), "appNotResponding", callback("onAppNotResponding"));
-
-        // 2. ANR stack 转储 firstPids 剔除冻结 pid（A13+ ProcessList，AMS 兜底）
-        Class<?> pl = (findMethod(findClass(PROCESS_LIST), "dumpStackTraces") != null)
-                ? findClass(PROCESS_LIST) : findClass(AMS);
-        hookAllOverloads(pl, "dumpStackTraces", callback("onDumpStackTraces"));
-
-        // 3. Service 超时豁免（冻结 app 不判 ANR）
-        hookAllOverloads(findClass(ACTIVE_SERVICES), "serviceTimeout", callback("onServiceTimeout"));
-        hookAllOverloads(findClass(ACTIVE_SERVICES), "serviceForegroundTimeout",
-                callback("onServiceForegroundTimeout"));
-
-        // 4. ProcessErrorStateRecord 二次拦截（方法名探测：appNotResponding / setNotResponding，
-        //    找不到降级——AnrHelper 上游已兜底）
-        Class<?> pesr = findClass(PESR);
-        Method pesrTarget = findMethod(pesr, "appNotResponding");
-        if (pesrTarget == null) {
-            pesrTarget = findMethod(pesr, "setNotResponding");
-        }
-        if (pesrTarget != null && pesr != null) {
-            hookMethod(pesrTarget, callback("onPesrAnr"));
-        } else {
-            Log.w(TAG, "ProcessErrorStateRecord 二次拦截不可用（方法未找到，上游已兜底）");
-        }
-
-        // 5. 系统 freezer 防双冻结（CachedAppOptimizer 不冻被管 app）
-        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezeApp", callback("onFreezeApp"));
-
-        // 6. 冻结期 Activity 保护（不回收，防解冻后黑屏/重建）
-        hookAllOverloads(findClass(ACTIVITY_RECORD), "destroyImmediately", callback("onDestroyImmediately"));
-
-        // 7. v0.4.26-l3 ColorOS HANS 防御（实机校准：PJD110/Android16 无 CachedAppOptimizer#freezeApp，
-        //    系统 freezer 入口为 freezeAppAsync*LSP 家族；HANS 用 unfreezeForKernel 解冻——真机元凶）
-        // 7a. 系统 freezer 防双冻结：ColorOS 改名后的 freeze 入口（锁内方法，全重载）
-        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezeAppAsyncLSP", callback("onSystemFreeze"));
-        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezeAppAsyncInternalLSP", callback("onSystemFreeze"));
-        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezeAppAsyncAtEarliestLSP", callback("onSystemFreeze"));
-        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezeAppAsyncImmediateLSP", callback("onSystemFreeze"));
-        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezeBinder", callback("onSystemFreeze"));
-        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezeBinderAndPackageCgroup", callback("onSystemFreeze"));
-        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "freezePackageCgroup", callback("onSystemFreeze"));
-        // 7b. HANS 主动冻结入口（冻结集内 uid 阻止二次冻结）
-        hookAllOverloads(findClass(HANS_MANAGER), "freezeAppForPreload", callback("onSystemFreeze"));
-        hookAllOverloads(findClass(HANS_MANAGER), "freezeAllProcess", callback("onSystemFreeze"));
-        hookAllOverloads(findClass(HANS_MANAGER), "freezeCgroupUid", callback("onSystemFreeze"));
-        // 7c. HANS 解冻防御（防 HANS 解掉 Sundown 冻结态——墓碑失效/假活）
-        hookAllOverloads(findClass(HANS_MANAGER), "unfreezeForKernel", callback("onHansUnfreeze"));
-        hookAllOverloads(findClass(HANS_MANAGER), "unfreezeForKernelTargetPid", callback("onHansUnfreeze"));
-        hookAllOverloads(findClass(HANS_MANAGER), "unfreezeAppforHansMinSystem", callback("onHansUnfreeze"));
-        // 7d. HANS Proxy 防御（冻结集内 uid 不被 HANS 代理干预）
-        hookAllOverloads(findClass(HANS_PROXY), "isProxyed", callback("onHansIsProxyed"));
-        // 7e. ColorOS GMS 限制禁用（对齐 AStop DO_NOTHING：registerGmsRestrictObserver/updateGmsRestrict）
-        hookAllOverloads(findClass(BG_SCENE), "registerGmsRestrictObserver", callback("onNoop"));
-        hookAllOverloads(findClass(BG_SCENE), "updateGmsRestrict", callback("onNoop"));
-        hookAllOverloads(findClass(STARTUP_STRATEGY), "isGoogleRestricInfoOn", callback("onReturnFalse"));
-
-        // 8. v0.4.39-l3 P1⑨ OomAdjuster 防御：系统重算 adj 不得覆盖 daemon OOM 保护（-1000）
-        //    —— daemon 侧 protect_oom 写 /proc/<pid>/oom_score_adj 锁 -1000（OOM_DISABLE 等效），
-        //    但 OomAdjuster 周期重算会写回 cached≈900 覆盖保护（解冻即"白冻"）。
-        //    双保险：applyOomAdj*（计算入口，冻结集内跳过）+ setOomAdj（写入入口，adj 改写 -1000）。
-        hookAllOverloads(findClass(OOM_ADJUSTER), "applyOomAdjLSP", callback("onOomAdjCompute"));
-        hookAllOverloads(findClass(OOM_ADJUSTER), "applyOomAdj", callback("onOomAdjCompute"));
-        hookAllOverloads(findClass(PROCESS_LIST), "setOomAdj", callback("onOomAdjApply"));
-
-        // 9. v0.4.39-l3 P1⑨ 禁用耗电判定（冻结集内豁免——AStop 无条件禁用 checkExcessivePowerUsageLPr，
-        //    Sundown 裁剪为冻结集防御：非冻结 app 保持系统耗电判定，防"耗电异常"杀冻结 app）
-        hookAllOverloads(findClass(AMS), "checkExcessivePowerUsageLPr", callback("onExcessivePower"));
-
-        // 10. v0.4.39-l3 P1⑨ Doze 白名单注入：冻结 uid 注入白名单数组（appId = uid，无需 pkg 映射），
-        //     防 Doze 维护期把冻结 app 当非白名单清理（对齐 AStop DeviceIdleWhitelistHooks）
-        hookAllOverloads(findClass(DEVICE_IDLE), "getAppIdWhitelistInternal", callback("onAppIdWhitelist"));
-        hookAllOverloads(findClass(DEVICE_IDLE), "getAppIdUserWhitelistInternal", callback("onAppIdWhitelist"));
-
-        // 11. v0.4.44-l3 P2⑮ break_network：ColorOS Oplus 深度睡眠 uid 断网判定——
-        //     冻结集内 uid → true（系统对其断网），其余保持系统默认。
-        //     对齐 AStop OplusDeepSleepHooks（无条件断网），裁剪为冻结集防御：
-        //     非冻结 app 不受影响；断网随冻结生命周期自动开/关（冻结→断网，解冻→恢复）。
-        //     实机校准：PJD110/Android16 若方法名/类名不符 → hook 失败留痕不崩溃（失败安全）。
-        hookAllOverloads(findClass(OPLUS_DEEPSLEEP), "isNeedUidDisconnectNetwork",
-                callback("onNeedUidDisconnect"));
-
-        // 12. v0.4.51-l3 P2 收尾：Recents 任务保护（对齐 AStop TaskHooks hookRecentsTaskDefense）
-        //     —— 候选池 app 的 Task 不被 removeTask 移除（防"清后台/系统自动清任务"杀被管 app，
-        //     与事故① remove task 杀冻结 app 同源；AStop hiddenTaskProtectedPackages 语义）
-        //     主入口：ActivityTaskManagerService#removeTask（Recents 滑卡 binder 链实测路径）；
-        //     ActivityTaskSupervisor#removeTask 兜底（内部调用重载，ColorOS 上可能无匹配）。
-        hookAllOverloads(findClass(ACTIVITY_TASK_MANAGER), "removeTask", callback("onTaskRemove"));
-        hookAllOverloads(findClass(TASK_SUPERVISOR), "removeTask", callback("onTaskRemove"));
-        // 2026-08-05 定位：清除全部入口观测（AOSP removeAllVisibleRecentTasks；ColorOS 路径待实测）
-        hookAllOverloads(findClass(ACTIVITY_TASK_MANAGER), "removeAllVisibleRecentTasks", callback("onRemoveAllVisible"));
-        hookAllOverloads(findClass(TASK_SUPERVISOR), "removeAllVisibleRecentTasks", callback("onRemoveAllVisible"));
-
-        // 13. v0.4.51-l3 P2 收尾：killProcess 拦截（对齐 AStop hookBinderFreezeDefense）
-        //     —— CachedAppOptimizer#killProcess（OOM/内存压力杀进程路径）对候选池内
-        //     pid/ProcessRecord → 拦截不杀（OOM 保护 -1000 的双保险；用户强停走
-        //     forceStop 不常经此路径，被管 app 墓碑语义下拦截可接受）
-        hookAllOverloads(findClass(CACHED_APP_OPTIMIZER), "killProcess",
-                callback("onKillProcess"));
-
-        // 2026-08-05 定位：activity_task binder 事务 code 观测（不拦截，采样日志）
-        // —— Recents 移除任务未触发 ATMS.removeTask/removeAllVisibleRecentTasks hook，
-        //   需确认 binder 层实际到达的事务（对照 AIDL 找真实方法入口）
-        hookAllOverloads(findClass(TASK_PERSISTER), "removeTask", callback("onTaskPersisterRemove"));
-        // v0.4.51-l3 实测补丁：ProcessRecord#killLocked 拦截（ColorOS 滑卡 o-stop 杀进程根治；
-        // 对齐 AStop hookProcessRecordKill——reason 白名单内且属候选池 → 不杀）
-        hookAllOverloads(findClass(PROCESS_RECORD), "killLocked", callback("onKillLocked"));
+        // B1 迁移（v0.9-l3）：hook 点全部条目化（Registry.installGroup）——类解析/
+        // 回调查找/重载 hook 收敛到注册表统一机制（status/env-check 可枚举、可观测）。
+        // 全部条目 critical=false：保持既有"失败跳过"语义（ColorOS 专有条目在 AOSP
+        // 设备必然失败——freezeAppAsyncLSP 家族/HANS——绝不能整组回滚；critical
+        // 回滚语义留给未来显式评估，本版零行为变化）。
+        int n = Registry.installGroup(this, entries(), hookers);
 
         // 启动冻结集扫描线程（install 一次；uninstall 停）
         if (!scannerThread.isAlive()) {
             scannerThread.start();
         }
-        Log.i(TAG, "DefenseHooks 安装完成（hook 数: " + hookers.size() + "）");
+        Log.i(TAG, "DefenseHooks 安装完成（注册条目 hook 重载数: " + n + "）");
+    }
+
+    /** B1 注册表条目（v0.9-l3）：hook 点全量描述（对齐 CapabilityProbe 探测清单）。
+     *  id 语义：def.<域>-<方法>；capability 字段供 env-check 注册表导出面展示。 */
+    private static List<Registry.Entry> entries() {
+        List<Registry.Entry> list = new ArrayList<Registry.Entry>();
+        // 1. ANR 流程上游阻断（直击"点击无响应→闪退"）
+        list.add(Registry.entry("def.anr", ANR_HELPER, null, "appNotResponding",
+                "onAppNotResponding", false, "冻结 uid 阻断 ANR 判定"));
+        // 2. ANR stack 转储 firstPids 剔除冻结 pid（A13+ ProcessList，AMS 兜底）
+        list.add(Registry.entry("def.stack-dump", PROCESS_LIST, AMS, "dumpStackTraces",
+                "onDumpStackTraces", false, "firstPids 剔除冻结 pid"));
+        // 3. Service 超时豁免（冻结 app 不判 ANR）
+        list.add(Registry.entry("def.service-timeout", ACTIVE_SERVICES, null, "serviceTimeout",
+                "onServiceTimeout", false, "冻结 app 的 service 超时不判 ANR"));
+        list.add(Registry.entry("def.service-fg-timeout", ACTIVE_SERVICES, null,
+                "serviceForegroundTimeout", "onServiceForegroundTimeout", false,
+                "冻结 app 前台 service 超时豁免"));
+        // 4. ProcessErrorStateRecord 二次拦截（双方法条目：appNotResponding 优先 +
+        //    setNotResponding 兜底——原"方法名探测二选一"等价迁移，同回调无副作用）
+        list.add(Registry.entry("def.pesr-anr", PESR, null, "appNotResponding",
+                "onPesrAnr", false, "ANR 二次拦截"));
+        list.add(Registry.entry("def.pesr-set-anr", PESR, null, "setNotResponding",
+                "onPesrAnr", false, "ANR 二次拦截（方法名兜底）"));
+        // 5. 系统 freezer 防双冻结（AOSP freezeApp + ColorOS 改名家族 + HANS 入口）
+        list.add(Registry.entry("def.freeze-app", CACHED_APP_OPTIMIZER, null, "freezeApp",
+                "onFreezeApp", false, "系统 freezer 不冻被管 app"));
+        // 7a. ColorOS 改名 freeze 入口（锁内方法，全重载）
+        list.add(Registry.entry("def.sysfreeze-lsp", CACHED_APP_OPTIMIZER, null,
+                "freezeAppAsyncLSP", "onSystemFreeze", false, "ColorOS 系统冻结入口"));
+        list.add(Registry.entry("def.sysfreeze-lsp-internal", CACHED_APP_OPTIMIZER, null,
+                "freezeAppAsyncInternalLSP", "onSystemFreeze", false, "ColorOS 系统冻结入口"));
+        list.add(Registry.entry("def.sysfreeze-lsp-earliest", CACHED_APP_OPTIMIZER, null,
+                "freezeAppAsyncAtEarliestLSP", "onSystemFreeze", false, "ColorOS 系统冻结入口"));
+        list.add(Registry.entry("def.sysfreeze-lsp-immediate", CACHED_APP_OPTIMIZER, null,
+                "freezeAppAsyncImmediateLSP", "onSystemFreeze", false, "ColorOS 系统冻结入口"));
+        list.add(Registry.entry("def.sysfreeze-binder", CACHED_APP_OPTIMIZER, null,
+                "freezeBinder", "onSystemFreeze", false, "系统冻结入口"));
+        list.add(Registry.entry("def.sysfreeze-binder-pkg", CACHED_APP_OPTIMIZER, null,
+                "freezeBinderAndPackageCgroup", "onSystemFreeze", false, "系统冻结入口"));
+        list.add(Registry.entry("def.sysfreeze-pkg", CACHED_APP_OPTIMIZER, null,
+                "freezePackageCgroup", "onSystemFreeze", false, "系统冻结入口"));
+        // 7b. HANS 主动冻结入口（冻结集内 uid 阻止二次冻结）
+        list.add(Registry.entry("def.hans-freeze-preload", HANS_MANAGER, null,
+                "freezeAppForPreload", "onSystemFreeze", false, "HANS 冻结入口"));
+        list.add(Registry.entry("def.hans-freeze-all", HANS_MANAGER, null,
+                "freezeAllProcess", "onSystemFreeze", false, "HANS 冻结入口"));
+        list.add(Registry.entry("def.hans-freeze-cgroup", HANS_MANAGER, null,
+                "freezeCgroupUid", "onSystemFreeze", false, "HANS 冻结入口"));
+        // 7c. HANS 解冻防御（防 HANS 解掉 Sundown 冻结态——墓碑失效/假活）
+        list.add(Registry.entry("def.hans-unfreeze-kernel", HANS_MANAGER, null,
+                "unfreezeForKernel", "onHansUnfreeze", false, "防 HANS 解掉 Sundown 冻结态"));
+        list.add(Registry.entry("def.hans-unfreeze-pid", HANS_MANAGER, null,
+                "unfreezeForKernelTargetPid", "onHansUnfreeze", false, "防 HANS 解掉 Sundown 冻结态"));
+        list.add(Registry.entry("def.hans-unfreeze-min", HANS_MANAGER, null,
+                "unfreezeAppforHansMinSystem", "onHansUnfreeze", false, "防 HANS 解掉 Sundown 冻结态"));
+        // 7d. HANS Proxy 防御（冻结集内 uid 不被 HANS 代理干预）
+        list.add(Registry.entry("def.hans-proxyed", HANS_PROXY, null, "isProxyed",
+                "onHansIsProxyed", false, "冻结 uid 不被 HANS 代理干预"));
+        // 7e. ColorOS GMS 限制禁用（对齐 AStop DO_NOTHING）
+        list.add(Registry.entry("def.gms-restrict-observer", BG_SCENE, null,
+                "registerGmsRestrictObserver", "onNoop", false, "禁用 GMS 限制"));
+        list.add(Registry.entry("def.gms-restrict-update", BG_SCENE, null,
+                "updateGmsRestrict", "onNoop", false, "禁用 GMS 限制"));
+        list.add(Registry.entry("def.gms-startup-info", STARTUP_STRATEGY, null,
+                "isGoogleRestricInfoOn", "onReturnFalse", false, "GMS 限制信息关闭"));
+        // 8. OomAdjuster 防御（候选池跳过 adj 重算 + 写入锁 -1000）
+        list.add(Registry.entry("def.oom-compute-lsp", OOM_ADJUSTER, null, "applyOomAdjLSP",
+                "onOomAdjCompute", false, "候选池跳过 adj 重算"));
+        list.add(Registry.entry("def.oom-compute", OOM_ADJUSTER, null, "applyOomAdj",
+                "onOomAdjCompute", false, "候选池跳过 adj 重算"));
+        list.add(Registry.entry("def.oom-apply", PROCESS_LIST, null, "setOomAdj",
+                "onOomAdjApply", false, "候选池 pid adj 锁 -1000"));
+        // 9. 耗电判定豁免（冻结集内豁免，防"耗电异常"杀冻结 app）
+        list.add(Registry.entry("def.excessive-power", AMS, null, "checkExcessivePowerUsageLPr",
+                "onExcessivePower", false, "冻结 uid 豁免耗电判定"));
+        // 10. Doze 白名单注入（冻结 uid 注入白名单数组）
+        list.add(Registry.entry("def.doze-whitelist", DEVICE_IDLE, null,
+                "getAppIdWhitelistInternal", "onAppIdWhitelist", false, "冻结 uid 注入白名单"));
+        list.add(Registry.entry("def.doze-user-whitelist", DEVICE_IDLE, null,
+                "getAppIdUserWhitelistInternal", "onAppIdWhitelist", false, "冻结 uid 注入白名单"));
+        // 11. break_network（ColorOS Oplus 深度睡眠 uid 断网判定）
+        list.add(Registry.entry("def.deepsleep-net", OPLUS_DEEPSLEEP, null,
+                "isNeedUidDisconnectNetwork", "onNeedUidDisconnect", false, "冻结 uid 断网"));
+        // 12. Recents 任务保护（候选池 app 的 Task 不被移除/清空）
+        list.add(Registry.entry("def.task-remove-atms", ACTIVITY_TASK_MANAGER, null,
+                "removeTask", "onTaskRemove", false, "候选池任务不被移除"));
+        list.add(Registry.entry("def.task-remove-supervisor", TASK_SUPERVISOR, null,
+                "removeTask", "onTaskRemove", false, "候选池任务不被移除"));
+        list.add(Registry.entry("def.task-removeall-atms", ACTIVITY_TASK_MANAGER, null,
+                "removeAllVisibleRecentTasks", "onRemoveAllVisible", false, "候选池任务不被清空"));
+        list.add(Registry.entry("def.task-removeall-supervisor", TASK_SUPERVISOR, null,
+                "removeAllVisibleRecentTasks", "onRemoveAllVisible", false, "候选池任务不被清空"));
+        list.add(Registry.entry("def.task-persister-remove", TASK_PERSISTER, null,
+                "removeTask", "onTaskPersisterRemove", false, "Recents 持久化移除观测"));
+        // 13. killProcess 拦截（OOM/内存压力杀进程路径）
+        list.add(Registry.entry("def.kill-process", CACHED_APP_OPTIMIZER, null,
+                "killProcess", "onKillProcess", false, "候选池进程不被 OOM 杀"));
+        list.add(Registry.entry("def.kill-locked", PROCESS_RECORD, null,
+                "killLocked", "onKillLocked", false, "候选池进程不被 killLocked 杀"));
+        return list;
     }
 
     @Override
@@ -1008,65 +1007,5 @@ public final class DefenseHooks implements HookEngine {
         if (f instanceof Number) return Integer.valueOf(((Number) f).intValue());
         return null;
     }
-
-    private Method callback(String name) {
-        try {
-            return DefenseHooks.class.getDeclaredMethod(name, MethodCallback.class);
-        } catch (Throwable t) {
-            Log.e(TAG, "回调方法缺失: " + name + " -> " + t);
-            return null;
-        }
-    }
-
-    private static Class<?> findClass(String name) {
-        return ServerClasses.find(name);
-    }
-
-    private static Method findMethod(Class<?> cls, String name) {
-        if (cls == null) return null;
-        for (Method m : cls.getDeclaredMethods()) {
-            if (m.getName().equals(name)) return m;
-        }
-        return null;
-    }
-
-    private void hookMethod(Method target, Method callback) {
-        if (target == null || callback == null) {
-            Log.w(TAG, "hook 跳过（方法或回调缺失）: " + target);
-            return;
-        }
-        if (Modifier.isAbstract(target.getModifiers()) || target.isBridge() || target.isSynthetic()) {
-            return;
-        }
-        Hooker h = NativeBridge.hook(target, callback, this);
-        if (h != null) {
-            hookers.add(h);
-            Log.i(TAG, "已 hook " + target.getDeclaringClass().getSimpleName() + "#" + target.getName());
-        } else {
-            Log.w(TAG, "方法未 hook 到: " + target.getDeclaringClass().getName() + "#" + target.getName());
-        }
-    }
-
-    private int hookAllOverloads(Class<?> cls, String name, Method callback) {
-        if (cls == null || callback == null) {
-            Log.w(TAG, "hook 跳过（类或回调缺失）: " + name);
-            return 0;
-        }
-        int ok = 0;
-        for (Method m : cls.getDeclaredMethods()) {
-            if (!m.getName().equals(name)) continue;
-            if (Modifier.isAbstract(m.getModifiers()) || m.isBridge() || m.isSynthetic()) continue;
-            Hooker h = NativeBridge.hook(m, callback, this);
-            if (h != null) {
-                hookers.add(h);
-                ok++;
-            }
-        }
-        if (ok == 0) {
-            Log.w(TAG, "方法未 hook 到: " + cls.getName() + "#" + name);
-        } else {
-            Log.i(TAG, "已 hook " + cls.getSimpleName() + "#" + name + "（重载数: " + ok + "）");
-        }
-        return ok;
-    }
+}
 }

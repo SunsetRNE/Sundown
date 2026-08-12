@@ -1,11 +1,20 @@
 # Sundown 版本记录（CHANGELOG）
-
 > 版本策略见 `README.md`「版本号策略」：L0→v0.1.0-l0 … L3→v0.4.0-l3；阶段内修复/迭代走 patch 位。
 > 每个版本在 GitHub Release 留档（正式版，非 prerelease）；本文件为仓库内版本档案。
 > 格式：`## vX.Y.Z-lN (YYYY-MM-DD)` + 变更要点；补入路线代号（v0.6 行为层 / v0.7 架构层 / v0.8 学习层）附注。
+---
+## v0.4.62-l3 (2026-08-12)
+**dex 侧收尾三件套（B1/B2/B4 配套 · v0.9-l3）**
+### B 档 · P1 架构演进（dex 侧配套）
+- **B1 DefenseHooks 迁移注册表**：13 组硬编码 hook 点（39 条）全部条目化（`def.*` id + capability 描述字段），经 `Registry.installGroup` 统一安装（类解析/回调查找/重载 hook 收敛注册表，status/env-check 可枚举）；PESR 双方法探测（appNotResponding/setNotResponding）与 ProcessList→AMS 兜底等价迁移为双条目（同回调无副作用）；删除组内私有 findClass/callback/hookAllOverloads/hookMethod 重复实现；全部条目 critical=false 保持既有"失败跳过"语义（ColorOS 专有条目在 AOSP 设备必然失败——零行为变化）
+- **B2 DaemonLink 接入 subscribe 声明**：dex 建链 hello 后声明 `kinds=frozen-sync,candidate-sync,dex-push`（按需分发替代全量广播；旧 daemon 不支持 subscribe → ok=0 仅告警降级全量，零风险兼容）
+- **B4 CapabilityProbe（dex 侧 ROM 能力探测）**：新增 `CapabilityProbe.java`——system_server 内类/方法存在性矩阵（19 项：AOSP 基座 13 + ColorOS 专有 6，findClass 经 ServerClasses，与注册表条目同判据）；上报通道 `capability-probe` 命令（daemon 原样存 `state.dex_capability`，事件留痕 capability_probe_dex）；`capability status` 导出 `dex_probe` 字段；sunctl `capability dex-probe` 子命令 + `env-check` ROM 探测面（类命中率摘要，daemon 离线仅提示不置失败）
+### 验证
+- cargo test 90/90（+0：纯协议/观测面收尾，无新决策分支）
+- 版本号 v0.4.61-l3→v0.4.62-l3（release 66→67，versionCode 71→72）三处同步：paths.rs / module.prop / sunctl
+- **实机验证（2026-08-12）**：待热更新后补充
 
 ---
-
 ## v0.4.61-l3 (2026-08-12)
 
 **C2 分析建议（C 档行为学习收尾刀 · 只建议不执行）**
@@ -21,6 +30,7 @@
 ### 验证
 - cargo test 90/90（原 84 + C2 新增 6 项：数据不足提示 / 风暴识别+动作指引 / 源模式聚类 / 抖动+豁免 / 中频节流 / 速率时间窗）
 - 版本号 v0.4.60-l3→v0.4.61-l3（release 65→66，versionCode 70→71）三处同步：paths.rs / module.prop / sunctl
+- **实机验证（2026-08-12）**：daemon 热替换 release 66；首测数据不足门槛正确拦截（1 app/23 唤醒 → 提示继续采集）；积累 12 app/108 唤醒后 analyze 输出 6 条建议——source_pattern ×4（"?" 与 systemui broadcast 100%、微信 broadcast 90%、coloros.weather service 100% 带 service_gate 指引）+ throttle ×2（systemui 8 次 / weather 6 次），JSON 转义正常，只建议未动配置（失败安全哲学实测）
 
 ---
 

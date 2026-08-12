@@ -55,6 +55,18 @@ final class DaemonLink {
         return new JSONObject(resp);
     }
 
+    /**
+     * B2 事件订阅声明（v0.9-l3 配套）：subscribe kinds=<a,b> packages=<x,y>
+     * ——daemon 按需分发替代全量广播；旧 daemon 不支持 subscribe 时返回 ok=0
+     * （默认全量兼容，调用方降级不阻塞，见 Runtime.eventLoop）。
+     */
+    JSONObject subscribe(String arg) throws IOException, JSONException {
+        writeLine("subscribe " + arg);
+        String resp = readLine();
+        if (resp == null) throw new IOException("daemon 提前断开（无 subscribe 应答）");
+        return new JSONObject(resp);
+    }
+
     /** 订阅连接：读下一行（事件头 JSON）；EOF 返回 null */
     String readLine() throws IOException {
         ByteArrayOutputStream line = new ByteArrayOutputStream(128);

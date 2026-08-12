@@ -162,6 +162,35 @@ final class Runtime {
                 if (bridgeHash != null) {
                     l.writeLine("report-bridge " + bridgeHash);
                 }
+                // v0.9-l3 B4 配套：上报 dex 侧 ROM 能力探测（类/方法存在性矩阵）——
+                // daemon 原样存 state.dex_capability，经 capability status / sunctl
+                // env-check 导出（观测面互补：daemon capability.rs 是磁盘能力，本面
+                // 是注入环境 hook 目标存在性）。失败安全：整体失败仅告警，不阻塞。
+                try {
+                    String probeJson = ren.sunset.sundown.hook.CapabilityProbe.probeJson();
+                    if (probeJson != null) {
+                        l.writeLine("capability-probe " + probeJson);
+                        String ack = l.readLine();
+                        if (ack != null && ack.contains("\"ok\":0")) {
+                            Log.w(TAG, "capability-probe 被拒（旧 daemon？）: " + ack);
+                        }
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "capability-probe 上报失败（静默降级）: " + t);
+                }
+                // v0.9-l3 B2 配套：声明订阅兴趣（按需分发替代全量广播）。
+                // dex 只消费三类下行：frozen-sync / candidate-sync（冻结集权威同步）
+                // + dex-push（热更新字节帧）——明确声明，未来新增下行 kind 不误收。
+                // 旧 daemon 不支持 subscribe → ok=0 → 仅告警降级（默认全量兼容零风险）。
+                try {
+                    JSONObject sub = l.subscribe("kinds=frozen-sync,candidate-sync,dex-push");
+                    if (sub.optInt("ok", 0) != 1) {
+                        Log.w(TAG, "subscribe 被拒（旧 daemon 全量兼容）: "
+                                + sub.optString("error", "unknown"));
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "subscribe 声明失败（降级全量）: " + t);
+                }
                 // 订阅事件流（阻塞读；EOF/异常 → 重连）
                 String line;
                 while (!stopped && (line = l.readLine()) != null) {
