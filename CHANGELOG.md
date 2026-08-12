@@ -21,6 +21,7 @@
 ### 验证
 - cargo test 84/84（原 79 + C1 新增 5 项：前台时长累计 / 唤醒计数+源分布 / 冻结解冻丢弃 / TOP 排序 / 事件丢失容忍）
 - 版本号 v0.4.59-l3→v0.4.60-l3（release 64→65，versionCode 69→70）三处同步：paths.rs / module.prop / sunctl
+- **实机验证（2026-08-12）**：daemon 热替换 release 65；`profile summary` 3 app/5 唤醒实时在线；`profile top` 排序正确（"?" 3 次 > heytap.htms / tencent.mm 各 1）；`profile get com.tencent.mm` 触发焦点切换后 focus_count=1 / focus_ms=2003ms 真实累计，且暴露真实洞察——微信切前台伴随 26 次唤醒（broadcast 21 / service 4 / pendingintent 1），C1 数据作为 C2 "疯狂唤醒者"识别依据的价值实证
 
 ---
 
