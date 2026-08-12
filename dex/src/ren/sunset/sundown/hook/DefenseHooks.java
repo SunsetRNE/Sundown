@@ -1008,4 +1008,3 @@ public final class DefenseHooks implements HookEngine {
         return null;
     }
 }
-}
