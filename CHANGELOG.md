@@ -22,6 +22,8 @@
 ### 验证
 - cargo test 79/79（原 76 + B4 新增 3 项：classify 优先级判定 / FreezerLevel 序列化 / probe 失败安全契约）
 - 版本号 v0.4.58-l3→v0.4.59-l3（release 63→64，versionCode 68→69）三处同步：paths.rs / module.prop / sunctl
+- **实机验证 + 修复（2026-08-12）**：首测暴露**固定 uid_10000 探测缺陷**（ColorOS uid 从 10066 起，10000-10065 无目录 → freezer=none 误报）→ 修复为枚举 apps/ 下最小 uid_* 目录（143feff + d76b537，含一次编译遗留变量修复）；修复后实机矩阵：**freezer=uid_v2**（uid_10066/cgroup.freeze + pid 级路径命中）、net=pinfile、madvise_willneed=false（ColorOS 内核不支持 process_madvise，解冻预热自动降级，失败安全）、唤醒源基线统计中（broadcast/service/pendingintent）
+- reprobe 实机验证：重新探测刷新矩阵 + 日志/事件留痕（capability_probed ×2）
 
 ---
 
