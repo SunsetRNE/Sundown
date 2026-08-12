@@ -6,7 +6,24 @@
 
 ---
 
-## v0.4.58-l3 (2026-08-12)
+## v0.4.59-l3 (2026-08-12)
+
+**B4 设备能力探测矩阵（缺口补入 B 档架构层 · 观测面）**
+
+### B 档 · P1 架构演进
+- **B4 设备能力探测矩阵**（新增 `daemon/src/capability.rs`，对齐 network.rs `probe_source` 启动自检 + 缓存哲学）：
+  - **freezer 层级判定**：v2 uid 级（apps/uid_<uid>/cgroup.freeze）> v2 pid 级 > v1 freezer 控制器 > none（SIGSTOP 兜底）；判定为纯函数 `classify`（可单测），探测只读零副作用（探测用 uid=10000）
+  - **process_madvise(MADV_WILLNEED) 支持**：复用 freezer.rs syscall 封装（pidfd_open 434 / process_madvise 440）对自身进程实测——解冻预热前置可用性
+  - **网络数据源**：engine.net.probe_source() 结果纳入矩阵（keep_network 豁免数据可用性基线）
+  - **唤醒源统计基线**：EngineState 新增 `wakeup_sources`（on_wakeup 入口按 source 聚合，含 keep_wakeup=false 忽略事件——"到达 daemon 的全部唤醒"完整视图，写规则的依据面）
+- **接入面**：main.rs 启动探测一次（日志 + 事件留痕 capability_probed）；sock.rs `capability status|reprobe` 命令（mgmt 面）；sunctl `capability status|reprobe` 子命令 + usage
+- 铁律保持：只读探测失败安全（缺失 = None，不 panic 不阻塞）；探测结果仅观测面消费，不参与决策
+
+### 验证
+- cargo test 79/79（原 76 + B4 新增 3 项：classify 优先级判定 / FreezerLevel 序列化 / probe 失败安全契约）
+- 版本号 v0.4.58-l3→v0.4.59-l3（release 63→64，versionCode 68→69）三处同步：paths.rs / module.prop / sunctl
+
+---
 
 **B3 声明式规则引擎 rules.toml（缺口补入 B 档架构层 · 快速应对层）**
 

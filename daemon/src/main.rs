@@ -9,6 +9,7 @@
 //!   sundownd            前台运行（由 service.sh nohup 拉起）
 //!   sundownd --version  打印版本（含 release_no，供 staged 更新元数据生成）
 
+mod capability;
 mod config;
 mod engine;
 mod events;
@@ -164,6 +165,34 @@ fn main() {
 
     let state = Arc::new(DaemonState::new());
     let shutdown = Arc::new(AtomicBool::new(false));
+    // B4（v0.8-l3）：设备能力探测矩阵（启动自检一次 + 观测面导出；只读失败安全）。
+    // net_source 从 engine.net 探测（与 network.rs probe_source 同哲学：enabled=false
+    // 也能验证数据源可用性）；探测结果仅观测消费，不参与决策。
+    {
+        let mut eng = state.engine.lock().unwrap();
+        let net_source = eng.net.probe_source().to_string();
+        let cap = capability::probe(net_source);
+        logi!(
+            "B4 能力矩阵: freezer={} cgroup_v2={} madvise_willneed={} net={} uid_path={}",
+            cap.freezer.as_str(),
+            cap.cgroup_v2,
+            cap.madvise_willneed,
+            cap.net_source,
+            cap.freezer_uid_path.as_deref().unwrap_or("-")
+        );
+        eng.events.push_system(
+            crate::events::EvLevel::Report,
+            crate::events::EvAction::Policy,
+            Some("capability_probed"),
+            Some(&format!(
+                "freezer={} madvise={} net={}",
+                cap.freezer.as_str(),
+                cap.madvise_willneed,
+                cap.net_source
+            )),
+        );
+        state.capability.lock().unwrap().replace(cap);
+    }
 
     // v0.4.29-l3：启动归属对账（替代 v0.4.22-l3 全量解冻——误解冻 HANS 冻结集：
     // 2026-08-03 实机，enabled=true 时对账把微信等 HANS 冻结进程当残留解冻，与 HANS 打架）。

@@ -116,6 +116,9 @@ pub struct DaemonState {
     pub wakeup_events: AtomicU64,
     /// L3 策略引擎（策略表 + 冻结表 + 决策状态机）
     pub engine: Mutex<EngineState>,
+    /// B4（v0.8-l3）：设备能力探测矩阵（启动探测一次 + capability reprobe 刷新；
+    /// None = 尚未探测——启动早期查询的兜底，观测面不阻塞）
+    pub capability: Mutex<Option<crate::capability::Capability>>,
 }
 
 /// 从模块目录读取期望 hash（启动 / reload-config 时调用）
@@ -160,6 +163,7 @@ impl DaemonState {
             focus_changes: AtomicU64::new(0),
             wakeup_events: AtomicU64::new(0),
             engine: Mutex::new(Self::init_engine()),
+            capability: Mutex::new(None),
         }
     }
 

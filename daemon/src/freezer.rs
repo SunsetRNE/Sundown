@@ -195,7 +195,8 @@ const SYS_PROCESS_MADVISE: libc::c_long = 440;
 /// 对单个进程执行 process_madvise(MADV_WILLNEED)：读 /proc/<pid>/maps 收集可读映射
 /// 区间（clamp：段数 ≤64、单段 ≤8MB 防 IO 风暴），一次性下发。失败安全：任何错误
 /// 返回 false（调用方静默计数，不阻塞解冻）。
-fn madvise_willneed(pid: u32) -> bool {
+/// B4（v0.8-l3）：pub(crate) 化——capability.rs 探测矩阵复用（对自身进程启动自检）。
+pub(crate) fn probe_madvise_willneed(pid: u32) -> bool {
     // 1. pidfd（目标进程无需合作；冻结/SIGSTOP 进程同样适用）
     let pidfd = unsafe { libc::syscall(SYS_PIDFD_OPEN, pid as libc::c_int, 0) };
     if pidfd < 0 {
@@ -260,7 +261,7 @@ fn madvise_warm_uid(uid: u32) -> usize {
     let pids = uid_pids(uid);
     let mut n = 0usize;
     for pid in pids {
-        if madvise_willneed(pid) {
+        if probe_madvise_willneed(pid) {
             n += 1;
         }
     }

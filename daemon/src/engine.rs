@@ -103,6 +103,9 @@ pub struct EngineState {
     pub rules: RuleTable,
     /// B3：规则累计命中次数（status rule_hits 观测）
     pub rule_hits: u64,
+    /// B4（v0.8-l3）：唤醒源统计基线（on_wakeup 入口按 source 聚合；
+    /// capability status 导出——诊断"哪种唤醒源在骚扰"，写规则的依据面）
+    pub wakeup_sources: std::collections::HashMap<String, u64>,
 }
 impl Default for EngineState {
     fn default() -> Self {
@@ -140,6 +143,7 @@ impl Default for EngineState {
             boot_reclaim_candidates: Vec::new(),
             rules: RuleTable::default(),
             rule_hits: 0,
+            wakeup_sources: std::collections::HashMap::new(),
         }
     }
 }
@@ -231,6 +235,9 @@ impl EngineState {
     /// source：唤醒源（dex 上行 reason=broadcast|service|pendingintent；缺省 "?"）。
     /// action：匹配键（broadcast 源 = action；service/pendingintent 源 = 组件名；缺省 "?"）。
     pub fn on_wakeup(&mut self, pkg: &str, source: &str, action: &str) {
+        // B4（v0.8-l3）：唤醒源统计基线（入口处聚合——含 keep_wakeup=false 的忽略事件，
+        // 语义 = "到达 daemon 的全部唤醒"基线，诊断骚扰源完整视图）
+        *self.wakeup_sources.entry(source.to_string()).or_insert(0) += 1;
         if !self.keep_wakeup(pkg) {
             logi!("L3 唤醒忽略（keep_wakeup=false）: {}", pkg);
             self.events.push_app(

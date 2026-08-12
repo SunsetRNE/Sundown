@@ -294,6 +294,14 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>, mgmt: bool) -> std::
                 handle_rules(&state, arg)
             }
         }
+        // ---- B4 设备能力探测矩阵（v0.8-l3）：capability status | capability reprobe ----
+        "capability" => {
+            if !mgmt {
+                "{\"ok\":0,\"error\":\"capability is management-channel only\"}".to_string()
+            } else {
+                handle_capability(&state, arg)
+            }
+        }
         "stop" => {
             logi!("收到 stop 命令，优雅退出");
             writer.write_all(b"{\"ok\":1,\"stopping\":1}\n")?;
@@ -796,6 +804,83 @@ fn handle_rules(state: &DaemonState, arg: &str) -> String {
             "{{\"ok\":0,\"error\":\"rules: unknown subcommand: {}\"}}",
             other
         ),
+    }
+}
+
+/// B4（v0.8-l3）capability 子命令（仅 root 管理面）：
+///   capability status   -> 能力矩阵 JSON（freezer 层级 / madvise / 网络源 / 唤醒源基线）
+///   capability reprobe  -> 重新探测（刷新矩阵；探测失败保留旧值）
+fn handle_capability(state: &DaemonState, arg: &str) -> String {
+    let sub = arg.trim();
+    match sub {
+        "reprobe" => {
+            let mut eng = state.engine.lock().unwrap();
+            let net_source = eng.net.probe_source().to_string();
+            let cap = crate::capability::probe(net_source);
+            let mut slot = state.capability.lock().unwrap();
+            let (freezer, madvise, net, probed) = (
+                cap.freezer.as_str(),
+                cap.madvise_willneed,
+                cap.net_source.clone(),
+                cap.probed_at,
+            );
+            slot.replace(cap);
+            logi!("B4 能力矩阵重探测: freezer={} madvise={} net={}", freezer, madvise, net);
+            format!(
+                "{{\"ok\":1,\"reprobed\":1,\"freezer\":\"{}\",\"madvise_willneed\":{},\"net_source\":\"{}\",\"probed_at\":{}}}",
+                freezer, madvise, net, probed
+            )
+        }
+        _ => {
+            // 缺省 = status
+            let slot = state.capability.lock().unwrap();
+            let Some(cap) = slot.as_ref() else {
+                return "{\"ok\":0,\"error\":\"capability not probed yet\"}".to_string();
+            };
+            let eng = state.engine.lock().unwrap();
+            let ws = eng
+                .wakeup_sources
+                .iter()
+                .map(|(k, v)| format!("\"{}\":{}", k, v))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                concat!(
+                    "{{\"ok\":1,",
+                    "\"freezer\":\"{freezer}\",",
+                    "\"cgroup_v2\":{cgroup_v2},",
+                    "\"freezer_uid_path\":{uid_path},",
+                    "\"freezer_pid_path\":{pid_path},",
+                    "\"freezer_v1_path\":{v1_path},",
+                    "\"madvise_willneed\":{madvise},",
+                    "\"net_source\":\"{net}\",",
+                    "\"wakeup_sources\":{{{ws}}},",
+                    "\"probed_at\":{probed}",
+                    "}}"
+                ),
+                freezer = cap.freezer.as_str(),
+                cgroup_v2 = cap.cgroup_v2,
+                uid_path = cap
+                    .freezer_uid_path
+                    .as_deref()
+                    .map(|p| format!("\"{}\"", p))
+                    .unwrap_or_else(|| "null".to_string()),
+                pid_path = cap
+                    .freezer_pid_path
+                    .as_deref()
+                    .map(|p| format!("\"{}\"", p))
+                    .unwrap_or_else(|| "null".to_string()),
+                v1_path = cap
+                    .freezer_v1_path
+                    .as_deref()
+                    .map(|p| format!("\"{}\"", p))
+                    .unwrap_or_else(|| "null".to_string()),
+                madvise = cap.madvise_willneed,
+                net = cap.net_source,
+                ws = ws,
+                probed = cap.probed_at,
+            )
+        }
     }
 }
 
