@@ -13,7 +13,7 @@
 - cargo test 90/90（+0：纯协议/观测面收尾，无新决策分支）
 - 版本号 v0.4.61-l3→v0.4.62-l3（release 66→67，versionCode 71→72）三处同步：paths.rs / module.prop / sunctl
 - **发布流程修正（对照 GitHub 官方最新文档 2026-03-10）**：核验 repo 仅 7 个正式 Release（无 nightly tag/draft 残留，本地旧 nightly tag 引用已清）；build.yml 发布步骤确认已用 action-gh-release@v3（v3.0.2，Node 24，官方当前版本）+ contents: write 权限 + 正式 Release 语义（tag=版本号、非 prerelease、overwrite 软发布）；补充官方约束注释（commit 修改 workflow 文件时 GITHUB_TOKEN 无权建 Release 的边界）；清理 README/docs/WebUI 全部 "Nightly" 渠道残留描述（5+5+1+1+3 处），统一为正式 Release 渠道（sunctl apply-update 实际行为 v0.4.57-l3 起已查 releases/latest，文档同步）
-- **发布渠道事故恢复（2026-08-12）**：远程清理 nightly 时误删全部 Release/tag → 7 个版本 tag（v0.4.56-l3~v0.4.62-l3）从本地 commit 重建推送恢复；v0.4.62-l3 Release 经 CI push 重建（asset 软发布）；历史 6 个 Release 待手动重建（需 API token）
+- **发布渠道重建（2026-08-12，有意清空重发）**：清空全部 Release/tag 后重新走正式发布流程——7 个版本 tag（v0.4.56-l3~v0.4.62-l3）从本地 commit 重建推送恢复；v0.4.62-l3 Release 经 CI push 重建（tag 已存在 → action-gh-release 创建 release 并上传 asset）
 - **实机验证（2026-08-12）**：daemon 热替换 release 67 + root/模块双侧 probe.dex 同步（64512→67760→67888B，hash=c0fc580→fac8460→2cfa8c8）+ reload-probe 换代成功（dex 握手 version 三态闭环）；**B2 subscribe 声明生效**（daemon 日志 "dex 订阅更新 (id=3): kinds=frozen-sync,candidate-sync,dex-push"，重连后仍正确声明）；**B4 capability-probe 上报生效**（daemon 日志 "dex ROM 能力探测上报" + `sunctl capability dex-probe` 20 项矩阵在线 + `capability status` 内嵌 dex_probe + env-check "类命中 17/20"导出面）；**实机校准**：def.stack-dump 拆双条目（ProcessList/AMS 类均在但 dumpStackTraces 方法均不存在——ColorOS 实证 firstPids 剔除与原始代码行为等价走失败跳过，双条目对未来 ROM 变体更完整，软发布覆盖 asset）；ROM 矩阵实证 ColorOS 差异：PESR 类不存在、freezeAppAsyncLSP=true、OplusHansProxyManager.isProxyed=true、OplusStartupStrategy.isGoogleRestricInfoOn=true、OplusBgSceneManager GMS 限制=true
 
 ---
