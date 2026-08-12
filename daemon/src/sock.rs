@@ -286,6 +286,14 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>, mgmt: bool) -> std::
                 handle_policy(&state, arg)
             }
         }
+        // ---- B3 声明式规则引擎（v0.8-l3）：rules list | rules status ----
+        "rules" => {
+            if !mgmt {
+                "{\"ok\":0,\"error\":\"rules is management-channel only\"}".to_string()
+            } else {
+                handle_rules(&state, arg)
+            }
+        }
         "stop" => {
             logi!("收到 stop 命令，优雅退出");
             writer.write_all(b"{\"ok\":1,\"stopping\":1}\n")?;
@@ -756,6 +764,38 @@ fn handle_preset(state: &DaemonState, arg: &str) -> String {
             )
         }
         _ => "{\"ok\":0,\"error\":\"preset: 用法 list | apply <name> | clear\"}".to_string(),
+    }
+}
+
+/// B3（v0.8-l3）rules 子命令（仅 root 管理面）：
+///   rules list          -> {"ok":1,"count":N,"rules":["id1","id2",...]}（id 稳定排序）
+///   rules status        -> {"ok":1,"count":N,"revision":R,"hits":H}
+fn handle_rules(state: &DaemonState, arg: &str) -> String {
+    let sub = arg.trim();
+    let eng = state.engine.lock().unwrap();
+    match sub {
+        "list" => {
+            let ids = eng.rules.ids();
+            format!(
+                "{{\"ok\":1,\"count\":{count},\"rules\":[{ids}]}}",
+                count = ids.len(),
+                ids = ids
+                    .iter()
+                    .map(|s| format!("\"{}\"", s))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+        }
+        "status" => format!(
+            "{{\"ok\":1,\"count\":{},\"revision\":{},\"hits\":{}}}",
+            eng.rules.len(),
+            eng.rules.revision,
+            eng.rules.hits
+        ),
+        other => format!(
+            "{{\"ok\":0,\"error\":\"rules: unknown subcommand: {}\"}}",
+            other
+        ),
     }
 }
 

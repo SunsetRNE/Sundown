@@ -1,0 +1,50 @@
+# ============================================================
+# Sundown 声明式规则引擎（B3 / v0.8-l3）
+# 快速应对层：App 设计缺陷（疯狂唤醒 / 内存爆炸）→ 写规则热加载，
+# 不重新编译 dex。文件变更后 daemon 自动热重载（失败保留旧表，零风险）。
+# 语法：极简 TOML 子集（与 policy.toml 同解析器），键 = 值 或 表段。
+#
+# 规则段：[rules."<id>"]  （id 唯一，任意字符串；重复段合并到同一条）
+#
+# 可用键：
+#   priority     整数，越大越先命中；同优先级按定义顺序（先定义先命中）
+#   applies_to   包名数组，如 ["com.tencent.mobileqq"]；空或缺省 = 所有包；
+#                "*" = 通配全部
+#   condition    always | leave | wakeup | focus（缺省 always）
+#                - always：任意事件都参与判定
+#                - leave ：退后台（decide_leave 链路）
+#                - wakeup：被唤醒（on_wakeup 链路，可配 source 限定）
+#                - focus ：切前台（on_focus 链路）
+#   source       仅 condition=wakeup 生效：broadcast | service | pendingintent
+#                （缺省 = 不限定唤醒源）
+#   action       必填！suppress | exempt | freeze | discard（缺失整条规则忽略）
+#                - suppress：抑制唤醒（不解冻、不取消 grace；风暴压制）
+#                - exempt  ：豁免（永不冻结；热加载后已冻结/grace 中立即解冻）
+#                - freeze  ：退后台立即冻结（跳过 grace）
+#                - discard ：冻结超过 after_seconds 后 SIGKILL 释放内存
+#   throttle     命中后窗口内不再命中（秒；0 = 关闭节流）
+#   after_seconds 仅 discard：冻结多久后丢弃（缺省 = 全局 frozen_timeout）
+#   expires_at   "YYYY-MM-DD"：含当日仍生效，次日失效（临时应急规则自动过期）
+#
+# 示例（全部注释掉，发布默认空表）：
+#
+# [rules."qq-wakeup-storm"]
+# priority = 100
+# applies_to = [ "com.tencent.mobileqq" ]
+# condition = "wakeup"
+# source = "broadcast"
+# action = "suppress"
+# throttle = 60
+#
+# [rules."bloat-oom-discard"]
+# priority = 50
+# applies_to = [ "com.example.bloat" ]
+# condition = "always"
+# action = "discard"
+# after_seconds = 1800
+#
+# [rules."system-keep-alive"]
+# priority = 200
+# applies_to = [ "com.example.vpn" ]
+# action = "exempt"
+# ============================================================

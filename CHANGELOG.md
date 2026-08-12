@@ -6,7 +6,25 @@
 
 ---
 
-## v0.4.57-l3 (2026-08-12)
+## v0.4.58-l3 (2026-08-12)
+
+**B3 声明式规则引擎 rules.toml（缺口补入 B 档架构层 · 快速应对层）**
+
+### B 档 · P1 架构演进
+- **B3 声明式规则引擎**（App 设计缺陷 → 写规则热加载，**不重新编译 dex**）：
+  - 新增 `daemon/src/rules.rs`：`RuleCondition` 四态（Always/Leave/Wakeup/Focus）+ `RuleAction` 四类（Suppress/Exempt/Freeze/Discard）+ `Rule`（id/priority/applies_to/condition/source/throttle/after_seconds/expires_at）+ `RuleTable`（find_index 按优先级降序 + 同优先级按定义顺序；peek 只读观测 / hit 命中更新节流；`load()` 缺失/解析失败保留旧表——失败安全与 policy 同构）
+  - action **必填**：未声明或未知值整条剔除（保底 Suppress 不可静默生效，action_set 内部标记区分）
+  - 配置：`module/conf/rules.toml`（发布默认空表 + 全键注释模板）；路径 `/data/adb/sundown/conf/rules.toml`（paths.rs RULES_FILE）
+  - **engine.rs 五处插入点**：① reload_policy 热加载（成功替换 + 事件留痕 rules_reloaded，缺失保留旧表）；② should_never_freeze 规则 exempt 判定（peek 只读，热加载后已冻结/grace 中立即解冻）；③ decide_leave 规则 exempt/freeze（冷却之后、force 之前）；④ on_wakeup 规则 suppress（三源门控之前，不解冻不取消 grace + 事件留痕 rule_suppressed）；⑤ tick 规则 discard（每 10 tick ≈3s，after_seconds 缺省 = 全局 frozen_timeout，安全护栏复用 discard_ineligible）
+  - 优先级链：critical > 系统组件 > 白名单/VPN > 豁免链 > 冷却 > **规则引擎** > force > grace
+- **管理面**：sock.rs `rules` 命令（`rules list` 规则 id 稳定排序 / `rules status` 规则数 + revision + 累计命中 hits）；sunctl `rules list|status` 子命令 + usage 补录
+- **配置迁移同步**：sunctl config export/import 白名单与 META 校验纳入 rules.toml（换机迁移覆盖规则文件）
+
+### 验证
+- cargo test 76/76（原 65 + B3 新增 11 项：解析 2 / 缺 action 1 / 匹配 3 / priority 1 / throttle 1 / expires 1 / date 1 / 通配 1——修复 3 项测试自身断言/数据问题：未知 action 剔除语义、同优先级定义顺序、throttle 通配隔离）
+- 版本号 v0.4.57-l3→v0.4.58-l3（release 62→63，versionCode 67→68）三处同步：paths.rs / module.prop / sunctl
+
+---
 
 **B2 事件订阅注册表（缺口补入 B 档架构层）+ CI 正式发布流程改造（v0.4.56-l3 起不做 Nightly 测试版）**
 

@@ -17,6 +17,7 @@ use crate::freezer;
 use crate::network::{NetSampler, DEFAULT_THRESHOLD, DEFAULT_WINDOW};
 use crate::policy::{AppMode, Policy, PushMode};
 use crate::preset::{Preset, PresetTable};
+use crate::rules::{RuleAction, RuleCondition, RuleTable};
 use crate::{logi, logw};
 
 /// 每个包最近一次 focus 事件的豁免判定字段
@@ -97,6 +98,11 @@ pub struct EngineState {
     /// 上次会话 Sundown 冻结集（main.rs 启动对账注入）——
     /// boot_reclaim 候选之一（"开机恢复的冻结候选"：有归属证据，Sundown 有权回收）
     pub boot_reclaim_candidates: Vec<(String, u32)>,
+    /// B3（v0.8-l3）：声明式规则表（conf/rules.toml；reload 时一并刷新，
+    /// 解析失败保留旧表——App 设计缺陷写规则热修复，不重新编译 dex）
+    pub rules: RuleTable,
+    /// B3：规则累计命中次数（status rule_hits 观测）
+    pub rule_hits: u64,
 }
 impl Default for EngineState {
     fn default() -> Self {
@@ -132,6 +138,8 @@ impl Default for EngineState {
             boot_completed_at: None,
             boot_reclaim_done: false,
             boot_reclaim_candidates: Vec::new(),
+            rules: RuleTable::default(),
+            rule_hits: 0,
         }
     }
 }
@@ -235,6 +243,33 @@ impl EngineState {
             return;
         }
         let now = Instant::now();
+        // B3（v0.8-l3）：规则引擎 suppress——风暴压制（快速应对层，不重编译 dex）。
+        // 语义：命中规则（condition=wakeup 且 source 匹配）→ 不解冻不取消 grace，
+        // 事件留痕 reason=rule_suppressed（可审计）。置于三源门控之前（规则优先级更高）。
+        // IMPORTANT 档 app 不受规则 suppress 影响（keep_wakeup 已强制 true，语义对齐）。
+        if let Some(hit) = self.rules.hit(pkg, RuleCondition::Wakeup, Some(source), now) {
+            if hit.action == RuleAction::Suppress {
+                self.rule_hits += 1;
+                logi!("L3 规则抑制唤醒（{}）: {} source={}", hit.id, pkg, source);
+                self.events.push_app(
+                    EvLevel::Info,
+                    EvAction::Exempt,
+                    pkg,
+                    Some("rule_suppressed"),
+                    Some(&hit.id),
+                );
+                return;
+            }
+            // 其他动作命中 wakeup 条件 → 留痕但不拦截（exempt/freeze/discard 由各自路径消费）
+            self.rule_hits += 1;
+            logi!(
+                "L3 规则命中（{}）: {} source={} action={}（不拦截唤醒）",
+                hit.id,
+                pkg,
+                source,
+                hit.action.as_str()
+            );
+        }
         // 三源唤醒门控（v0.4.43-l3 broadcast / v0.6-l3 service+pendingintent）：
         // 冻结中 + 源门控非空 + 匹配键不在白名单（"*" 通配放行）→ 不解冻。
         // 白名单空 = 全部放行（默认零风险）；IMPORTANT 档绕过（保持"重要"语义）。
@@ -558,6 +593,24 @@ impl EngineState {
         self.refresh_system_apps();
         // 情景预设表随热加载一并刷新（缺失/解析失败 → 空表，预设功能降级不致命）
         self.presets = PresetTable::load();
+        // B3（v0.8-l3）：声明式规则表随热加载一并刷新（缺失 → 保留旧表；
+        // 解析失败 → 保留旧表——失败安全与 policy 同构）
+        if let Some((rt, _)) = RuleTable::load() {
+            logi!(
+                "L3 规则表已重载: {} 条（revision={}）",
+                rt.rules.len(),
+                rt.revision
+            );
+            self.events.push_system(
+                EvLevel::Report,
+                EvAction::Policy,
+                Some("rules_reloaded"),
+                Some(&format!("rules={} rev={}", rt.rules.len(), rt.revision)),
+            );
+            self.rules = rt;
+        } else {
+            logw!("L3 规则表重载失败/缺失（保留旧表 revision={}）", self.rules.revision);
+        }
         if let Some((p, _)) = Policy::load() {
             logi!(
                 "L3 策略已重载: enabled={} grace={}s cooldown={}s whitelist={} force={} apps={}（revision={}）",
@@ -953,6 +1006,33 @@ impl EngineState {
         //   3) boot_reclaim：boot_completed 后延迟一次回收 cache 档"开机恢复候选"。
 
         // 1) 冻结超时丢弃（每 10 tick ≈3s 检查；1800s 默认超时，±3s 粒度可接受）
+        // B3（v0.8-l3）：规则 discard 优先——命中规则的包按 after_seconds（缺省 = 全局
+        // frozen_timeout）丢弃；独立于全局开关（规则 = 用户显式意图，全局 0 不压制）。
+        // 安全护栏复用 discard_ineligible（critical/系统组件/白名单/VPN/IMPORTANT/
+        // 前台/exempt 表终检在 discard_pkg 内部兜底）。
+        if self.tick_count % 10 == 0 && !self.rules.rules.is_empty() {
+            let mut rule_discards: Vec<(String, String)> = Vec::new();
+            for pkg in self.frozen.keys().cloned() {
+                if let Some(hit) = self.rules.peek(&pkg, RuleCondition::Always, None, now) {
+                    if hit.action == RuleAction::Discard {
+                        let threshold = hit
+                            .after_seconds
+                            .unwrap_or(self.policy.discard_frozen_timeout_seconds);
+                        if threshold > 0 {
+                            if let Some(&since) = self.frozen.get(&pkg) {
+                                if now.duration_since(since) >= Duration::from_secs(threshold) {
+                                    rule_discards.push((pkg, hit.id));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for (pkg, rid) in rule_discards {
+                logi!("L3 规则丢弃触发（{}）: {}", rid, pkg);
+                self.discard_pkg(&pkg, "rule_discard");
+            }
+        }
         if self.tick_count % 10 == 0 && self.policy.discard_frozen_timeout_seconds > 0 {
             let expired = self.expired_discard_candidates(now);
             for pkg in expired {
@@ -1359,8 +1439,16 @@ impl EngineState {
         }
     }
 
-    /// 新策略下永不冻结的包（critical / 系统 app / 白名单 / VPN 保护 / per-app exempt）——热更新对账用
+    /// 新策略下永不冻结的包（critical / 系统 app / 白名单 / VPN 保护 / per-app exempt /
+    /// B3 规则 exempt）——热更新对账用
     fn should_never_freeze(&self, pkg: &str) -> bool {
+        // B3（v0.8-l3）：规则 exempt 判定（只读 peek，不更新节流状态）——
+        // 新增 exempt 规则热加载后，已冻结/已进 grace 的包立即解冻（reload_policy 对账）
+        let rule_exempt = self
+            .rules
+            .peek(pkg, RuleCondition::Always, None, Instant::now())
+            .map(|h| h.action == RuleAction::Exempt)
+            .unwrap_or(false);
         self.policy.is_critical(pkg)
             || self.system_apps.contains(pkg)
             || self.policy.is_whitelisted(pkg)
@@ -1371,6 +1459,7 @@ impl EngineState {
                 .get(pkg)
                 .map(|ap| ap.mode == AppMode::Exempt)
                 .unwrap_or(false)
+            || rule_exempt
     }
 
     /// 定位活动豁免开关（per-app 覆盖优先，缺省回落全局）
@@ -1586,6 +1675,50 @@ impl EngineState {
         }
         if self.cooldown.contains_key(pkg) {
             return; // 冷却窗口内免冻
+        }
+        // B3（v0.8-l3）：声明式规则引擎——快速应对层（App 设计缺陷热修复，不重编译 dex）。
+        // 优先级链：critical > 系统组件 > 白名单/VPN > 豁免链（fg/media/loc/窗口/网络）>
+        // 冷却 > **规则引擎** > force > grace。
+        //   exempt 规则 = 条件白名单（豁免链未覆盖的场景补漏，如"这个包别冻"临时生效）；
+        //   freeze 规则 = 条件 force（"这个包退后台立即冻"跳过 grace）。
+        // 规则永远无法冻结 critical/系统组件/白名单/VPN（前方已 return）——安全下限不变。
+        if let Some(hit) = self.rules.hit(pkg, RuleCondition::Leave, None, now) {
+            self.rule_hits += 1;
+            match hit.action {
+                RuleAction::Exempt => {
+                    logi!("L3 规则豁免（{}）: {}", hit.id, pkg);
+                    self.events.push_app(
+                        EvLevel::Info,
+                        EvAction::Exempt,
+                        pkg,
+                        Some("rule_exempt"),
+                        Some(&hit.id),
+                    );
+                    return;
+                }
+                RuleAction::Freeze => {
+                    logi!("L3 规则立即冻结（{}）: {}", hit.id, pkg);
+                    self.events.push_app(
+                        EvLevel::Event,
+                        EvAction::Delay,
+                        pkg,
+                        Some("rule_freeze"),
+                        Some(&hit.id),
+                    );
+                    self.freeze_now(pkg, now, "rule");
+                    return;
+                }
+                // suppress / discard 在退后台路径无动作（suppress 在 on_wakeup 消费；
+                // discard 在 tick 冻结集消费）——命中但动作不适用 → 落日志留痕
+                other => {
+                    logi!(
+                        "L3 规则命中但动作不适用（{}）: {} action={}",
+                        hit.id,
+                        pkg,
+                        other.as_str()
+                    );
+                }
+            }
         }
         if self.policy.is_forced(pkg) {
             self.freeze_now(pkg, now, "force");

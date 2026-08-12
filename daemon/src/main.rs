@@ -18,6 +18,7 @@ mod network;
 mod paths;
 mod policy;
 mod preset;
+mod rules;
 mod sock;
 mod state;
 mod toml;

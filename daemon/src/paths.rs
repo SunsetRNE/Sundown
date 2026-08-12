@@ -87,6 +87,9 @@ pub const PROBE_ABSTRACT_SOCK: &str = "sundown_probe";
 pub const POLICY_FILE: &str = "/data/adb/sundown/conf/policy.toml";
 /// 情景预设文件（action.toml；[presets."name"] 参数组，policy preset apply 内存切换）
 pub const ACTION_FILE: &str = "/data/adb/sundown/conf/action.toml";
+/// 声明式规则文件（rules.toml；[rules."id"] 规则段，B3 快速应对层；inotify 热加载，
+/// 解析失败保留旧表——App 设计缺陷写规则热修复，不重新编译 dex）
+pub const RULES_FILE: &str = "/data/adb/sundown/conf/rules.toml";
 /// 包→uid 映射表（root 可读，`pkg uid ...` 行式；冻结执行 uid 定位用）
 pub const PACKAGES_LIST: &str = "/data/system/packages.list";
 /// 冻结集持久化目录（v0.4.30-l3 补建：v0.4.29 起 persist 写盘一直失败——
@@ -101,7 +104,7 @@ pub const STATE_FROZEN_FILE: &str = "/data/adb/sundown/state/frozen.state";
 /// 由 paths::current_event_file() 动态解析。
 
 /// 守护进程版本（与 module.prop version 同步，策略见主 README「版本号策略」）
-pub const VERSION_NAME: &str = "0.4.57-l3";
+pub const VERSION_NAME: &str = "0.4.58-l3";
 /// 单调递增的发布号：service.sh readiness 校验依据（installed.json vs daemon.ready）
 /// daemon 二进制任何变更必须 +1（只加不改）
-pub const RELEASE_NO: u32 = 62;
+pub const RELEASE_NO: u32 = 63;

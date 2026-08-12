@@ -13,7 +13,7 @@ UPDATE_DIR="$SUNDOWN_DIR/update"
 PENDING_DIR="$UPDATE_DIR/pending"
 BACKUP_DIR="$UPDATE_DIR/backup"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.4.57-l3"
+VERSION="0.4.58-l3"
 
 # ---------- 工具函数 ----------
 
@@ -662,6 +662,28 @@ cmd_policy() {
     esac
 }
 
+cmd_rules() {
+    # B3 声明式规则引擎（v0.8-l3）管理（WebUI 规则页后端；经 daemon 管理面 socket）
+    #   rules list   -> 规则 id 列表（稳定排序 JSON）
+    #   rules status -> 规则数 / revision / 累计命中（JSON）
+    sub="${1:-status}"
+    case "$sub" in
+        list|status)
+            resp="$(sock_query "rules $sub")"
+            if [ -z "$resp" ]; then
+                echo "❌ daemon 未连接（socket 不可用），无法执行 rules $sub" >&2
+                return 1
+            fi
+            printf '%s\n' "$resp"
+            return 0
+            ;;
+        *)
+            echo "用法: sunctl rules list|status" >&2
+            return 2
+            ;;
+    esac
+}
+
 cmd_events() {
     # L3.1 结构化事件时间线（JSON 数组，最旧→最新；WebUI 日志页数据源升级的前置）
     #   events [行数=50] -> 最近 N 条（缺省 50；0 = 全部）
@@ -685,7 +707,7 @@ cmd_events() {
 
 CONF_DIR="$SUNDOWN_DIR/conf"
 EXPORT_TMP="$SUNDOWN_DIR/export.tmp"
-CONFIG_WHITELIST="META.txt conf/ conf/policy.toml conf/action.toml"
+CONFIG_WHITELIST="META.txt conf/ conf/policy.toml conf/action.toml conf/rules.toml"
 
 cmd_config_export() {
     # 用法: config export [目标路径]（缺省 /sdcard/Download/sundown-config-<时间戳>.tar）
@@ -694,8 +716,9 @@ cmd_config_export() {
     local found=0
     [ -f "$CONF_DIR/policy.toml" ] && { cp "$CONF_DIR/policy.toml" "$EXPORT_TMP/conf/"; found=1; }
     [ -f "$CONF_DIR/action.toml" ] && { cp "$CONF_DIR/action.toml" "$EXPORT_TMP/conf/"; found=1; }
+    [ -f "$CONF_DIR/rules.toml" ] && { cp "$CONF_DIR/rules.toml" "$EXPORT_TMP/conf/"; found=1; }
     if [ "$found" = "0" ]; then
-        echo "❌ 无任何配置文件（$CONF_DIR 下 policy.toml/action.toml 均不存在）" >&2
+        echo "❌ 无任何配置文件（$CONF_DIR 下 policy.toml/action.toml/rules.toml 均不存在）" >&2
         rm -rf "$EXPORT_TMP"; return 1
     fi
     # META 校验清单（导出版本/来源/时间/各文件 sha256——导入侧完整性校验）
@@ -703,7 +726,7 @@ cmd_config_export() {
         echo "export_version=1"
         echo "exported_by=Sundown $VERSION"
         echo "exported_at=$(date '+%F %T')"
-        for f in conf/policy.toml conf/action.toml; do
+        for f in conf/policy.toml conf/action.toml conf/rules.toml; do
             [ -f "$EXPORT_TMP/$f" ] && echo "sha256:$f=$(sha256sum "$EXPORT_TMP/$f" | cut -d' ' -f1)"
         done
     } > "$EXPORT_TMP/META.txt"
@@ -742,8 +765,8 @@ cmd_config_import() {
     # 2. 解压到临时目录
     rm -rf "$EXPORT_TMP"; mkdir -p "$EXPORT_TMP"
     ( cd "$EXPORT_TMP" && tar xf "$src" ) 2>/dev/null
-    if [ ! -f "$EXPORT_TMP/conf/policy.toml" ] && [ ! -f "$EXPORT_TMP/conf/action.toml" ]; then
-        echo "❌ 包内无有效配置（缺 conf/policy.toml 且缺 conf/action.toml）" >&2
+    if [ ! -f "$EXPORT_TMP/conf/policy.toml" ] && [ ! -f "$EXPORT_TMP/conf/action.toml" ] && [ ! -f "$EXPORT_TMP/conf/rules.toml" ]; then
+        echo "❌ 包内无有效配置（policy.toml / action.toml / rules.toml 均缺失）" >&2
         rm -rf "$EXPORT_TMP"; return 1
     fi
     # 3. META sha256 完整性校验
@@ -819,6 +842,8 @@ usage() {
   policy preset list     [L3] 情景预设列表 + 当前生效
   policy preset apply <n> [L3] 应用预设（内存覆盖 [general]，不动磁盘 policy.toml）
   policy preset clear    [L3] 清除预设（回落磁盘 policy.toml 参数）
+  rules list             [B3] 声明式规则引擎：规则 id 列表（JSON）
+  rules status           [B3] 声明式规则引擎：规则数 / revision / 累计命中（JSON）
   events [行数]          [L3.1] 结构化事件时间线（JSON；焦点/唤醒/冻结/豁免/握手）
   config export [路径]   [迁移] 导出配置压缩包（policy.toml + action.toml + sha256 校验清单）
   config import <路径>   [迁移] 导入配置压缩包（白名单校验 → 完整性校验 → 备份 → 热加载）
@@ -843,6 +868,7 @@ case "$1" in
     restart-runtime) shift; cmd_restart_runtime "$@" ;;
     reload-probe)    cmd_reload_probe ;;
     policy)          shift; cmd_policy "$@" ;;
+    rules)           shift; cmd_rules "$@" ;;
     events)          shift; cmd_events "$@" ;;
     config)          shift; cmd_config "$@" ;;
     apply-update)    shift; cmd_apply_update "$@" ;;
