@@ -131,7 +131,7 @@ pub fn probe(net_source: String) -> Capability {
     Capability {
         freezer,
         cgroup_v2,
-        freezer_uid_path: if uid_ok { Some(uid_path) } else { None },
+        freezer_uid_path: uid_path,
         freezer_pid_path: pid_path,
         freezer_v1_path: if v1_ok { Some(v1_state.to_string()) } else { None },
         madvise_willneed,
