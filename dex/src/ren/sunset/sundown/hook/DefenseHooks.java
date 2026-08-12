@@ -171,9 +171,14 @@ public final class DefenseHooks implements HookEngine {
         // 1. ANR 流程上游阻断（直击"点击无响应→闪退"）
         list.add(Registry.entry("def.anr", ANR_HELPER, null, "appNotResponding",
                 "onAppNotResponding", false, "冻结 uid 阻断 ANR 判定"));
-        // 2. ANR stack 转储 firstPids 剔除冻结 pid（A13+ ProcessList，AMS 兜底）
-        list.add(Registry.entry("def.stack-dump", PROCESS_LIST, AMS, "dumpStackTraces",
+        // 2. ANR stack 转储 firstPids 剔除冻结 pid（A13+ ProcessList，AMS 兜底）——
+        //    双条目（非 critical）：原代码按方法名探测二选一，注册表 fallbackHost 只
+        //    覆盖"类找不到"，故拆两条目（v0.4.62-l3 实机校准：ColorOS ProcessList 类在
+        //    但 dumpStackTraces 方法不存在 → def.stack-dump-pl 跳过，AMS 条目兜底）
+        list.add(Registry.entry("def.stack-dump-pl", PROCESS_LIST, null, "dumpStackTraces",
                 "onDumpStackTraces", false, "firstPids 剔除冻结 pid"));
+        list.add(Registry.entry("def.stack-dump-ams", AMS, null, "dumpStackTraces",
+                "onDumpStackTraces", false, "firstPids 剔除冻结 pid（AMS 兜底）"));
         // 3. Service 超时豁免（冻结 app 不判 ANR）
         list.add(Registry.entry("def.service-timeout", ACTIVE_SERVICES, null, "serviceTimeout",
                 "onServiceTimeout", false, "冻结 app 的 service 超时不判 ANR"));

@@ -12,7 +12,7 @@
 ### 验证
 - cargo test 90/90（+0：纯协议/观测面收尾，无新决策分支）
 - 版本号 v0.4.61-l3→v0.4.62-l3（release 66→67，versionCode 71→72）三处同步：paths.rs / module.prop / sunctl
-- **实机验证（2026-08-12）**：待热更新后补充
+- **实机验证（2026-08-12）**：daemon 热替换 release 67 + root/模块双侧 probe.dex 同步（64512→67760B，hash=c0fc580→fac8460）+ reload-probe 换代成功（dex 握手 version=fac8460）；**B2 subscribe 声明生效**（daemon 日志 "dex 订阅更新 (id=3): kinds=frozen-sync,candidate-sync,dex-push"）；**B4 capability-probe 上报生效**（daemon 日志 "dex ROM 能力探测上报" + `sunctl capability dex-probe` 19 项矩阵在线，实证 ColorOS 差异：ProcessList.dumpStackTraces 不存在、PESR 类不存在、freezeAppAsyncLSP=true、OplusHansProxyManager.isProxyed=true 等）；**实机校准修复**：def.stack-dump 拆双条目（PL 类在方法不在 → AMS 条目兜底，恢复原方法名探测语义，软发布覆盖 asset）
 
 ---
 ## v0.4.61-l3 (2026-08-12)

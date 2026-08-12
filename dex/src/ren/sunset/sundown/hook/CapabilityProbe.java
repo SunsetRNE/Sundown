@@ -30,6 +30,7 @@ public final class CapabilityProbe {
             // ---- AOSP 基座（Android 16 标准类） ----
             {"com.android.server.am.AnrHelper", "appNotResponding"},
             {"com.android.server.am.ProcessList", "dumpStackTraces"},
+            {"com.android.server.am.ActivityManagerService", "dumpStackTraces"},
             {"com.android.server.am.ActivityManagerService", "checkExcessivePowerUsageLPr"},
             {"com.android.server.am.ActiveServices", "serviceTimeout"},
             {"com.android.server.am.ProcessRecord$ProcessErrorStateRecord", "appNotResponding"},
