@@ -65,22 +65,53 @@ pub fn probe(net_source: String) -> Capability {
     let cgroup_v2 = std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists();
 
     // ---- v2 uid 级 / pid 级路径探测 ----
-    let apps_base = format!("/sys/fs/cgroup/apps/uid_{}", PROBE_UID);
-    let uid_path = format!("{}/cgroup.freeze", apps_base);
-    let uid_ok = std::path::Path::new(&uid_path).exists();
+    // 实机教训（v0.4.59-l3 首测）：uid_10000 不一定存在（ColorOS 从 uid_10066 起，
+    // 10000-10065 无安装应用即无目录）。改为枚举 apps/ 下**第一个存在的 uid_* 目录**
+    // （任何设备只要有 app 运行即存在），探测零副作用且覆盖真实冻结路径。
+    let apps_base = "/sys/fs/cgroup/apps";
+    let mut uid_path: Option<String> = None;
     let mut pid_path: Option<String> = None;
-    if let Ok(rd) = std::fs::read_dir(&apps_base) {
-        for entry in rd.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if !name.starts_with("pid_") {
-                continue;
-            }
-            let p = entry.path().join("cgroup.freeze");
-            if p.exists() {
-                pid_path = Some(p.to_string_lossy().to_string());
+    if let Ok(rd) = std::fs::read_dir(apps_base) {
+        let mut uid_dirs: Vec<String> = rd
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("uid_") {
+                    Some(e.path().to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        uid_dirs.sort(); // 稳定取最小 uid（首个 app uid）
+        for dir in uid_dirs {
+            let fp = format!("{}/cgroup.freeze", dir);
+            if std::path::Path::new(&fp).exists() {
+                uid_path = Some(fp);
+                // pid 级：同 uid 目录下 pid_* 子目录的 cgroup.freeze
+                if let Ok(sub) = std::fs::read_dir(&dir) {
+                    for entry in sub.flatten() {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        if name.starts_with("pid_") {
+                            let p = entry.path().join("cgroup.freeze");
+                            if p.exists() {
+                                pid_path = Some(p.to_string_lossy().to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
                 break;
             }
+        }
+    }
+    // 兜底：PROBE_UID 路径（无 app 运行的环境——cgroup 残留目录可能仍存在）
+    if uid_path.is_none() {
+        let fp = format!("/sys/fs/cgroup/apps/uid_{}/cgroup.freeze", PROBE_UID);
+        if std::path::Path::new(&fp).exists() {
+            uid_path = Some(fp);
         }
     }
 
@@ -89,7 +120,7 @@ pub fn probe(net_source: String) -> Capability {
     let v1_ok = std::path::Path::new(v1_state).exists();
 
     // ---- freezer 层级判定（纯函数 classify，可单测） ----
-    let freezer = classify(cgroup_v2, uid_ok, pid_path.is_some(), v1_ok);
+    let freezer = classify(cgroup_v2, uid_path.is_some(), pid_path.is_some(), v1_ok);
 
     // ---- process_madvise(MADV_WILLNEED) 支持（对自身进程实测；失败 = 不支持） ----
     // 复用 freezer.rs 既有 syscall 封装（pidfd_open 434 / process_madvise 440）；
