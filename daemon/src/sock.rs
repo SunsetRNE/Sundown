@@ -302,6 +302,14 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>, mgmt: bool) -> std::
                 handle_capability(&state, arg)
             }
         }
+        // ---- C1 使用画像（v0.8-l3）：profile top | profile summary | profile get <pkg> ----
+        "profile" => {
+            if !mgmt {
+                "{\"ok\":0,\"error\":\"profile is management-channel only\"}".to_string()
+            } else {
+                handle_profile(&state, arg)
+            }
+        }
         "stop" => {
             logi!("收到 stop 命令，优雅退出");
             writer.write_all(b"{\"ok\":1,\"stopping\":1}\n")?;
@@ -879,6 +887,94 @@ fn handle_capability(state: &DaemonState, arg: &str) -> String {
                 net = cap.net_source,
                 ws = ws,
                 probed = cap.probed_at,
+            )
+        }
+    }
+}
+
+/// C1（v0.8-l3）profile 子命令（仅 root 管理面）：
+///   profile top [n]      -> 按唤醒次数降序 TOP n（缺省 10；"疯狂唤醒者"识别输入）
+///   profile summary      -> 总览（app 数 / 总唤醒 / 总冻结）
+///   profile get <pkg>    -> 单 app 画像（前台时长/冻结/唤醒+源分布/丢弃）
+fn handle_profile(state: &DaemonState, arg: &str) -> String {
+    let mut parts = arg.splitn(2, ' ');
+    let sub = parts.next().unwrap_or("summary");
+    let rest = parts.next().unwrap_or("").trim();
+    let eng = state.engine.lock().unwrap();
+    match sub {
+        "top" => {
+            let n: usize = rest.parse().unwrap_or(10);
+            let items: Vec<String> = eng
+                .profile
+                .top_wakeups(n)
+                .iter()
+                .map(|(pkg, p)| {
+                    format!(
+                        "{{\"pkg\":\"{}\",\"wakeups\":{},\"freezes\":{},\"focus_ms\":{}}}",
+                        pkg, p.wakeup_count, p.freeze_count, p.focus_ms
+                    )
+                })
+                .collect();
+            format!(
+                "{{\"ok\":1,\"count\":{},\"top\":[{}]}}",
+                items.len(),
+                items.join(",")
+            )
+        }
+        "get" => {
+            if rest.is_empty() {
+                return "{\"ok\":0,\"error\":\"profile get <pkg>\"}".to_string();
+            }
+            let Some(p) = eng.profile.get(rest) else {
+                return format!(
+                    "{{\"ok\":0,\"error\":\"profile not found: {}\"}}",
+                    rest
+                );
+            };
+            let ws = p
+                .wakeup_sources
+                .iter()
+                .map(|(k, v)| format!("\"{}\":{}", k, v))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                concat!(
+                    "{{\"ok\":1,",
+                    "\"pkg\":\"{pkg}\",",
+                    "\"focus_count\":{fc},",
+                    "\"focus_ms\":{fms},",
+                    "\"freeze_count\":{fz},",
+                    "\"unfreeze_count\":{uf},",
+                    "\"discard_count\":{dc},",
+                    "\"wakeup_count\":{wc},",
+                    "\"wakeup_sources\":{{{ws}}},",
+                    "\"first_seen_at\":{first},",
+                    "\"last_seen_at\":{last},",
+                    "\"last_focus_at\":{lf},",
+                    "\"last_freeze_at\":{lfr}",
+                    "}}"
+                ),
+                pkg = rest,
+                fc = p.focus_count,
+                fms = p.focus_ms,
+                fz = p.freeze_count,
+                uf = p.unfreeze_count,
+                dc = p.discard_count,
+                wc = p.wakeup_count,
+                ws = ws,
+                first = p.first_seen_at,
+                last = p.last_seen_at,
+                lf = p.last_focus_at,
+                lfr = p.last_freeze_at,
+            )
+        }
+        _ => {
+            // 缺省 = summary
+            format!(
+                "{{\"ok\":1,\"apps\":{},\"total_wakeups\":{},\"total_freezes\":{}}}",
+                eng.profile.app_count(),
+                eng.profile.total_wakeups(),
+                eng.profile.total_freezes()
             )
         }
     }

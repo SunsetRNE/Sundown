@@ -18,6 +18,7 @@ use crate::network::{NetSampler, DEFAULT_THRESHOLD, DEFAULT_WINDOW};
 use crate::policy::{AppMode, Policy, PushMode};
 use crate::preset::{Preset, PresetTable};
 use crate::rules::{RuleAction, RuleCondition, RuleTable};
+use crate::profile::ProfileTable;
 use crate::{logi, logw};
 
 /// 每个包最近一次 focus 事件的豁免判定字段
@@ -106,6 +107,8 @@ pub struct EngineState {
     /// B4（v0.8-l3）：唤醒源统计基线（on_wakeup 入口按 source 聚合；
     /// capability status 导出——诊断"哪种唤醒源在骚扰"，写规则的依据面）
     pub wakeup_sources: std::collections::HashMap<String, u64>,
+    /// C1（v0.8-l3）：使用画像采集（per-app 聚合；引擎事件入口旁路，零新增采集）
+    pub profile: ProfileTable,
 }
 impl Default for EngineState {
     fn default() -> Self {
@@ -144,6 +147,7 @@ impl Default for EngineState {
             rules: RuleTable::default(),
             rule_hits: 0,
             wakeup_sources: std::collections::HashMap::new(),
+            profile: ProfileTable::default(),
         }
     }
 }
@@ -160,7 +164,8 @@ impl EngineState {
     /// 进入 grace）。exempt 表只由 on_exempt 维护。
     pub fn on_focus(&mut self, pkg: &str, _fg: bool, _media: bool) {
         let now = Instant::now();
-
+        // C1（v0.8-l3）：使用画像——新前台进入（零新增采集，引擎事件旁路）
+        self.profile.on_focus(pkg);
         // 新前台冻结中 → 解冻 + 冷却
         let was_frozen = self.frozen.remove(pkg).is_some();
         if was_frozen {
@@ -170,6 +175,8 @@ impl EngineState {
             if freezer::unfreeze_pkg_keep_oom(pkg) {
                 self.unfreeze_ops += 1;
                 self.adj_keep.insert(pkg.to_string());
+                // C1：决策驱动解冻（前台）
+                self.profile.on_unfreeze(pkg);
                 logi!("L3 前台解冻: {}（解冻累计 {}）", pkg, self.unfreeze_ops);
                 self.events.push_app(
                     EvLevel::Event,
@@ -196,6 +203,8 @@ impl EngineState {
                 if freezer::uid_has_frozen_procs(uid) && freezer::unfreeze_pkg_keep_oom(pkg) {
                     self.unfreeze_ops += 1;
                     self.adj_keep.insert(pkg.to_string());
+                    // C1：前台触发的兜底解冻（用户可见语义，计入画像）
+                    self.profile.on_unfreeze(pkg);
                     logw!("L3 前台兜底解冻（残留冻结）: {}", pkg);
                     self.events.push_app(
                         EvLevel::Warn,
@@ -214,6 +223,8 @@ impl EngineState {
         // 旧前台离开决策
         if let Some(prev) = self.last_focus.clone() {
             if prev != pkg {
+                // C1：旧前台焦点离开（前台时长累计）
+                self.profile.on_leave(&prev);
                 self.decide_leave(&prev, now);
             }
         }
@@ -238,6 +249,8 @@ impl EngineState {
         // B4（v0.8-l3）：唤醒源统计基线（入口处聚合——含 keep_wakeup=false 的忽略事件，
         // 语义 = "到达 daemon 的全部唤醒"基线，诊断骚扰源完整视图）
         *self.wakeup_sources.entry(source.to_string()).or_insert(0) += 1;
+        // C1（v0.8-l3）：使用画像——per-app 唤醒聚合（源分布，写规则依据面）
+        self.profile.on_wakeup(pkg, source);
         if !self.keep_wakeup(pkg) {
             logi!("L3 唤醒忽略（keep_wakeup=false）: {}", pkg);
             self.events.push_app(
@@ -353,6 +366,8 @@ impl EngineState {
                 self.unfreeze_ops += 1;
                 self.wakeup_thaws += 1;
                 self.adj_keep.insert(pkg.to_string());
+                // C1：决策驱动解冻（唤醒）
+                self.profile.on_unfreeze(pkg);
                 // v0.4.42-l3：节流窗口从"实际解冻"起算（仅当开启时记录）
                 if throttle > 0 {
                     self.wake_throttle
@@ -1272,6 +1287,8 @@ impl EngineState {
         self.cooldown.remove(pkg);
         self.adj_keep.remove(pkg);
         self.discard_ops += 1;
+        // C1：使用画像——丢弃终态
+        self.profile.on_discard(pkg);
         match reason {
             "frozen_timeout" => self.discard_frozen_timeout += 1,
             "mem_watermark" => self.discard_mem_watermark += 1,
@@ -1825,6 +1842,8 @@ impl EngineState {
         if ok {
             self.frozen.insert(pkg.to_string(), now);
             self.freeze_ops += 1;
+            // C1：使用画像——冻结计数
+            self.profile.on_freeze(pkg);
             logi!("L3 冻结: {}（冻结累计 {}）", pkg, self.freeze_ops);
             self.events.push_app(
                 EvLevel::Success,

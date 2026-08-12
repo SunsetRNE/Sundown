@@ -6,7 +6,23 @@
 
 ---
 
-## v0.4.59-l3 (2026-08-12)
+## v0.4.60-l3 (2026-08-12)
+
+**C1 使用画像采集（C 档行为学习第一刀 · per-app 聚合）**
+
+### C 档 · P2 行为学习
+- **C1 使用画像采集**（新增 `daemon/src/profile.rs`，零新增采集——引擎事件入口旁路聚合）：
+  - per-app 画像：前台次数/前台累计时长（焦点进入→离开计时）、冻结/解冻/丢弃计数、唤醒总数 + 源分布（broadcast/service/pendingintent）、时间轴（first/last seen、last focus/freeze）
+  - **铁律**：纯内存聚合（不落盘——画像为诊断输入，审计走 events.jsonl 既有通道）；失败安全无 IO 面；未知包名照常建画像
+- **engine.rs 七处挂载点**：on_focus（进入 + 旧前台离开计时 + 两处解冻）、on_wakeup（入口聚合 + 解冻）、freeze_now 成功、discard_pkg 成功
+- **导出面**：sock.rs `profile` 命令（`top [n]` 唤醒 TOP / `summary` 总览 / `get <pkg>` 单 app 明细）；sunctl `profile top|summary|get` 子命令 + usage
+- C1 数据 → C2 分析建议输入（唤醒模式聚类 / "疯狂唤醒者"识别 / 节流与豁免建议——只建议不执行）
+
+### 验证
+- cargo test 84/84（原 79 + C1 新增 5 项：前台时长累计 / 唤醒计数+源分布 / 冻结解冻丢弃 / TOP 排序 / 事件丢失容忍）
+- 版本号 v0.4.59-l3→v0.4.60-l3（release 64→65，versionCode 69→70）三处同步：paths.rs / module.prop / sunctl
+
+---
 
 **B4 设备能力探测矩阵（缺口补入 B 档架构层 · 观测面）**
 

@@ -13,7 +13,7 @@ UPDATE_DIR="$SUNDOWN_DIR/update"
 PENDING_DIR="$UPDATE_DIR/pending"
 BACKUP_DIR="$UPDATE_DIR/backup"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.4.59-l3"
+VERSION="0.4.60-l3"
 
 # ---------- 工具函数 ----------
 
@@ -706,6 +706,30 @@ cmd_capability() {
     esac
 }
 
+cmd_profile() {
+    # C1 使用画像（v0.8-l3）管理（WebUI 画像页后端；经 daemon 管理面 socket）
+    #   profile top [n]    -> 按唤醒次数降序 TOP n（缺省 10；"疯狂唤醒者"识别输入）
+    #   profile summary    -> 总览（app 数 / 总唤醒 / 总冻结）
+    #   profile get <pkg>  -> 单 app 画像（前台时长/冻结/唤醒+源分布/丢弃）
+    sub="${1:-summary}"
+    case "$sub" in
+        top|summary|get)
+            shift
+            resp="$(sock_query "profile $sub $*")"
+            if [ -z "$resp" ]; then
+                echo "❌ daemon 未连接（socket 不可用），无法执行 profile $sub" >&2
+                return 1
+            fi
+            printf '%s\n' "$resp"
+            return 0
+            ;;
+        *)
+            echo "用法: sunctl profile top [n]|summary|get <pkg>" >&2
+            return 2
+            ;;
+    esac
+}
+
 cmd_events() {
     # L3.1 结构化事件时间线（JSON 数组，最旧→最新；WebUI 日志页数据源升级的前置）
     #   events [行数=50] -> 最近 N 条（缺省 50；0 = 全部）
@@ -868,6 +892,9 @@ usage() {
   rules status           [B3] 声明式规则引擎：规则数 / revision / 累计命中（JSON）
   capability status     [B4] 设备能力矩阵（freezer 层级/madvise/网络源/唤醒源基线）
   capability reprobe    [B4] 重新探测能力矩阵
+  profile top [n]       [C1] 使用画像：按唤醒次数降序 TOP n（缺省 10）
+  profile summary       [C1] 使用画像：总览（app 数/总唤醒/总冻结）
+  profile get <pkg>     [C1] 使用画像：单 app 明细
   events [行数]          [L3.1] 结构化事件时间线（JSON；焦点/唤醒/冻结/豁免/握手）
   config export [路径]   [迁移] 导出配置压缩包（policy.toml + action.toml + sha256 校验清单）
   config import <路径>   [迁移] 导入配置压缩包（白名单校验 → 完整性校验 → 备份 → 热加载）
@@ -894,6 +921,7 @@ case "$1" in
     policy)          shift; cmd_policy "$@" ;;
     rules)           shift; cmd_rules "$@" ;;
     capability)      shift; cmd_capability "$@" ;;
+    profile)         shift; cmd_profile "$@" ;;
     events)          shift; cmd_events "$@" ;;
     config)          shift; cmd_config "$@" ;;
     apply-update)    shift; cmd_apply_update "$@" ;;
