@@ -23,6 +23,8 @@
 ### 验证
 - cargo test 76/76（原 65 + B3 新增 11 项：解析 2 / 缺 action 1 / 匹配 3 / priority 1 / throttle 1 / expires 1 / date 1 / 通配 1——修复 3 项测试自身断言/数据问题：未知 action 剔除语义、同优先级定义顺序、throttle 通配隔离）
 - 版本号 v0.4.57-l3→v0.4.58-l3（release 62→63，versionCode 67→68）三处同步：paths.rs / module.prop / sunctl
+- **实机热更新上线（2026-08-12）**：daemon 热替换 release 62→63（PID 16741，六位一体闭环保持：dex 上报 c0fc580 / hook a001f80 均 match=1）+ 设备端 sunctl 同步 0.4.58-l3（rules 子命令上线）
+- **规则引擎端到端验证（实机）**：`sunctl rules status/list` 正常；写入测试规则（expires_at 过期 + 不存在包，零风险）→ 8s 内自动热加载 count=1 / revision=mtime / events 留痕 rules_reloaded ×3；恢复默认空表回落 count=0（热加载 + 失败安全链路实测通过）
 
 ---
 
