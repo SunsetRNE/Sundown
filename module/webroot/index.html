@@ -482,7 +482,7 @@
         <button class="btn" id="btn-reload-probe">🚀 热更新探针</button>
         <button class="btn" id="btn-restart-daemon">♻️ 重启守护进程</button>
         <button class="btn danger" id="btn-restart-runtime">⚡ 软重启运行时</button>
-        <button class="btn primary" id="btn-check-update">⬆️ 检查并升级（Nightly）</button>
+        <button class="btn primary" id="btn-check-update">⬆️ 检查并升级</button>
       </div>
     </div>
 
@@ -1200,8 +1200,8 @@ function init() {
     setTimeout(() => { refreshDash(); refreshMore(); }, 1500);
   };
   $("btn-check-update").onclick = async () => {
-    if (!confirm("将下载最新 Nightly 模块包并暂存（staged）。\n重启设备后自动激活，失败自动回滚。\n\n确认下载？")) return;
-    toast("正在检查并下载 Nightly 更新…（需网络）");
+    if (!confirm("将下载最新正式版模块包并暂存（staged）。\n重启设备后自动激活，失败自动回滚。\n\n确认下载？")) return;
+    toast("正在检查并下载最新正式版…（需网络）");
     const r = await exec(SUNCTL + " apply-update");
     const out = ((r.stdout || "") + (r.stderr || "")).trim();
     if (r.errno === 0 && /✅|已暂存|staged/.test(out)) {

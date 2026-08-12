@@ -2,8 +2,8 @@
 
 **日落而息 · 墓碑调度** — by SunsetREN
 
-> **当前阶段：`v0.4.55-l3`（sundownd release 60，versionCode 65）**
-> L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅ ｜ 单元测试 **55/55** ✅ ｜ AStop 差距矩阵 **P0/P1/P2 全阶段完成** ✅
+> **当前阶段：`v0.4.62-l3`（sundownd release 67，versionCode 72）**
+> L0 ✅ ｜ L1 ✅ ｜ L2 ✅ ｜ L2b ✅ ｜ L3 ✅ ｜ 单元测试 **90/90** ✅ ｜ AStop 差距矩阵 **P0/P1/P2 全阶段完成** ✅
 > 发布默认观望模式（`[general] enabled=false`），冻结与超时丢弃功能待真机确认后开启。
 
 面向 KernelSU 系的 Android 墓碑（应用冻结）调度模块。从 AStop/Cerberus 演进而来：
@@ -13,10 +13,10 @@
 
 ```sh
 # 构建 L0 daemon（仅依赖 libc，release 体积优化）
-cd daemon && cargo test && cargo build --release      # 55/55
+cd daemon && cargo test && cargo build --release      # 90/90
 cargo build --release --target aarch64-linux-android  # 设备产物（交叉编译，NDK r29 sysroot）
 
-# 真机安装：KSU 管理器刷入 CI Nightly 产出的 sundown-<version>.zip（唯一分发渠道）
+# 真机安装：KSU 管理器刷入 CI 正式 Release 产出的 sundown-<version>.zip（唯一分发渠道）
 
 # 常用控制命令（sunctl，完整规范见 docs/sunctl-spec.md）
 sunctl status                 # 状态总览（含超时丢弃四行观测）
@@ -24,7 +24,7 @@ sunctl events [n]             # 结构化事件（环形 256，JSON 行）
 sunctl logs --times           # 各版本 install-time（刷入）与 effective-since（实际生效）
 sunctl logs --list            # 日志归档一览（logs/<版本>/<日期>/ 目录）
 sunctl policy preset list     # 情景预设（内存切换不动磁盘）
-sunctl apply-update [zip|URL] # Nightly 热更新暂存 → --activate 激活（失败自动回滚）
+sunctl apply-update [zip|URL] # 正式 Release 热更新暂存 → --activate 激活（失败自动回滚）
 sunctl hotswap <二进制> [meta] # 受控热换 daemon（架构判定/防降级/原子替换/回滚）
 sunctl restart-daemon         # daemon 重启（L0 生效路径，无需软重启 zygote）
 ```
@@ -88,7 +88,7 @@ module.prop `v0.4.55-l3`/versionCode=65 ＝ paths.rs `0.4.55-l3`/RELEASE_NO=60 �
 
 | 阶段 | 版本 | 关键里程碑 |
 |---|---|---|
-| L0 | v0.1.0-l0 → v0.1.1-l0 | 命名规范定稿；模块骨架改名（AStop/Cerberus → Sundown）；sunctl + WebUI L0；sundownd Rust 最小实现；CI + Nightly 滚动 Release；daemon 真机冒烟（uptime 7.8h+） |
+| L0 | v0.1.0-l0 → v0.1.1-l0 | 命名规范定稿；模块骨架改名（AStop/Cerberus → Sundown）；sunctl + WebUI L0；sundownd Rust 最小实现；CI 发布链路（当时为 Nightly 滚动 Release，v0.4.56-l3 起改正式 Release）；daemon 真机冒烟（uptime 7.8h+） |
 | L1 | v0.2.0-l1 → v0.2.2-l1 | libsunprobe.so 桩工程化（hello-probe hash 握手 + dex 加载桥）；真机注入实证 + hash 四位一体闭环；abstract socket 同秒握手根治 /data/adb DAC EACCES |
 | L2 | v0.3.0-l2 → v0.3.2-l2 | probe.dex 工程化（ProbeMain 契约 + DaemonLink 帧纪律 + Runtime 代际 + LSPlant 降级桥）；hello-dex/fetch-dex/push-dex 协议 + magic-mount 冷启动兜底；L2b bridge C++ 五机制出口 + FocusHooks/WakeupHooks 真实 hook + EventQueue 非阻塞上行 |
 | L3 策略底座 | v0.4.0-l3 → v0.4.7-l3 | 策略引擎渐进交付；cgroup freezer 冻结执行链；L2b 真机回归（四位一体 hash 全绿） |
@@ -193,7 +193,7 @@ Sundown/
 
 - 分层语义：L0→`v0.1.0-l0`，L1→`v0.2.0-l1`，L2→`v0.3.0-l2`，L3→`v0.4.0-l3`；正式版从 `v1.0.0` 起去阶段后缀
 - 阶段内修复/迭代走 patch 位；跨阶段才动次版本号
-- CI 防呆校验：三处版本不一致则构建失败；Nightly 渠道永远只保留最新一个 zip
+- CI 防呆校验：三处版本不一致则构建失败；每个版本在 Release 与 CHANGELOG 留档（同版本重复构建覆盖 asset 软发布）
 
 ## 构建与测试
 
@@ -203,7 +203,7 @@ cargo test          # 46/46（42 基线 + discard_parse/frozen_timeout/mem_water
 cargo build --release   # sundownd <version> (release_no N)，529KB，仅依赖 libc
 ```
 
-- CI（GitHub Actions）：push 即构建全部层 → 打包模块 zip → Nightly 滚动 Release 自动发布 `sundown-<version>.zip`
+- CI（GitHub Actions）：push 即构建全部层 → 打包模块 zip → 自动发布正式 Release `sundown-<version>.zip`（tag = 版本号，非 prerelease）
 - 本地 `daemon/target/release/sundownd` 为本地构建产物；模块内 `system/bin/sundownd` 为占位符，CI 打包时注入真实产物
 
 ## 待办（后置）

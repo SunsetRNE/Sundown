@@ -369,6 +369,12 @@ jobs:
       # v0.4.56-l3 起发布策略：不做 Nightly 测试版，每次 main push 构建成功即
       # 直接发布正式 Release（tag = 版本号），每个版本在 Release 与 CHANGELOG 留档。
       # 同版本多次构建 → 覆盖 asset（软发布）；版本号变更 → 新 tag 新 Release。
+      # 官方约束（GitHub REST API 2026-03-10 版）：若本次 push 的 commit 修改了
+      # .github/workflows/ 下文件，GITHUB_TOKEN 无权创建 Release（除非仓库管理员
+      # 开启 "Allow GitHub Actions to create and approve pull requests" 或换 PAT）。
+      # 遇此情况该次发布会失败，属 GitHub 安全限制，重跑或手动补发即可。
+      # 官方 README 推荐 tag 触发（github.ref_type == 'tag'）；本项目采用 push main
+      # 直接发布正式 Release（既定策略，CHANGELOG 防呆保证留档），语义等同且已验证。
 
       - name: CHANGELOG 版本条目防呆（每个版本必须留档）
         run: |

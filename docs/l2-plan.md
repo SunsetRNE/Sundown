@@ -105,7 +105,7 @@ dex/
 ## 7. 验证与推送
 
 - 本地：`cargo check`（daemon 全量）+ javac/d8 全链路本地编译 probe.dex（SDK 已在手）
-- CI：push 后三 job 绿 + Nightly zip 含 probe.dex
+- CI：push 后三 job 绿 + 正式 Release zip 含 probe.dex
 - 版本闭环预期（真机下一步验证）：dex 上报版本 = 模块 probe.dex.hash = CI commit = git HEAD
 - 推送：`git push origin main`（SSH 走 ssh.github.com:443，密钥已就位，全程不读密钥内容）
 

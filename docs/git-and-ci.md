@@ -13,7 +13,7 @@
 ```
 push → build-daemon (rustup + cargo-ndk 交叉编译 aarch64, API 30)
      → package-module (注入二进制 → 修权限 → zip 打包)
-     → Nightly 滚动 Release（单层 zip，主下载渠道）
+     → 正式 Release（tag = 版本号，单层 zip，主下载渠道）
      → Artifact 留档（套娃 zip，仅 CI 调试用）/ 手动建 Release 时自动附加 zip
 ```
 
@@ -58,14 +58,15 @@ git push -u origin main
 
 ### 发布版本
 
-日常构建无需任何操作：push main 后 CI 自动滚动更新 **Nightly 预发布**
-（`releases/tag/nightly`，asset 为单层模块 zip，KSU 直接刷入）。
+日常构建无需任何操作：push main 后 CI 构建成功即自动发布**正式 Release**
+（tag = 版本号，非 prerelease，asset 为单层模块 zip，KSU 直接刷入）。
 
 ```sh
-# 正式发版（方式一，推荐）：网页上 Draft Release → 选 tag（如 v0.1.0-l0）→ 发布
+# 正式发版（自动）：push main → CI 构建成功 → 自动创建/更新 Release（v0.4.56-l3 起）
+# 手动补发（可选）：网页上 Draft Release → 选已有 tag（如 v0.4.62-l3）→ 发布
 #   workflow 的 release 事件触发，自动把模块 zip 附加到 Release
-# 方式二：命令行（需 gh）
-gh release create v0.1.0-l0 --title "Sundown v0.1.0-l0" --notes "L0 首个构建"
+# 或命令行（需 gh）
+gh release create v0.4.62-l3 --title "Sundown v0.4.62-l3" --notes "补发"
 ```
 
 ## 备选路线：Termux 本机编译（无网络/离线路线）
@@ -92,7 +93,7 @@ cp target/release/sundownd ../module/system/bin/sundownd
 | 改代码/文档 | 工作区 `Sundown/`（Operit 附着工作区直接编辑） |
 | 提交 | 工作区仓库（已 init，身份已配）或同步到 Termux 后提交 |
 | 编译验证 | push 到 GitHub → Actions（主力）；或 Termux cargo build（应急） |
-| 真机刷入 | Nightly Release 下载单层模块 zip → KSU 管理器本地安装 |
+| 真机刷入 | Releases 页下载正式 Release 的单层模块 zip → KSU 管理器本地安装 |
 
 ### Artifact 产物形态（半成品留档，非下载入口）
 
@@ -111,12 +112,13 @@ libsunprobe-arm64-v8a.zip   ← artifact 容器
 - artifact 机制是 CI 隔离 job 之间传递文件的唯一通道，上传步骤**不可删**
   （删了 package-module 拿不到二进制）；但**用户永远不需要下载它们**
 - 模块 zip **不上传 artifact**（曾经上传过，因下载强制双层套娃已移除）
-- **唯一下载入口：Nightly 滚动 Release**（每次 push main 自动更新，asset 为单层 zip，
+- **唯一下载入口：正式 Release**（每次 push main 构建成功自动发布，asset 为单层 zip，
   上述半成品已全部打包在内）：
-  `https://github.com/SunsetRNE/Sundown/releases/tag/nightly`
+  `https://github.com/SunsetRNE/Sundown/releases`
   - 必须在 **Releases** 页下载（Assets 里的模块 zip）；**Tags 页的 zip/tar.gz 是源码快照，不可刷**
-  - tag 由 CI 强制移动，始终指向最新构建 commit（与 asset 内 `probe.hash` 一致）
-- 正式发版手动建 Release（tag 如 v0.1.0-l0），同样单层
+  - tag = 版本号（v0.4.56-l3 起），指向对应构建 commit（与 asset 内 `probe.hash` 一致）
+  - 同版本重复构建 → 覆盖 asset（软发布），版本号变更 → 新 tag 新 Release
+- 历史遗留：v0.4.55-l3 及更早为 Nightly 滚动 Release（releases/tag/nightly，已废弃清理）
 
 ## 边界
 
