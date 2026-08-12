@@ -456,7 +456,24 @@
     </div>
   </section>
 
-  <!-- ============ Tab 4 更多 ============ -->
+  <!-- ============ Tab 4 画像（C1 画像 + C2 分析建议） ============ -->
+  <section id="page-profile" class="page">
+    <div class="card">
+      <h2>🧠 行为画像 · 分析建议</h2>
+      <div class="stat-row" id="profile-stats">
+        <div class="stat-cell focus"><div class="num" id="pf-total">-</div><div class="lab">建议</div></div>
+        <div class="stat-cell err"><div class="num" id="pf-warn">-</div><div class="lab">警告</div></div>
+        <div class="stat-cell wake"><div class="num" id="pf-info">-</div><div class="lab">提示</div></div>
+      </div>
+      <div class="btn-group">
+        <button class="btn" id="btn-profile-refresh">🔄 重新分析</button>
+      </div>
+      <p class="desc">数据源：`sunctl analyze`（C1 使用画像 → C2 分析建议，仅建议不自动执行）。<br>点击建议卡片展开手工动作指引（rules.toml / policy.toml）。</p>
+      <div id="profile-box"><span class="empty">加载中…</span></div>
+    </div>
+  </section>
+
+  <!-- ============ Tab 5 更多 ============ -->
   <section id="page-more" class="page">
     <div class="card">
       <h2>ℹ️ 关于</h2>
@@ -493,7 +510,7 @@
       <div class="kv"><span class="k">L2b 桥 hash</span><span class="v mono" id="m-bridge-hash">-</span></div>
     </div>
 
-    <div class="foot-note">Sundown by SunsetREN · WebUI v2.4</div>
+    <div class="foot-note">Sundown by SunsetREN · WebUI v2.5</div>
   </section>
 </main>
 
@@ -501,6 +518,7 @@
   <button class="tab active" data-page="dash"><span class="ico">🌇</span><span>仪表盘</span></button>
   <button class="tab" data-page="policy"><span class="ico">⚙️</span><span>策略</span></button>
   <button class="tab" data-page="logs"><span class="ico">📜</span><span>日志</span></button>
+  <button class="tab" data-page="profile"><span class="ico">🧠</span><span>画像</span></button>
   <button class="tab" data-page="more"><span class="ico">🧩</span><span>更多</span></button>
 </nav>
 
@@ -577,6 +595,7 @@ function showTab(page) {
   document.querySelectorAll(".tab").forEach(el => el.classList.toggle("active", el.dataset.page === page));
   if (page === "dash") { refreshDash(); }
   if (page === "policy") { refreshPolicyForm(); }
+  if (page === "profile") { refreshProfile(); }
   if (page === "logs") { refreshLogs(); startLogAuto(); }
   if (page === "more") { refreshMore(); }
   if (page !== "logs") stopLogAuto();
@@ -1137,6 +1156,47 @@ async function refreshEnv() {
   $("env-out").textContent = (r.stdout || "").trim() || (r.stderr || "无输出");
 }
 
+/* ================= 画像页（C1 画像 → C2 分析建议） ================= */
+const KIND_LABEL = {
+  wakeup_storm: "🌪️ 唤醒风暴",
+  source_pattern: "📡 源模式",
+  jitter: "🔀 冻结抖动",
+  exempt: "🛡️ 豁免建议",
+  throttle: "⏱️ 节流建议"
+};
+async function refreshProfile() {
+  const box = $("profile-box");
+  box.innerHTML = '<span class="empty">加载中…</span>';
+  const r = await exec(SUNCTL + " analyze");
+  let data = null;
+  try { data = JSON.parse(r.stdout || "{}"); } catch (e) { data = null; }
+  if (!data || !data.ok || !Array.isArray(data.suggestions)) {
+    box.innerHTML = '<span class="empty">❌ 分析失败（daemon 未连接或数据不足）：' + esc(r.stderr || r.stdout || "未知错误") + "</span>";
+    return;
+  }
+  const list = data.suggestions;
+  const warn = list.filter(s => s.level === "warn").length;
+  $("pf-total").textContent = list.length;
+  $("pf-warn").textContent = warn;
+  $("pf-info").textContent = list.length - warn;
+  if (list.length === 0) {
+    box.innerHTML = '<span class="empty">✅ 无建议——唤醒画像健康（或数据不足，继续采集）</span>';
+    return;
+  }
+  box.innerHTML = list.map((s, i) => {
+    const lv = s.level === "warn" ? "err" : "wake";
+    const kind = KIND_LABEL[s.kind] || s.kind || "建议";
+    const hint = (s.action_hint || "").replace(/</g, "&lt;").replace(/\n/g, "<br>");
+    return '<div class="log-card" data-i="' + i + '">' +
+      '<div class="log-line"><span class="lc-tag ' + lv + '">' + (s.level === "warn" ? "⚠️ 警告" : "💡 提示") + "</span>" +
+      '<span class="lc-tag">' + esc(kind) + "</span>" +
+      '<span class="lc-pkg">' + esc(s.pkg || "?") + "</span>" +
+      '<span class="lc-title">' + esc(s.title || "") + "</span></div>" +
+      '<div class="log-detail"><div>' + esc(s.detail || "") + "</div>" +
+      (hint ? '<div class="hint">📝 手工动作：<br>' + hint + "</div>" : "") + "</div></div>";
+  }).join("");
+}
+
 /* ================= 事件绑定 ================= */
 function init() {
   // Tab 导航
@@ -1183,6 +1243,12 @@ function init() {
   };
   $("log-search").oninput = () => { if (curPage === "logs") refreshLogs(); };
   $("log-copy").onclick = () => copyText(LOGS_RAW || "（暂无日志）");
+  // 画像
+  $("btn-profile-refresh").onclick = () => { refreshProfile(); toast("已重新分析"); };
+  $("profile-box").onclick = e => {
+    const card = e.target.closest(".log-card");
+    if (card) card.classList.toggle("open");
+  };
   // 更多
   $("btn-env").onclick = refreshEnv;
   $("btn-refresh").onclick = () => { refreshDash(); toast("已刷新"); };
