@@ -9,6 +9,7 @@
 //!   sundownd            前台运行（由 service.sh nohup 拉起）
 //!   sundownd --version  打印版本（含 release_no，供 staged 更新元数据生成）
 
+mod analyze;
 mod capability;
 mod config;
 mod engine;

@@ -310,6 +310,14 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>, mgmt: bool) -> std::
                 handle_profile(&state, arg)
             }
         }
+        // ---- C2 分析建议（v0.8-l3）：analyze —— 只建议不执行 ----
+        "analyze" => {
+            if !mgmt {
+                "{\"ok\":0,\"error\":\"analyze is management-channel only\"}".to_string()
+            } else {
+                handle_analyze(&state)
+            }
+        }
         "stop" => {
             logi!("收到 stop 命令，优雅退出");
             writer.write_all(b"{\"ok\":1,\"stopping\":1}\n")?;
@@ -978,6 +986,60 @@ fn handle_profile(state: &DaemonState, arg: &str) -> String {
             )
         }
     }
+}
+
+/// C2（v0.8-l3）analyze：画像快照 → 建议列表 JSON（只建议不执行）
+///   analyze -> {"ok":1,"count":N,"suggestions":[{level,kind,pkg,title,detail,action_hint}]}
+fn handle_analyze(state: &DaemonState) -> String {
+    let eng = state.engine.lock().unwrap();
+    let suggestions = crate::analyze::analyze(&eng.profile);
+    let items: Vec<String> = suggestions
+        .iter()
+        .map(|s| {
+            format!(
+                concat!(
+                    "{{\"level\":\"{level}\",",
+                    "\"kind\":\"{kind}\",",
+                    "\"pkg\":{pkg},",
+                    "\"title\":\"{title}\",",
+                    "\"detail\":\"{detail}\",",
+                    "\"action_hint\":\"{hint}\"",
+                    "}}"
+                ),
+                level = s.level,
+                kind = s.kind,
+                pkg = s
+                    .pkg
+                    .as_deref()
+                    .map(|p| format!("\"{}\"", p))
+                    .unwrap_or_else(|| "null".to_string()),
+                title = json_escape(&s.title),
+                detail = json_escape(&s.detail),
+                hint = json_escape(&s.action_hint),
+            )
+        })
+        .collect();
+    format!(
+        "{{\"ok\":1,\"count\":{},\"suggestions\":[{}]}}",
+        items.len(),
+        items.join(",")
+    )
+}
+
+/// JSON 字符串转义（复用 sock 层既有工具；无则内联最小实现）
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// report-bridge 应答：期望 hash 比对三态（1=匹配，0=不匹配，-1=无期望值可比）

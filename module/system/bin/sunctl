@@ -13,7 +13,7 @@ UPDATE_DIR="$SUNDOWN_DIR/update"
 PENDING_DIR="$UPDATE_DIR/pending"
 BACKUP_DIR="$UPDATE_DIR/backup"
 LOG_DIR="$SUNDOWN_DIR/logs"
-VERSION="0.4.60-l3"
+VERSION="0.4.61-l3"
 
 # ---------- 工具函数 ----------
 
@@ -730,6 +730,17 @@ cmd_profile() {
     esac
 }
 
+cmd_analyze() {
+    # C2 分析建议（v0.8-l3）：画像快照 → 建议列表（只建议不执行）
+    resp="$(sock_query "analyze")"
+    if [ -z "$resp" ]; then
+        echo "❌ daemon 未连接（socket 不可用），无法执行 analyze" >&2
+        return 1
+    fi
+    printf '%s\n' "$resp"
+    return 0
+}
+
 cmd_events() {
     # L3.1 结构化事件时间线（JSON 数组，最旧→最新；WebUI 日志页数据源升级的前置）
     #   events [行数=50] -> 最近 N 条（缺省 50；0 = 全部）
@@ -895,6 +906,7 @@ usage() {
   profile top [n]       [C1] 使用画像：按唤醒次数降序 TOP n（缺省 10）
   profile summary       [C1] 使用画像：总览（app 数/总唤醒/总冻结）
   profile get <pkg>     [C1] 使用画像：单 app 明细
+  analyze              [C2] 分析建议（唤醒风暴/源模式/抖动/节流/豁免——只建议不执行）
   events [行数]          [L3.1] 结构化事件时间线（JSON；焦点/唤醒/冻结/豁免/握手）
   config export [路径]   [迁移] 导出配置压缩包（policy.toml + action.toml + sha256 校验清单）
   config import <路径>   [迁移] 导入配置压缩包（白名单校验 → 完整性校验 → 备份 → 热加载）
@@ -922,6 +934,7 @@ case "$1" in
     rules)           shift; cmd_rules "$@" ;;
     capability)      shift; cmd_capability "$@" ;;
     profile)         shift; cmd_profile "$@" ;;
+    analyze)         cmd_analyze ;;
     events)          shift; cmd_events "$@" ;;
     config)          shift; cmd_config "$@" ;;
     apply-update)    shift; cmd_apply_update "$@" ;;
